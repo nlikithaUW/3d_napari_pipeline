@@ -1,0 +1,21 @@
+# Raw / derived microscopy data (too large for git; folder structure kept via .gitkeep)
+*.nd2
+*.tif
+*.tiff
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor/OS lock & temp files
+~$*
+.DS_Store
+Thumbs.db
+
+# Claude Code local config
+.claude/
+
+# Archives
+*.7z
+*.zip

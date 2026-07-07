@@ -1,0 +1,55 @@
+{
+  "pixel_size": {
+    "xy_um": 0.325,
+    "z_um": 0.4
+  },
+  "z_overrides": {},
+  "fret": {
+    "abt": 0.05338,
+    "dbt": 0.3769,
+    "G": 1.725,
+    "venus_thres": 100,
+    "leave_neg": false
+  },
+  "channels": [
+    {
+      "name": "FRET",
+      "role": "fret"
+    },
+    {
+      "name": "mClover",
+      "role": "clover"
+    },
+    {
+      "name": "mRuby",
+      "role": "ruby"
+    },
+    {
+      "name": "VE-Cadherin",
+      "role": "substrate"
+    },
+    {
+      "name": "Nuclei",
+      "role": "nuclei"
+    }
+  ],
+  "segmentation": {
+    "workflow": "3d",
+    "substrate_type": "vessel",
+    "substrate": {
+      "channels": [
+        "VE-Cadherin"
+      ]
+    },
+    "cell": {
+      "channels": [
+        "mClover"
+      ]
+    },
+    "adhesion": {
+      "channels": [
+        "mClover"
+      ]
+    }
+  }
+}

@@ -1,0 +1,24 @@
+name: image_analysis
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - scipy
+  - scikit-image
+  - tifffile
+  - zarr
+  - dask
+  - pandas
+  - matplotlib
+  - napari=0.6.0
+  - vispy=0.14.3
+  - pyqt
+  - pip:
+      - nd2
+      - scikit-learn
+      - joblib
+      # Optional GPU accel for windowed filters + isotropic resampling.
+      # Import failure on a non-GPU machine is caught -> CPU fallback.
+      - cupy-cuda12x

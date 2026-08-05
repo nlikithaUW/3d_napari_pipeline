@@ -129,10 +129,18 @@ def resample_fret_outputs(
     the resampled raw stack.
     """
     from .io import resample_volume
+    from . import gpu
     keys = ("fc_vol", "eff_vol", "force_vol")
 
     def _do(k: str):
         return k, resample_volume(fret_dict[k], src_zyx_um, target_um, order=1)
+
+    if gpu.gpu_enabled():
+        # The GPU is already internally parallel; three concurrent host threads
+        # would contend for the device and exhaust the pinned-transfer pool
+        # (cudaErrorAlreadyMapped / host-alloc OOM). Mirror io.to_isotropic and
+        # go sequential when the GPU is on.
+        return dict(_do(k) for k in keys)
 
     with ThreadPoolExecutor(max_workers=3) as ex:
         return dict(ex.map(_do, keys))

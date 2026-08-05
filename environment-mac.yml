@@ -1,0 +1,23 @@
+name: image_analysis
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - scipy
+  - scikit-image
+  - tifffile
+  - zarr
+  - dask
+  - pandas
+  - matplotlib
+  - napari=0.6.0
+  - vispy=0.14.3
+  - pyqt
+  - pip:
+      - nd2
+      - scikit-learn
+      - joblib
+      # cupy-cuda12x omitted on macOS (no CUDA GPU / no macOS wheels).
+      # The pipeline catches the import failure and falls back to CPU.

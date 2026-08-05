@@ -14,8 +14,7 @@ stays narrow.
 - Cardiac cells cultured on a 3D **vessel / lumen** surface.
 - Imaged as z-stacks. Voxel size **0.325 × 0.325 × 0.4 µm** (xy × z).
   Every 3D kernel must scale its z component for this anisotropy.
-- Conditions: `WT`, `I61Q` (folders under `3d_images_folder/images/`).
-  `I61Q` is currently empty.
+- Condition: `WT` (folder under `3d_images_folder/images/`).
 - Channels (see `3d_images_folder/params.json`):
   - `FRET` — FRET channel
   - `mClover` — donor
@@ -35,7 +34,7 @@ per-adhesion **force** (from FRET LUT) to cell and vessel geometry.
 
 ## What exists now
 
-- `nd2_to_ometiff.py` — ND2 → OME-TIFF, drops junk channels, writes
+- `Scripts/nd2_to_ometiff.py` — ND2 → OME-TIFF, drops junk channels, writes
   pixel size + channel names into OME metadata.
 - `pipeline/io.py` — role-addressable loader (`Stack.by_role("clover")`).
 - `pipeline/fret.py` — per-Z background subtraction + bleedthrough

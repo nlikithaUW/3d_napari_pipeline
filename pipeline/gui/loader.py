@@ -29,7 +29,8 @@ DISPLAY = [
 ]
 
 
-def _load_image(state, viewer, tif_path, params_path, lut_path, levels):
+def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
+                after=None):
     print(f"Loading {tif_path.name} ...", flush=True)
 
     @thread_worker
@@ -50,15 +51,24 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels):
         raw_shape = stack_raw.data.shape
         raw_nbytes = stack_raw.data.nbytes
         raw_voxel = stack_raw.voxel_zyx_um
+        # Keep native-Z (pre-resample) clover/ruby for ratio quantification on
+        # the original acquisition grid (.copy() so deleting stack_raw frees the
+        # rest of the raw stack). Segmentation still runs on the isotropic stack.
+        clover_native = (stack_raw.data[:, role_to_c["clover"]].copy()
+                         if "clover" in stack_raw.roles else None)
+        ruby_native = (stack_raw.data[:, role_to_c["ruby"]].copy()
+                       if "ruby" in stack_raw.roles else None)
         stack = to_isotropic(stack_raw)
         fret = resample_fret_outputs(fret, stack_raw.voxel_zyx_um,
                                      stack.voxel_zyx_um[0])
         # Drop the raw uint16 stack — closure would otherwise retain it.
         del stack_raw
-        return raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret
+        return (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
+                clover_native, ruby_native)
 
     def _done(result):
-        raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret = result
+        (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
+         clover_native, ruby_native) = result
         print(f"  raw   shape={raw_shape} voxel(z,y,x)={raw_voxel} µm "
               f"({raw_nbytes/1e6:.1f} MB)", flush=True)
         print(f"  iso   shape={stack.data.shape} dtype={stack.data.dtype} "
@@ -119,20 +129,19 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels):
         dapi_raw = stack.data[:, role_to_c["nuclei"]] if "nuclei" in stack.roles else None
         cadh_raw = stack.data[:, role_to_c["substrate"]] if "substrate" in stack.roles else None
         clover_raw = stack.data[:, role_to_c["clover"]] if "clover" in stack.roles else None
+        ruby_raw = stack.data[:, role_to_c["ruby"]] if "ruby" in stack.roles else None
         state["dapi_raw"] = dapi_raw
         state["cadh_raw"] = cadh_raw
         seed = state.get("seed_cadh_floor")
         if seed is not None:
             seed()
         state["clover_raw"] = clover_raw
+        state["ruby_raw"] = ruby_raw
+        state["clover_raw_native"] = clover_native
+        state["ruby_raw_native"] = ruby_native
+        state["raw_voxel_zyx_um"] = raw_voxel
         state["scale"] = scale
         state["levels"] = levels
-
-        state["raw_by_role"] = {role: stack.data[:, c] for role, c in role_to_c.items()}
-        state["force_proxy_layer"] = None
-        seed_ratio = state.get("seed_ratio_choices")
-        if seed_ratio is not None:
-            seed_ratio()
 
         def _mask_layer(raw, name, cmap):
             if raw is None:
@@ -160,12 +169,41 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels):
         state["nuc_cache"] = {"labels_id": None, "centroids": None,
                               "normals": None, "lids": None}
         state["adhesion_proba"] = None
+        state["clover_ruby_ratio"] = None
         for hist in state.get("hists", []):
             hist.clear()
+
+        # Point every tab's save/load path field into a per-image folder next to
+        # the image (e.g. images/WT/<stem>_saved/), so features for different
+        # images don't collide. Widgets register themselves in
+        # state["save_path_widgets"] as (widget, default_filename).
+        save_dir = tif_path.parent / f"{tif_path.stem}_saved"
+        try:
+            save_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            print(f"  (could not create save folder {save_dir}: {exc})", flush=True)
+        state["save_dir"] = save_dir
+        state["image_name"] = tif_path.name
+        for w, fn in state.get("save_path_widgets", []):
+            try:
+                # A "{stem}" placeholder in the default filename is filled with
+                # the image name (e.g. the CSV -> <stem>_adhesion_measures.csv).
+                w.value = str(save_dir / fn.replace("{stem}", tif_path.stem))
+            except Exception:
+                pass
+
         print("Load complete.", flush=True)
+        if after:
+            after()
+
+    def _err(exc):
+        print(f"Load error ({tif_path.name}): {exc}", flush=True)
+        if after:
+            after()
 
     w = _run()
     w.returned.connect(_done)
+    w.errored.connect(_err)
     w.start()
 
 
@@ -195,12 +233,109 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
         _load_image(state, viewer, tif_path, params_path, lut_path,
                     int(pyramid_w.value))
 
+    # "Load all saved" — after loading an image, trigger every tab's loader
+    # (registered in state) so a session can be restored in one click. Each
+    # loader uses its own path field's current value and reports/handles a
+    # missing file itself, so features that were never saved are just skipped.
+    load_all_w = PushButton(text="Load all saved features")
+
+    # (label, state key) in dependency-friendly order.
+    _LOADERS = [
+        ("DAPI labels", "load_dapi_labels"),
+        ("VE-Cadherin mask", "load_cadh"),
+        ("Vessel mesh", "load_vessel_mesh"),
+        ("Vessel curvature", "load_vessel_curvature"),
+        ("Vessel path curvature", "load_vessel_path_curvature"),
+        ("Adhesion proba", "load_proba"),
+        ("Adhesion instances", "load_instances"),
+        ("Clover/Ruby ratio", "load_ratio"),
+        ("Fibroblast count", "load_fibroblast_count"),
+    ]
+
+    def _load_all(*_):
+        if not state.get("raw_layers"):
+            print("Load all: load an image first, then click again.", flush=True)
+            return
+        queue = [(label, key) for label, key in _LOADERS if state.get(key)]
+        if not queue:
+            print("Load all: no saved-feature loaders available.", flush=True)
+            return
+
+        # Load serially — each loader calls `after` when it finishes, which
+        # starts the next. This caps peak RAM at one load at a time instead of
+        # all at once, and `visible=False` keeps the heavy layers off the GPU
+        # until you toggle them on (a burst of large 3D layers can overwhelm the
+        # viewer). Missing files are reported by each loader and skipped.
+        def _next(i):
+            if i >= len(queue):
+                print("Load all: finished. Loaded layers are hidden — toggle "
+                      "visibility in the layer list as needed.", flush=True)
+                return
+            label, key = queue[i]
+            fn = state.get(key)
+            print(f"Load all: {i + 1}/{len(queue)} — {label} ...", flush=True)
+            try:
+                fn(after=lambda: _next(i + 1), visible=False)
+            except Exception as exc:
+                print(f"Load all: {label} failed: {exc}", flush=True)
+                _next(i + 1)
+
+        _next(0)
+
+    load_all_w.changed.connect(_load_all)
+
+    # "Run all" — run the whole analysis in order, each tab's compute + save,
+    # waiting for each threaded step to finish before starting the next (same
+    # serial `after`-callback chain as "Load all"). Each tab registers a
+    # `run_*` step in state. Preconditions/failures in a step are reported and
+    # the chain continues, so a missing model or channel won't stall it.
+    run_all_w = PushButton(text="Run all (full pipeline)")
+    _RUN_STEPS = [
+        ("DAPI + components", "run_dapi"),
+        ("Fibroblast count", "run_fibroblasts"),
+        ("VE-Cadherin (Sauvola)", "run_cadherin"),
+        ("Vessel mesh", "run_vessel_mesh"),
+        ("Surface curvature", "run_vessel_curvature"),
+        ("In-plane path curvature", "run_vessel_path_curvature"),
+        ("Clover Otsu", "run_clover"),
+        ("RF predict", "run_rf_predict"),
+        ("RF post-process (split-merged)", "run_rf_postprocess"),
+        ("Measure + export CSV", "run_measure"),
+    ]
+
+    def _run_all(*_):
+        if not state.get("raw_layers"):
+            print("Run all: load an image first, then click again.", flush=True)
+            return
+        queue = [(label, key) for label, key in _RUN_STEPS if state.get(key)]
+        if not queue:
+            print("Run all: no run steps available.", flush=True)
+            return
+
+        def _next(i):
+            if i >= len(queue):
+                print("Run all: finished — full pipeline complete.", flush=True)
+                return
+            label, key = queue[i]
+            fn = state.get(key)
+            print(f"Run all: {i + 1}/{len(queue)} — {label} ...", flush=True)
+            try:
+                fn(after=lambda: _next(i + 1))
+            except Exception as exc:
+                print(f"Run all: {label} failed: {exc}", flush=True)
+                _next(i + 1)
+
+        _next(0)
+
+    run_all_w.changed.connect(_run_all)
+
     project_dir_w.changed.connect(_scan)
     refresh_w.changed.connect(_scan)
     load_w.changed.connect(_do_load)
     _scan()
 
     return Container(
-        widgets=[project_dir_w, image_w, refresh_w, pyramid_w, load_w],
+        widgets=[project_dir_w, image_w, refresh_w, pyramid_w, load_w,
+                 load_all_w, run_all_w],
         labels=True,
     )

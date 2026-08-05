@@ -22,3 +22,8 @@ dependencies:
       # Optional GPU accel for windowed filters + isotropic resampling.
       # Import failure on a non-GPU machine is caught -> CPU fallback.
       - cupy-cuda12x
+      # CUDA runtime + NVRTC libs the cupy-cuda12x wheel needs to JIT-compile
+      # kernels on Windows (without these: "Failed to find CUDA headers" then
+      # missing nvrtc*.dll). Harmless/unused on a non-GPU machine.
+      - nvidia-cuda-runtime-cu12
+      - nvidia-cuda-nvrtc-cu12

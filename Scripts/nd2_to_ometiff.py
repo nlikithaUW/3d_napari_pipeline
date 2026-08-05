@@ -1,7 +1,7 @@
 """
 Convert ND2 z-stacks to OME-TIFF, dropping junk channels.
 
-Reads each .nd2 in 3d_images_folder/images/{WT,I61Q}/, drops the channels
+Reads each .nd2 in 3d_images_folder/images/WT/, drops the channels
 not listed as useful in params.json, and writes a sibling .tif (OME-TIFF,
 uint16, zstd compressed) carrying pixel size and channel names in metadata.
 ND2 files are never modified; existing .tif siblings are overwritten.
@@ -17,7 +17,7 @@ import nd2
 import numpy as np
 import tifffile
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = ROOT / "3d_images_folder"
 PARAMS_PATH = DATA_ROOT / "params.json"
 

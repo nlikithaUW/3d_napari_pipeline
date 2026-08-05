@@ -19,3 +19,13 @@ Thumbs.db
 # Archives
 *.7z
 *.zip
+*.npy
+*_saved/
+*.csv
+Miniforge3-*.sh
+.Rhistory
+3d_images_folder/images/
+*.xlsx
+*.png
+*.jpg
+Nliki/

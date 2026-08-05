@@ -30,9 +30,15 @@ def gpu_enabled() -> bool:
 
 
 def _oom():
-    """The cupy OOM exception type, or a never-raised sentinel on CPU."""
+    """cupy exception types that mean "the device couldn't do this call" — a
+    signal to retry the call on the CPU. Covers both the memory-pool OOM
+    (``OutOfMemoryError``) and runtime-level failures such as a pinned host
+    alloc OOM or ``cudaErrorAlreadyMapped`` (``CUDARuntimeError``), which are a
+    *different* exception class and would otherwise escape the fallback. Empty
+    (never-raised) on a CPU-only env."""
     if HAS_GPU:
-        return cp.cuda.memory.OutOfMemoryError
+        return (cp.cuda.memory.OutOfMemoryError,
+                cp.cuda.runtime.CUDARuntimeError)
     return ()
 
 
@@ -47,6 +53,7 @@ def _run(gpu_op, cpu_op, arr: np.ndarray, **kw) -> np.ndarray:
         except _oom():
             if cp is not None:
                 cp.get_default_memory_pool().free_all_blocks()
+                cp.get_default_pinned_memory_pool().free_all_blocks()
     return cpu_op(arr, **kw)
 
 

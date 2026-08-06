@@ -18,13 +18,15 @@ from qtpy.QtWidgets import QTabWidget, QWidget, QVBoxLayout
 from .gui import (
     adhesion_rf,
     cadherin,
+    cadherin_rf,
     cell_mesh,
     clover,
     display,
-    force_proxy,
     loader,
+    logpanel,
     measure,
     nuclei,
+    roi,
     vessel_mesh,
 )
 
@@ -87,6 +89,7 @@ def main() -> None:
     get_settings().experimental.triangulation_backend = TriangulationBackend.pure_python
 
     viewer = napari.Viewer(ndisplay=3)
+    logpanel.install(viewer)  # mirror stdout/stderr into an in-napari Log dock
 
     def _free_gpu():
         try:
@@ -117,20 +120,20 @@ def main() -> None:
         "vessel_mesh_cache": {"verts": None, "faces": None},
         "raw_layers": [],
         "hists": [],
-        "raw_by_role": {}, "force_proxy_layer": None,
     }
 
     tabs = QTabWidget()
     tabs.addTab(_wrap([loader.build(state, viewer, args.project_dir,
                                     args.params, args.lut)]), "Load")
     tabs.addTab(_wrap([display.build(state, viewer)]), "Display")
-    tabs.addTab(_wrap([force_proxy.build(state, viewer)]), "Force proxy")
     tabs.addTab(_wrap(list(nuclei.build(state, viewer))), "Nuclei")
     tabs.addTab(_wrap(list(cadherin.build(state, viewer))), "Cadherin")
+    tabs.addTab(_wrap([cadherin_rf.build(state, viewer)]), "VE-cad RF")
     tabs.addTab(_wrap(list(cell_mesh.build(state, viewer))), "Cell mesh")
     tabs.addTab(_wrap(list(vessel_mesh.build(state, viewer))), "Vessel mesh")
     tabs.addTab(_wrap([clover.build(state, viewer)]), "Clover")
     tabs.addTab(_wrap([adhesion_rf.build(state, viewer)]), "Adhesion RF")
+    tabs.addTab(_wrap([roi.build(state, viewer)]), "ROI")
     tabs.addTab(_wrap(list(measure.build(state, viewer))), "Measure")
 
     viewer.window.add_dock_widget(tabs, area="right", name="Pipeline")

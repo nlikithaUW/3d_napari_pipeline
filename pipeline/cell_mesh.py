@@ -272,6 +272,137 @@ def vertex_outward_normals(
     return vn
 
 
+def _taubin_smooth(verts: np.ndarray, faces: np.ndarray, iterations: int,
+                   lam: float = 0.5, mu: float = -0.53) -> np.ndarray:
+    """Taubin (λ|μ) mesh smoothing — low-pass without the shrinkage that plain
+    Laplacian smoothing causes (which would bias the estimated caliber). Returns
+    new vertex positions; connectivity (faces) is unchanged.
+    """
+    from scipy.sparse import coo_matrix
+
+    verts = np.asarray(verts, dtype=np.float64)
+    faces = np.asarray(faces)
+    n = len(verts)
+    if iterations <= 0 or n == 0 or len(faces) == 0:
+        return verts
+    e = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    e = np.vstack([e, e[:, ::-1]])
+    adj = (coo_matrix((np.ones(len(e)), (e[:, 0], e[:, 1])),
+                      shape=(n, n)).tocsr() > 0).astype(np.float64)
+    deg = np.asarray(adj.sum(1)).ravel()
+    deg[deg == 0] = 1.0
+    v = verts.copy()
+    for _ in range(int(iterations)):
+        for fac in (lam, mu):
+            v = v + fac * (adj.dot(v) / deg[:, None] - v)
+    return v
+
+
+def mesh_curvature(verts: np.ndarray, faces: np.ndarray, radius_um: float,
+                   smooth_iter: int = 0) -> dict:
+    """Per-vertex curvature by fitting a local quadric at scale ``radius_um``.
+
+    For each vertex, the neighbours within ``radius_um`` are expressed in a local
+    frame whose z-axis is the outward vertex normal (so the sign is consistent:
+    convex-outward is positive), then a quadric
+    ``z = a·x² + b·xy + c·y² + d·x + e·y`` is least-squares fit. The principal
+    curvatures are the eigenvalues of the shape operator (second fundamental form
+    relative to the first). Fitting over a *physical* radius smooths the
+    triangle-scale segmentation noise, so ``radius_um`` sets the length scale at
+    which "curvature" is measured.
+
+    IMPORTANT: the alpha-shape "point cloud" vessel meshes carry many interior
+    vertices that are not part of the boundary surface (they have no incident
+    face). Fitting a quadric to those interior points is meaningless and badly
+    contaminates the estimate. So the fit is restricted to *surface* vertices
+    (those referenced by ``faces``); interior/rank-deficient vertices are left
+    NaN so callers can exclude them. ``smooth_iter`` optionally Taubin-smooths
+    the surface first.
+
+    Returns a dict of length-``len(verts)`` float32 arrays: ``mean`` = H =
+    (κ1+κ2)/2, ``k1`` = κmax, ``k2`` = κmin, ``gaussian`` = K = κ1·κ2.
+    """
+    from scipy.spatial import cKDTree
+
+    verts = np.asarray(verts, dtype=np.float64)
+    faces = np.asarray(faces)
+    n = len(verts)
+    out = {k: np.full(n, np.nan, dtype=np.float32)
+           for k in ("mean", "k1", "k2", "gaussian")}
+    if n < 6 or len(faces) == 0:
+        return out
+
+    # Surface vertices only (referenced by at least one face) — reindex a
+    # compact sub-mesh so the KD-tree / normals never see interior points.
+    surf = np.unique(faces)
+    if len(surf) < 6:
+        return out
+    remap = np.full(n, -1, dtype=np.int64)
+    remap[surf] = np.arange(len(surf))
+    sv = verts[surf]
+    sf = remap[faces]
+    if smooth_iter and smooth_iter > 0:
+        sv = _taubin_smooth(sv, sf, int(smooth_iter))
+
+    normals = vertex_outward_normals(sv, sf)
+    tree = cKDTree(sv)
+    r = float(radius_um)
+    m = len(sv)
+    K1 = np.full(m, np.nan, dtype=np.float32)
+    K2 = np.full(m, np.nan, dtype=np.float32)
+    H = np.full(m, np.nan, dtype=np.float32)
+    K = np.full(m, np.nan, dtype=np.float32)
+
+    for i in range(m):
+        nz = normals[i]
+        if not np.any(nz):
+            continue
+        idx = tree.query_ball_point(sv[i], r)
+        if len(idx) < 6:
+            _, idx = tree.query(sv[i], k=min(12, m))
+            idx = np.atleast_1d(idx)
+        P = sv[idx] - sv[i]
+        # Local tangent frame: z = outward normal, t1/t2 span the tangent plane.
+        seed = np.array([0.0, 1.0, 0.0]) if abs(nz[0]) > 0.9 else np.array([1.0, 0.0, 0.0])
+        t1 = np.cross(nz, seed)
+        t1 /= np.linalg.norm(t1) + 1e-12
+        t2 = np.cross(nz, t1)
+        x = P @ t1
+        y = P @ t2
+        z = P @ nz
+        A = np.column_stack([x * x, x * y, y * y, x, y])
+        try:
+            coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+        except Exception:
+            continue
+        a, b, c, d, e = coef
+        E = 1.0 + d * d
+        F = d * e
+        G = 1.0 + e * e
+        den = np.sqrt(d * d + e * e + 1.0)
+        L = 2.0 * a / den
+        M = b / den
+        N = 2.0 * c / den
+        try:
+            S = np.linalg.solve(np.array([[E, F], [F, G]]),
+                                np.array([[L, M], [M, N]]))
+            ev = np.real(np.linalg.eigvals(S))
+        except Exception:
+            continue
+        kmax = float(ev.max())
+        kmin = float(ev.min())
+        K1[i] = kmax
+        K2[i] = kmin
+        H[i] = 0.5 * (kmax + kmin)
+        K[i] = kmax * kmin
+
+    out["k1"][surf] = K1
+    out["k2"][surf] = K2
+    out["mean"][surf] = H
+    out["gaussian"][surf] = K
+    return out
+
+
 def signed_distance_to_mesh_vertices(
     query_zyx_um: np.ndarray,
     vert_zyx_um: np.ndarray,

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 from magicgui import magicgui
-from magicgui.widgets import Container
+from magicgui.widgets import Container, FileEdit, PushButton
 from napari.qt.threading import thread_worker
 
 from ..cell_mesh import label_centroids_normals, signed_distance_to_mesh_vertices
@@ -132,11 +132,26 @@ def build(state, viewer) -> Container:
         bernsen_contrast: float = 0.15,
         floor_k: float = 3.0,
     ):
+        _run_cadherin()
+
+    def _run_cadherin(after=None):
         cadh_raw = state.get("cadh_raw")
         if cadh_raw is None:
             print("Load a stack with a 'substrate' channel first.", flush=True)
+            if after:
+                after()
             return
         scale = state["scale"]
+        method = threshold_controls["method"].value
+        window_xy = int(threshold_controls["window_xy"].value)
+        niblack_k = float(threshold_controls["niblack_k"].value)
+        sauvola_k = float(threshold_controls["sauvola_k"].value)
+        bernsen_contrast = float(threshold_controls["bernsen_contrast"].value)
+        floor_k = float(threshold_controls["floor_k"].value)
+        state.setdefault("run_settings", {})["cadherin"] = {
+            "method": method, "window_xy": window_xy, "niblack_k": niblack_k,
+            "sauvola_k": sauvola_k, "bernsen_contrast": bernsen_contrast,
+            "floor_k": floor_k}
 
         @thread_worker
         def _run():
@@ -175,7 +190,24 @@ def build(state, viewer) -> Container:
             slider_max = int(sizes.max()) if sizes.size else 5000
             filter_controls.min_size.max = slider_max
             filter_controls.min_size.value = max(suggested, MIN_SIZE_FLOOR)
+            # Refresh the mask layer synchronously — the auto-called filter is
+            # debounced 150 ms, but the "Run all" chain's next step (vessel mesh)
+            # reads this layer immediately, so it must be current *now*.
+            _layer = state.get("cadh_mask_layer")
+            _m = _compute_mask(int(filter_controls.min_size.value),
+                               float(filter_controls.band_um.value))
+            if _layer is not None and _m is not None:
+                _layer.data = pyramid_views(_m, state.get("levels", 1))
+                _layer.visible = True
+            _redraw(int(filter_controls.min_size.value))
             filter_controls()
+            if after:
+                after()
+
+        def _err(exc):
+            print(f"Cadherin error: {exc}", flush=True)
+            if after:
+                after()
 
         floor = robust_floor_value(cadh_raw, floor_k)
         floor_str = f"{floor:.1f}" if floor is not None else "off"
@@ -183,6 +215,7 @@ def build(state, viewer) -> Container:
               f"floor_k={floor_k} → floor={floor_str}) ...", flush=True)
         w = _run()
         w.returned.connect(_done)
+        w.errored.connect(_err)
         w.start()
 
     def _seed_floor():
@@ -194,5 +227,89 @@ def build(state, viewer) -> Container:
         )
     state["seed_cadh_floor"] = _seed_floor
 
-    return (Container(widgets=[threshold_controls, filter_controls], labels=False),
+    # ---- Save / load the cadherin components (mask + labels for re-tuning) ----
+    cadh_path_w = FileEdit(value="cadherin_labels.npz", label="cadh_path",
+                           mode="w")
+    save_cadh_w = PushButton(text="Save VE-Cadherin mask")
+    load_cadh_w = PushButton(text="Load VE-Cadherin mask")
+
+    def _save_cadh(*_):
+        cs = state.get("cadh_state") or {}
+        if cs.get("labels") is None:
+            print("No cadherin components to save — run 'Apply threshold + "
+                  "label' first.", flush=True)
+            return
+        path = str(cadh_path_w.value)
+        np.savez_compressed(
+            path,
+            labels=np.asarray(cs["labels"]).astype(np.int32),
+            sizes=np.asarray(cs["sizes"]),
+            centroids=np.asarray(cs["centroids"]),
+            normals=np.asarray(cs["normals"]),
+            label_ids=np.asarray(cs["label_ids"]),
+        )
+        print(f"Saved VE-Cadherin components -> {path} "
+              f"({np.asarray(cs['sizes']).size} components).", flush=True)
+
+    def _load_cadh(*_, after=None, visible=True):
+        path = str(cadh_path_w.value)
+
+        @thread_worker
+        def _run():
+            d = np.load(path)
+            return (d["labels"].astype(np.int32), d["sizes"], d["centroids"],
+                    d["normals"], d["label_ids"])
+
+        def _done(result):
+            labels, sizes, centroids, normals, lids = result
+            cadh_raw = state.get("cadh_raw")
+            if cadh_raw is not None and labels.shape != cadh_raw.shape:
+                print(f"Warning: loaded cadherin {labels.shape} != current "
+                      f"{cadh_raw.shape}; load the matching image first.",
+                      flush=True)
+            cs = state["cadh_state"]
+            cs["labels"] = labels
+            cs["sizes"] = sizes
+            cs["centroids"] = centroids
+            cs["normals"] = normals
+            cs["label_ids"] = lids
+            cs["keep_mask"] = None
+            no_mesh_notified["done"] = False
+            suggested = auto_min_size_otsu(sizes)
+            filter_controls.min_size.max = int(sizes.max()) if sizes.size else 5000
+            filter_controls.min_size.value = max(suggested, MIN_SIZE_FLOOR)
+            filter_controls()  # rebuild the "VE-Cadherin mask" layer
+            if not visible and state.get("cadh_mask_layer") is not None:
+                state["cadh_mask_layer"].visible = False
+            print(f"Loaded VE-Cadherin components <- {path}: {sizes.size} "
+                  f"components.", flush=True)
+            if after:
+                after()
+
+        def _err(exc):
+            print(f"Load cadherin error: {exc}", flush=True)
+            if after:
+                after()
+
+        print(f"Loading VE-Cadherin components from {path} ...", flush=True)
+        w = _run()
+        w.returned.connect(_done)
+        w.errored.connect(_err)
+        w.start()
+
+    save_cadh_w.changed.connect(_save_cadh)
+    load_cadh_w.changed.connect(_load_cadh)
+    state["load_cadh"] = _load_cadh
+
+    # Chainable "Run all" step: force Sauvola, compute, save, then `after`.
+    def _run_cadherin_step(after=None):
+        threshold_controls["method"].value = METHOD_SAUVOLA
+        _run_cadherin(after=(lambda: (_save_cadh(), after() if after else None)))
+    state["run_cadherin"] = _run_cadherin_step
+    state.setdefault("save_path_widgets", []).append(
+        (cadh_path_w, "cadherin_labels.npz"))
+
+    return (Container(widgets=[threshold_controls, filter_controls,
+                              cadh_path_w, save_cadh_w, load_cadh_w],
+                     labels=False),
             hist.canvas)

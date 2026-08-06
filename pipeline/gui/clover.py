@@ -67,10 +67,12 @@ def build(state, viewer) -> Container:
         layer.data = pyramid_views(mask, state.get("levels", 1))
         layer.visible = True
 
-    def _compute(*_):
+    def _compute(*_, after=None):
         clover_raw = state.get("clover_raw")
         if clover_raw is None:
             print("Load a stack with a 'clover' channel first.", flush=True)
+            if after:
+                after()
             return
         method = "Otsu"
 
@@ -93,12 +95,31 @@ def build(state, viewer) -> Container:
             slider_max = int(sizes.max()) if sizes.size else 5000
             size_controls.min_size.max = slider_max
             size_controls.min_size.value = suggested
+            # Refresh the mask layer synchronously — size_controls' _apply is
+            # debounced 150 ms, but RF predict's clover gate reads this layer
+            # right after in "Run all", so it must be current now.
+            _layer = state.get("clover_mask_layer")
+            if _layer is not None:
+                _mask = filter_by_size(labels, sizes,
+                                       int(size_controls.min_size.value))
+                _layer.name = f"Clover filter ({method})"
+                _layer.data = pyramid_views(_mask, state.get("levels", 1))
+                _layer.visible = True
             size_controls()
+            if after:
+                after()
+
+        def _err(exc):
+            print(f"Clover Otsu error: {exc}", flush=True)
+            if after:
+                after()
 
         print(f"Clover {method} running ...", flush=True)
         w = _run()
         w.returned.connect(_done)
+        w.errored.connect(_err)
         w.start()
 
     compute_w.changed.connect(_compute)
+    state["run_clover"] = _compute
     return Container(widgets=[compute_w, size_controls], labels=True)

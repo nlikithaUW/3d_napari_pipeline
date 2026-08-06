@@ -431,6 +431,17 @@ class AdhesionRF:
 
         BATCH = 2_000_000
         ci = 0
+        if not full_volume:
+            # Safety net: never index the output volume out of bounds if the
+            # gate indices don't match this volume's shape.
+            Zs, Ys, Xs = shape
+            ok = ((gate_indices[:, 0] >= 0) & (gate_indices[:, 0] < Zs) &
+                  (gate_indices[:, 1] >= 0) & (gate_indices[:, 1] < Ys) &
+                  (gate_indices[:, 2] >= 0) & (gate_indices[:, 2] < Xs))
+            if not ok.all():
+                print(f"  dropping {int((~ok).sum()):,} out-of-bounds gate voxels "
+                      f"(volume {shape}).", flush=True)
+                gate_indices = gate_indices[ok]
         gate_iz = None if full_volume else gate_indices[:, 0]
 
         for z_start in range(0, z_total, chunk_z):
@@ -586,6 +597,17 @@ def instance_labels_3d(
             for sl_id in np.unique(sub[sub > 0]):
                 new_max += 1
                 lbl[z0:z1, y0:y1, x0:x1][sub == sl_id] = new_max
+
+    # Watershed splitting can carve fragments smaller than min_size_vox. The
+    # size filter above ran BEFORE the split, so re-apply it here to drop those
+    # post-split slivers too — otherwise sub-threshold pieces leak through and
+    # min_size_vox silently stops meaning what it says once split_merged is on.
+    if split_merged and min_size_vox > 0 and lbl.max() > 0:
+        sizes = np.bincount(lbl.ravel())
+        keep = (sizes >= min_size_vox)
+        keep[0] = True  # background
+        remap = np.where(keep, np.arange(len(keep), dtype=np.int32), 0)
+        lbl = remap[lbl]
 
     # Relabel sequentially
     from skimage.segmentation import relabel_sequential

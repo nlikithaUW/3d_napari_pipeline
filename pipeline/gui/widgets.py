@@ -23,20 +23,48 @@ def pyramid_views(vol: np.ndarray, levels: int):
 
 
 def finite_surface(verts, faces, values):
-    """Sanitize a (verts, faces, values) surface so vispy never gets NaN/Inf.
+    """Sanitize a (verts, faces, values) surface so vispy never faults the GL
+    draw. Three failure modes each cause an ``OSError: access violation`` inside
+    ``glDrawArrays`` because vispy reads past a GL buffer:
 
-    A single non-finite vertex coordinate can crash the GL draw with an access
-    violation. Common case (all finite) returns the inputs untouched. Otherwise
-    drop triangles that touch a non-finite vertex and replace the stray
-    vertices with the finite centroid so the buffer / bounding box stay finite.
+    1. A face index outside the vertex array (mismatched verts/faces — e.g. a
+       stale cache, or faces built against a different vertex set).
+    2. A non-finite vertex coordinate.
+    3. A per-vertex ``values`` array that is non-finite or the wrong length.
+
+    Guards all three: drops out-of-range and non-finite-touching triangles,
+    replaces stray vertices with the finite centroid, and makes ``values``
+    finite and length-consistent. Returns a (verts, faces, values) tuple.
     """
     verts = np.asarray(verts)
+    n = len(verts)
+    faces = np.asarray(faces)
+
+    # 1) Drop faces whose indices fall outside the vertex array.
+    if len(faces):
+        inrange = (faces >= 0).all(axis=1) & (faces < n).all(axis=1)
+        if not inrange.all():
+            faces = faces[inrange]
+
+    # 2) Replace non-finite vertex coords; drop the triangles that touch them.
     bad = ~np.isfinite(verts).all(axis=1)
-    if not bad.any():
-        return verts, faces, values
-    faces = faces[~bad[faces].any(axis=1)] if len(faces) else faces
-    verts = verts.copy()
-    verts[bad] = verts[~bad].mean(0) if (~bad).any() else 0.0
+    if bad.any():
+        if len(faces):
+            faces = faces[~bad[faces].any(axis=1)]
+        verts = verts.copy()
+        verts[bad] = verts[~bad].mean(0) if (~bad).any() else 0.0
+
+    # 3) Make per-vertex values finite and length-consistent (else vispy reads
+    #    past the value buffer). Fill non-finite entries with the finite median.
+    if values is not None:
+        values = np.asarray(values)
+        if values.shape[0] != n:
+            values = np.zeros(n, dtype=np.float32)
+        elif not np.isfinite(values).all():
+            fin = np.isfinite(values)
+            fill = float(np.median(values[fin])) if fin.any() else 0.0
+            values = np.where(fin, values, fill)
+
     return verts, faces, values
 
 

@@ -552,8 +552,16 @@ def instance_labels_3d(
     split_merged: bool = False,
     split_min_size: int = 1000,
 ) -> np.ndarray:
-    """Connected components → optional watershed splitting → (Z, Y, X) int32."""
-    from scipy.ndimage import label as _label, distance_transform_edt as _edt
+    """Connected components → optional watershed splitting → (Z, Y, X) int32.
+
+    Prints progress through the splitting loop: it is the slow phase and it is
+    otherwise completely silent, so a long run is indistinguishable from a hang.
+    """
+    from scipy.ndimage import (
+        label as _label,
+        distance_transform_edt as _edt,
+        find_objects as _find_objects,
+    )
 
     lbl, _ = _label(binary)
 
@@ -573,19 +581,39 @@ def instance_labels_3d(
         comp_ids, comp_sizes = np.unique(lbl[lbl > 0], return_counts=True)
         large = comp_ids[comp_sizes > split_min_size]
 
-        for cid in large:
+        # Every component's bounding box in ONE pass. The obvious
+        # `np.where(lbl == cid)` inside the loop costs a full-volume scan per
+        # component (~180 ms on a 65M-voxel stack), so a few thousand candidates
+        # burn minutes just locating crops. Computing this up front is safe: the
+        # loop only ever relabels voxels belonging to the component it is
+        # currently splitting, so the other components' boxes stay valid.
+        boxes = _find_objects(lbl)
+
+        n_large = int(len(large))
+        print(f"Splitting {n_large} merged component(s) (> {split_min_size} "
+              f"vox) of {len(comp_ids)} total ...", flush=True)
+        every = max(1, n_large // 20)
+        n_split = 0
+
+        for k, cid in enumerate(large, 1):
+            if k % every == 0 or k == n_large:
+                print(f"  {k}/{n_large} examined, {n_split} divided",
+                      flush=True)
             # Crop to bounding box so EDT/watershed run on the component only.
-            zz, yy, xx = np.where(lbl == cid)
+            sl = boxes[cid - 1]
+            if sl is None:                      # label absent (shouldn't happen)
+                continue
             pad = 2
-            z0, z1 = max(0, zz.min() - pad), min(lbl.shape[0], zz.max() + pad + 1)
-            y0, y1 = max(0, yy.min() - pad), min(lbl.shape[1], yy.max() + pad + 1)
-            x0, x1 = max(0, xx.min() - pad), min(lbl.shape[2], xx.max() + pad + 1)
+            z0, z1 = max(0, sl[0].start - pad), min(lbl.shape[0], sl[0].stop + pad)
+            y0, y1 = max(0, sl[1].start - pad), min(lbl.shape[1], sl[1].stop + pad)
+            x0, x1 = max(0, sl[2].start - pad), min(lbl.shape[2], sl[2].stop + pad)
 
             crop_mask = (lbl[z0:z1, y0:y1, x0:x1] == cid)
             dist = _edt(crop_mask)
             coords = peak_local_max(dist, min_distance=5, labels=crop_mask)
             if len(coords) <= 1:
                 continue
+            n_split += 1
 
             markers = np.zeros(crop_mask.shape, dtype=np.int32)
             markers[coords[:, 0], coords[:, 1], coords[:, 2]] = np.arange(

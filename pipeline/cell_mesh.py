@@ -372,8 +372,15 @@ def mesh_curvature(verts: np.ndarray, faces: np.ndarray, radius_um: float,
         z = P @ nz
         A = np.column_stack([x * x, x * y, y * y, x, y])
         try:
-            coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+            coef, _res, rank, _sv = np.linalg.lstsq(A, z, rcond=None)
         except Exception:
+            continue
+        # A rank-deficient fit means the neighbourhood does not constrain all
+        # five quadric terms — e.g. neighbours strung out along a line, which is
+        # common on the ragged edge of an alpha-shape. lstsq still returns a
+        # minimum-norm `coef`, and the curvatures derived from it are arbitrary.
+        # Leave the vertex NaN so callers can exclude it (as the docstring says).
+        if rank < A.shape[1]:
             continue
         a, b, c, d, e = coef
         E = 1.0 + d * d

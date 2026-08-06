@@ -9,7 +9,7 @@ from napari.qt.threading import thread_worker
 
 from ..cell_mesh import signed_distance_to_mesh_vertices
 from ..denoise import auto_min_size_otsu, filter_by_size, label_and_sizes, otsu_mask
-from .widgets import debounce, pyramid_views
+from .widgets import call_all, debounce, pyramid_views, with_after
 
 
 def build(state, viewer) -> Container:
@@ -71,8 +71,7 @@ def build(state, viewer) -> Container:
         clover_raw = state.get("clover_raw")
         if clover_raw is None:
             print("Load a stack with a 'clover' channel first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         method = "Otsu"
 
@@ -106,18 +105,14 @@ def build(state, viewer) -> Container:
                 _layer.data = pyramid_views(_mask, state.get("levels", 1))
                 _layer.visible = True
             size_controls()
-            if after:
-                after()
 
         def _err(exc):
             print(f"Clover Otsu error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Clover {method} running ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Clover Otsu"))
+        w.errored.connect(with_after(_err, after, "Clover Otsu"))
         w.start()
 
     compute_w.changed.connect(_compute)

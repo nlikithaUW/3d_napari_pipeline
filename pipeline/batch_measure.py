@@ -34,7 +34,7 @@ import numpy as np
 faulthandler.enable()
 
 from .fret import compute_fret_volume, load_force_lut, resample_fret_outputs
-from .io import load_params, load_stack, to_isotropic
+from .io import fret_configured, load_params, load_stack, to_isotropic
 from .measure_core import compute_measurements
 from .rf import instance_labels_3d
 
@@ -42,7 +42,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PARAMS = ROOT / "3d_images_folder" / "params.json"
 DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
 
-COLS = ["label", "ratio_clover_ruby", "dist_mesh_um", "path_curv_xy",
+COLS = ["label", "ratio_clover_ruby", "dist_mesh_um",
+        "centroid_z_um", "centroid_y_um", "centroid_x_um", "path_curv_xy",
         "dist_branch_um", "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
         "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
         "volume_um3", "axis_major_um", "axis_minor_um", "eccentricity", "nuc_id"]
@@ -59,18 +60,27 @@ def _p(msg: str) -> None:
 
 
 def _load_raw(tif: Path, params_path: Path, lut_path: Path):
-    """Recompute force_vol + native clover/ruby + scale exactly like the loader."""
+    """Recompute force_vol + native clover/ruby + scale exactly like the loader.
+
+    ``force_vol`` is None when FRET isn't configured for this dataset — the
+    same gate the GUI loader applies (see ``gui.loader.fret_configured``).
+    """
     _p("load_params")
     params = load_params(params_path)
     _p(f"load_stack ({tif.name})")
     stack_raw = load_stack(tif, params)
     role_to_c = {role: stack_raw.channels.index(name)
                  for role, name in stack_raw.roles.items()}
-    _p("load_force_lut")
-    lut_eff, lut_force = load_force_lut(str(lut_path))
-    _p("compute_fret_volume (GPU)")
-    fret = compute_fret_volume(stack_raw.data, role_to_c, params["fret"],
-                               lut_eff, lut_force)
+    fret_ok, why = fret_configured(params, stack_raw.roles)
+    if fret_ok:
+        _p(f"load_force_lut ({why})")
+        lut_eff, lut_force = load_force_lut(str(lut_path))
+        _p("compute_fret_volume (GPU)")
+        fret = compute_fret_volume(stack_raw.data, role_to_c, params["fret"],
+                                   lut_eff, lut_force)
+    else:
+        _p(f"FRET skipped — {why}; force_*_pN columns will be blank")
+        fret = None
     _p("copy native clover/ruby")
     clover_native = (stack_raw.data[:, role_to_c["clover"]].copy()
                      if "clover" in stack_raw.roles else None)
@@ -79,12 +89,13 @@ def _load_raw(tif: Path, params_path: Path, lut_path: Path):
     raw_voxel = stack_raw.voxel_zyx_um
     _p("to_isotropic")
     stack = to_isotropic(stack_raw)
-    _p("resample_fret_outputs")
-    fret = resample_fret_outputs(fret, raw_voxel, stack.voxel_zyx_um[0])
+    if fret is not None:
+        _p("resample_fret_outputs")
+        fret = resample_fret_outputs(fret, raw_voxel, stack.voxel_zyx_um[0])
     del stack_raw
     _p("raw load done")
-    return (fret["force_vol"], clover_native, ruby_native, raw_voxel,
-            tuple(stack.voxel_zyx_um))
+    return (None if fret is None else fret["force_vol"],
+            clover_native, ruby_native, raw_voxel, tuple(stack.voxel_zyx_um))
 
 
 def _standard_instances(saved: Path):
@@ -171,7 +182,11 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
             row = [tif.name]
             for c in metric_cols:
                 v = cols[c][r]
-                row.append("" if (isinstance(v, float) and np.isnan(v)) else v)
+                # np.float32 is NOT a subclass of float, so an isinstance-only
+                # check would leave the float32 columns (ratio, curvature)
+                # writing the literal string "nan" while float64 ones blanked.
+                row.append("" if (np.issubdtype(type(v), np.floating)
+                                  and np.isnan(v)) else v)
             row.extend([n_fib, n_tot])
             w.writerow(row)
 

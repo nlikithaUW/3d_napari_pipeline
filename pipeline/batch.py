@@ -260,7 +260,12 @@ def main() -> None:
 
     def _after_load(i: int):
         try:
-            if state.get("force_vol") is None:
+            # "Did the load succeed?" is asked of raw_layers, not force_vol:
+            # force_vol is legitimately None whenever FRET isn't configured for
+            # the dataset (io.fret_configured), which would otherwise skip every
+            # image. raw_layers is cleared per image by _free_image_memory and
+            # only repopulated by the loader's success path.
+            if not state.get("raw_layers"):
                 _advance(i, "load failed; skipped")
                 return
             steps = [(label, state[key]) for label, key in _RUN_STEPS

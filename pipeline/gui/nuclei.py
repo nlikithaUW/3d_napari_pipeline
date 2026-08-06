@@ -10,7 +10,7 @@ from magicgui.widgets import (
 from napari.qt.threading import thread_worker
 
 from ..denoise import auto_min_size_otsu, filter_by_size, label_and_sizes, otsu_mask
-from .widgets import Histogram, debounce, pyramid_views
+from .widgets import Histogram, call_all, debounce, pyramid_views, with_after
 
 
 def build(state, viewer) -> Container:
@@ -45,8 +45,7 @@ def build(state, viewer) -> Container:
         dapi_raw = state.get("dapi_raw")
         if dapi_raw is None:
             print("Load a stack with a 'nuclei' channel first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
 
         @thread_worker
@@ -71,18 +70,14 @@ def build(state, viewer) -> Container:
             size_controls.min_size.max = slider_max
             size_controls.min_size.value = suggested
             size_controls()
-            if after:
-                after()
 
         def _err(exc):
             print(f"DAPI Otsu error: {exc}", flush=True)
-            if after:
-                after()
 
         print("DAPI Otsu + labeling running ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "DAPI Otsu"))
+        w.errored.connect(with_after(_err, after, "DAPI Otsu"))
         w.start()
 
     @magicgui(call_button="Compute DAPI Otsu + components")
@@ -137,18 +132,14 @@ def build(state, viewer) -> Container:
                 state["dapi_mask_layer"].visible = False
             print(f"Loaded DAPI components <- {path}: {sizes.size} components, "
                   f"suggested min_size = {suggested}.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Load DAPI labels error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Loading DAPI components from {path} ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Load DAPI labels"))
+        w.errored.connect(with_after(_err, after, "Load DAPI labels"))
         w.start()
 
     save_lbl_w.changed.connect(_save_labels)
@@ -182,14 +173,12 @@ def build(state, viewer) -> Container:
         dapi_layer = state.get("dapi_mask_layer")
         if clover is None:
             print("Count: load a stack with a 'clover' channel first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         ds = state.get("dapi_state") or {}
         if ds.get("labels") is None:
             print("Count: run 'Compute DAPI Otsu + components' first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         # Build the binary mask from the labels + min_size directly (not the
         # displayed mask layer, whose update is debounced 150 ms and so may not
@@ -275,18 +264,14 @@ def build(state, viewer) -> Container:
                   f"({100.0 * n_fib / max(n_tot, 1):.0f}%); {n_tot - n_fib} other "
                   f"(mClover threshold = {T:.0f} [{thr_kind}]{cad_note}; "
                   f"mClover bg = {mbg:.0f}).", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Count error: {exc}", flush=True)
-            if after:
-                after()
 
         print("Counting fibroblasts (splitting nuclei + classifying) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Fibroblast count"))
+        w.errored.connect(with_after(_err, after, "Fibroblast count"))
         w.start()
 
     count_btn.changed.connect(_count)
@@ -318,26 +303,24 @@ def build(state, viewer) -> Container:
             d = np.load(path)
             fc = {"total": int(d["total"]), "fibroblast": int(d["fibroblast"]),
                   "other": int(d["other"]), "threshold": float(d["threshold"])}
+            state["fibroblast_count"] = fc
+            print(f"Loaded fibroblast count <- {path}: {fc['fibroblast']} VnTs+ "
+                  f"of {fc['total']} nuclei.", flush=True)
         except Exception as exc:
             print(f"Load fibroblast count error: {exc}", flush=True)
-            if after:
-                after()
-            return
-        state["fibroblast_count"] = fc
-        print(f"Loaded fibroblast count <- {path}: {fc['fibroblast']} VnTs+ of "
-              f"{fc['total']} nuclei.", flush=True)
-        if after:
-            after()
+        finally:
+            call_all(after, label="Load fibroblast count")
 
     save_fib_w.changed.connect(_save_fib)
     load_fib_w.changed.connect(_load_fib)
     state["load_fibroblast_count"] = _load_fib
 
-    # Chainable "Run all" steps: compute then save, then call `after`.
+    # Chainable "Run all" steps: compute then save, then call `after`. `call_all`
+    # guarantees the hand-off even if the save throws.
     state["run_dapi"] = lambda after=None: _run_dapi(
-        after=(lambda: (_save_labels(), after() if after else None)))
+        after=lambda: call_all(_save_labels, after, label="run_dapi"))
     state["run_fibroblasts"] = lambda after=None: _count(
-        after=(lambda: (_save_fib(), after() if after else None)))
+        after=lambda: call_all(_save_fib, after, label="run_fibroblasts"))
     state.setdefault("save_path_widgets", []).append(
         (fib_path_w, "fibroblast_count.npz"))
 

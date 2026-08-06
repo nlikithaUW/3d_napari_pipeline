@@ -27,7 +27,14 @@ from qtpy.QtWidgets import (
 
 class _EmitStream(QObject):
     """A text stream that tees writes to ``original`` and emits them as a
-    signal for the GUI to display."""
+    signal for the GUI to display.
+
+    Implements enough of the file protocol that libraries probing the stream
+    behave. ``isatty``/``fileno``/``encoding`` in particular: progress bars
+    (tqdm, joblib) and anything calling ``os.get_terminal_size`` check those
+    first, and a stream missing them either raises or makes the bar decide it is
+    writing to a pipe and dump one line per update into the panel.
+    """
 
     text = Signal(str)
 
@@ -46,12 +53,58 @@ class _EmitStream(QObject):
             self.text.emit(s)
         return len(s) if s else 0
 
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
     def flush(self):
         if self._original is not None:
             try:
                 self._original.flush()
             except Exception:
                 pass
+
+    def isatty(self) -> bool:
+        # False even when the launching terminal is a tty: the panel is the
+        # primary destination and it cannot interpret carriage returns or ANSI
+        # cursor moves, so callers should use their non-interactive output.
+        return False
+
+    def fileno(self):
+        # Delegate so C-level writers can still find a real descriptor; raise
+        # the standard error (not AttributeError) when there isn't one, which is
+        # what callers are written to catch.
+        if self._original is not None:
+            try:
+                return self._original.fileno()
+            except Exception:
+                pass
+        raise OSError("no file descriptor behind the log panel stream")
+
+    @property
+    def encoding(self) -> str:
+        return getattr(self._original, "encoding", None) or "utf-8"
+
+    @property
+    def errors(self):
+        return getattr(self._original, "errors", None)
+
+    def writable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return False
+
+    def seekable(self) -> bool:
+        return False
+
+    @property
+    def closed(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        # Never close the real stdout/stderr underneath us.
+        self.flush()
 
 
 class LogConsole(QWidget):
@@ -103,3 +156,17 @@ def install(viewer) -> LogConsole:
     viewer.window.add_dock_widget(console, area="bottom", name="Log")
     print("Log panel ready — pipeline progress will appear here.", flush=True)
     return console
+
+
+def uninstall() -> None:
+    """Restore the original ``stdout``/``stderr``.
+
+    Without this the redirect outlives the viewer: closing napari leaves the
+    interpreter (or a subsequent headless run in the same process) writing into
+    a deleted Qt widget. Only unwinds streams this module installed, so calling
+    it twice, or when ``install`` never ran, is harmless.
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if isinstance(stream, _EmitStream):
+            setattr(sys, name, stream._original)

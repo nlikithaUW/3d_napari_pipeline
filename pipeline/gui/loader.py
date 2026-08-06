@@ -9,10 +9,9 @@ from magicgui.widgets import ComboBox, Container, FileEdit, PushButton
 from napari.qt.threading import thread_worker
 
 from ..fret import compute_fret_volume, load_force_lut, resample_fret_outputs
-from ..io import load_params, load_stack, to_isotropic
-from .widgets import percentile_limits, pyramid_views
+from ..io import fret_configured, load_params, load_stack, to_isotropic
+from .widgets import percentile_limits, pyramid_views, with_after
 
-FRET_REQUIRED = {"clover", "ruby", "fret"}
 
 # Percentile contrast defaults applied to raw channels on load (napari's
 # min/max auto-contrast magnifies the noise floor — see percentile_limits).
@@ -39,15 +38,17 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         stack_raw = load_stack(tif_path, params)
         role_to_c = {role: stack_raw.channels.index(name)
                      for role, name in stack_raw.roles.items()}
-        missing = FRET_REQUIRED - set(stack_raw.roles)
-        if missing:
-            raise ValueError(
-                f"{tif_path.name}: missing roles {sorted(missing)} required "
-                f"for FRET/force computation"
-            )
-        lut_eff, lut_force = load_force_lut(str(lut_path))
-        fret = compute_fret_volume(stack_raw.data, role_to_c, params["fret"],
-                                   lut_eff, lut_force)
+        fret_ok, why = fret_configured(params, stack_raw.roles)
+        if fret_ok:
+            print(f"  FRET: computing ({why}).", flush=True)
+            lut_eff, lut_force = load_force_lut(str(lut_path))
+            fret = compute_fret_volume(stack_raw.data, role_to_c,
+                                       params["fret"], lut_eff, lut_force)
+        else:
+            print(f"  FRET: skipped — {why}. No efficiency/force layers; the "
+                  f"force_*_pN columns will export blank. The uncalibrated "
+                  f"mClover/mRuby ratio is the tension proxy.", flush=True)
+            fret = None
         raw_shape = stack_raw.data.shape
         raw_nbytes = stack_raw.data.nbytes
         raw_voxel = stack_raw.voxel_zyx_um
@@ -59,8 +60,9 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         ruby_native = (stack_raw.data[:, role_to_c["ruby"]].copy()
                        if "ruby" in stack_raw.roles else None)
         stack = to_isotropic(stack_raw)
-        fret = resample_fret_outputs(fret, stack_raw.voxel_zyx_um,
-                                     stack.voxel_zyx_um[0])
+        if fret is not None:
+            fret = resample_fret_outputs(fret, stack_raw.voxel_zyx_um,
+                                         stack.voxel_zyx_um[0])
         # Drop the raw uint16 stack — closure would otherwise retain it.
         del stack_raw
         return (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
@@ -193,17 +195,13 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
                 pass
 
         print("Load complete.", flush=True)
-        if after:
-            after()
 
     def _err(exc):
         print(f"Load error ({tif_path.name}): {exc}", flush=True)
-        if after:
-            after()
 
     w = _run()
-    w.returned.connect(_done)
-    w.errored.connect(_err)
+    w.returned.connect(with_after(_done, after, "Load"))
+    w.errored.connect(with_after(_err, after, "Load"))
     w.start()
 
 

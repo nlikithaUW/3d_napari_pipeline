@@ -38,7 +38,7 @@ from ..vessel_mesh import (
     polar_fill_volume,
     voxel_subsample,
 )
-from .widgets import Histogram, finite_surface
+from .widgets import Histogram, call_all, finite_surface, with_after
 
 METHOD_POLAR = "polar (per-slice)"
 METHOD_ALPHA2D = "alpha 2D (per-slice)"
@@ -110,8 +110,7 @@ def build(state, viewer) -> Container:
         arr = _cadh_mask_array(state)
         if arr is None:
             print("Load a stack with a 'substrate' channel first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         scale = state["scale"]
         # Read the parameter widgets by name via item access. Attribute access
@@ -175,22 +174,16 @@ def build(state, viewer) -> Container:
                 print("The cadherin mask is empty — run the Cadherin tab and "
                       "tune its filter first.", flush=True)
                 state["vessel_mesh_cache"] = {"verts": None, "faces": None}
-                if after:
-                    after()
                 return
             if verts is None or len(verts) == 0:
                 print("No points/vertices to mesh.", flush=True)
                 state["vessel_mesh_cache"] = {"verts": None, "faces": None}
-                if after:
-                    after()
                 return
             if faces is None or len(faces) == 0:
                 hint = ("increase alpha3d_um" if method == METHOD_ALPHA3D
                         else "loosen the fill / orientation")
                 print(f"{len(verts)} vertices but 0 faces — {hint}.", flush=True)
                 state["vessel_mesh_cache"] = {"verts": verts, "faces": None}
-                if after:
-                    after()
                 return
             viewer.add_surface(
                 finite_surface(verts, faces, vals), name=LAYER_NAME,
@@ -199,19 +192,15 @@ def build(state, viewer) -> Container:
             state["vessel_mesh_cache"] = {"verts": verts, "faces": faces}
             print(f"Vessel mesh ({method}, orientation={orientation}): "
                   f"{len(verts)} verts, {len(faces)} faces.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Vessel mesh error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Building vessel mesh ({method}, "
               f"orientation={orientation}) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Vessel mesh"))
+        w.errored.connect(with_after(_err, after, "Vessel mesh"))
         w.start()
 
     suggest_w = PushButton(text="Suggest alpha_um (3D)")
@@ -283,30 +272,25 @@ def build(state, viewer) -> Container:
             d = np.load(path)
             verts = d["verts"]
             faces = d["faces"]
+            if len(verts) == 0 or len(faces) == 0:
+                print("Loaded vessel mesh is empty.", flush=True)
+                return
+            # `values` (centroid distance, for the colormap) derives from verts.
+            vals = np.linalg.norm(verts - verts.mean(0), axis=1)
+            if LAYER_NAME in viewer.layers:
+                viewer.layers.remove(LAYER_NAME)
+            lyr = viewer.add_surface(
+                finite_surface(verts, faces, vals), name=LAYER_NAME,
+                colormap="viridis", blending="translucent", opacity=0.6,
+            )
+            lyr.visible = visible
+            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces}
+            print(f"Loaded vessel mesh <- {path} "
+                  f"({len(verts)} verts, {len(faces)} faces).", flush=True)
         except Exception as exc:
             print(f"Load vessel mesh error: {exc}", flush=True)
-            if after:
-                after()
-            return
-        if len(verts) == 0 or len(faces) == 0:
-            print("Loaded vessel mesh is empty.", flush=True)
-            if after:
-                after()
-            return
-        # `values` (centroid distance, for the colormap) is derived from verts.
-        vals = np.linalg.norm(verts - verts.mean(0), axis=1)
-        if LAYER_NAME in viewer.layers:
-            viewer.layers.remove(LAYER_NAME)
-        lyr = viewer.add_surface(
-            finite_surface(verts, faces, vals), name=LAYER_NAME,
-            colormap="viridis", blending="translucent", opacity=0.6,
-        )
-        lyr.visible = visible
-        state["vessel_mesh_cache"] = {"verts": verts, "faces": faces}
-        print(f"Loaded vessel mesh <- {path} "
-              f"({len(verts)} verts, {len(faces)} faces).", flush=True)
-        if after:
-            after()
+        finally:
+            call_all(after, label="Load vessel mesh")
 
     save_mesh_w.changed.connect(_save_mesh)
     load_mesh_w.changed.connect(_load_mesh)
@@ -358,8 +342,7 @@ def build(state, viewer) -> Container:
         if verts is None or faces is None or len(verts) == 0 or len(faces) == 0:
             print("Compute curvature: build or load the vessel mesh first.",
                   flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         radius = float(curv_radius_w.value)
         smooth_iter = int(curv_smooth_w.value)
@@ -387,19 +370,15 @@ def build(state, viewer) -> Container:
             _show_curvature()
             print(f"Curvature computed (radius={radius} µm, smooth={smooth_iter}) "
                   f"on {n_surf} surface vertices.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Curvature error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Computing vessel curvature (radius={radius} µm, "
               f"smooth={smooth_iter}) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Surface curvature"))
+        w.errored.connect(with_after(_err, after, "Surface curvature"))
         w.start()
 
     curv_btn.changed.connect(_compute_curv)
@@ -444,8 +423,7 @@ def build(state, viewer) -> Container:
         if mask is None:
             print("Path curvature: compute or load the cadherin mask first "
                   "(Cadherin tab).", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         scale = state.get("scale", (1.0, 1.0, 1.0))
         smooth_um = float(path_smooth_w.value)
@@ -464,8 +442,6 @@ def build(state, viewer) -> Container:
             nbr = len(res["branch_yx_um"])
             if len(pts) == 0:
                 print("Path curvature: no centerline found.", flush=True)
-                if after:
-                    after()
                 return
             _show_path(res)
             med = float(np.median(kap))
@@ -476,18 +452,14 @@ def build(state, viewer) -> Container:
                   f"median κ = 0 (straight); {nbr} branch node(s).", flush=True)
             if med > 0:
                 print(f"  {nbr} branch node(s) detected.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Path curvature error: {exc}", flush=True)
-            if after:
-                after()
 
         print("Computing in-plane vessel path curvature (X-Y) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Path curvature"))
+        w.errored.connect(with_after(_err, after, "Path curvature"))
         w.start()
 
     path_btn.changed.connect(_compute_path)
@@ -517,21 +489,30 @@ def build(state, viewer) -> Container:
         try:
             d = np.load(path)
             curv = {k: d[k] for k in ("mean", "k1", "k2", "gaussian")}
+            cache = state.get("vessel_mesh_cache") or {"verts": None,
+                                                       "faces": None}
+            cache["curvature"] = curv
+            state["vessel_mesh_cache"] = cache
+            verts = cache.get("verts")
+            # Curvature is per-vertex, so it is only meaningful against the mesh
+            # it was computed on. A length mismatch means this file belongs to a
+            # different (or re-built) mesh: Measure silently drops every
+            # curvature column to NaN in that case, so say so here instead.
+            if verts is not None and len(curv["k1"]) != len(verts):
+                print(f"  WARNING: curvature has {len(curv['k1'])} values but "
+                      f"the loaded mesh has {len(verts)} vertices — this file "
+                      f"is from a different mesh. Curvature columns will be "
+                      f"blank; recompute the curvature (or reload the matching "
+                      f"mesh).", flush=True)
+            if verts is not None and cache.get("faces") is not None:
+                _show_curvature()
+                if not visible and CURV_LAYER in viewer.layers:
+                    viewer.layers[CURV_LAYER].visible = False
+            print(f"Loaded surface curvature <- {path}.", flush=True)
         except Exception as exc:
             print(f"Load curvature error: {exc}", flush=True)
-            if after:
-                after()
-            return
-        cache = state.get("vessel_mesh_cache") or {"verts": None, "faces": None}
-        cache["curvature"] = curv
-        state["vessel_mesh_cache"] = cache
-        if cache.get("verts") is not None and cache.get("faces") is not None:
-            _show_curvature()
-            if not visible and CURV_LAYER in viewer.layers:
-                viewer.layers[CURV_LAYER].visible = False
-        print(f"Loaded surface curvature <- {path}.", flush=True)
-        if after:
-            after()
+        finally:
+            call_all(after, label="Load curvature")
 
     path_curv_path_w = FileEdit(value="vessel_path_curvature.npz",
                                 label="path_curv_path", mode="w")
@@ -556,18 +537,15 @@ def build(state, viewer) -> Container:
             d = np.load(path)
             cl = {"pts_yx_um": d["pts_yx_um"], "kappa": d["kappa"],
                   "branch_yx_um": d["branch_yx_um"]}
+            state["vessel_centerline"] = cl
+            _show_path(cl, visible=visible)
+            print(f"Loaded path curvature <- {path}: {len(cl['pts_yx_um'])} "
+                  f"centerline points, {len(cl['branch_yx_um'])} branch node(s).",
+                  flush=True)
         except Exception as exc:
             print(f"Load path curvature error: {exc}", flush=True)
-            if after:
-                after()
-            return
-        state["vessel_centerline"] = cl
-        _show_path(cl, visible=visible)
-        print(f"Loaded path curvature <- {path}: {len(cl['pts_yx_um'])} "
-              f"centerline points, {len(cl['branch_yx_um'])} branch node(s).",
-              flush=True)
-        if after:
-            after()
+        finally:
+            call_all(after, label="Load path curvature")
 
     save_curv_w.changed.connect(_save_curv)
     load_curv_w.changed.connect(_load_curv)
@@ -582,11 +560,13 @@ def build(state, viewer) -> Container:
 
     # Chainable "Run all" steps: compute then save, then call `after`.
     state["run_vessel_mesh"] = lambda after=None: _run_build(
-        after=(lambda: (_save_mesh(), after() if after else None)))
+        after=lambda: call_all(_save_mesh, after, label="run_vessel_mesh"))
     state["run_vessel_curvature"] = lambda after=None: _compute_curv(
-        after=(lambda: (_save_curv(), after() if after else None)))
+        after=lambda: call_all(_save_curv, after,
+                               label="run_vessel_curvature"))
     state["run_vessel_path_curvature"] = lambda after=None: _compute_path(
-        after=(lambda: (_save_path_curv(), after() if after else None)))
+        after=lambda: call_all(_save_path_curv, after,
+                               label="run_vessel_path_curvature"))
 
     return (Container(widgets=[controls, suggest_w,
                               mesh_path_w, save_mesh_w, load_mesh_w,

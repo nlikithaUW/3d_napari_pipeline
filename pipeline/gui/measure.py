@@ -12,7 +12,26 @@ from matplotlib.figure import Figure
 from napari.qt.threading import thread_worker
 from scipy.spatial import KDTree
 
+from ..fret import background_subtract
+from .widgets import call_all, with_after
+
 N_WORKERS = max(1, (os.cpu_count() or 8) - 4)
+
+
+def _bs_per_z(vol: np.ndarray) -> np.ndarray:
+    """Per-Z-plane background subtraction, via the frozen ``fret`` routine.
+
+    Each plane's modal intensity is its own background (the mode shifts with
+    depth as the illumination attenuates), so this must be applied plane by
+    plane rather than once over the volume.
+    """
+    out = np.empty(vol.shape, dtype=np.float32)
+    for z in range(vol.shape[0]):
+        # background_subtract returns float64; write straight into the float32
+        # buffer so only one plane's worth of float64 exists at a time (np.stack
+        # of every plane would peak at 2x the volume in float64).
+        out[z] = background_subtract(vol[z])
+    return out
 
 
 def build(state, viewer):
@@ -24,30 +43,29 @@ def build(state, viewer):
 
     def _measure(*_, after=None):
         # ---- prerequisite checks ----
-        if state.get("force_vol") is None:
-            print("Measure: load an image first (force_vol not computed).", flush=True)
-            if after:
-                after()
+        # NB: force_vol is legitimately None when FRET isn't configured (see
+        # loader.fret_configured), so "is an image loaded?" is asked of `scale`,
+        # not of the force volume. The force columns just come out NaN.
+        if state.get("scale") is None:
+            print("Measure: load an image first.", flush=True)
+            call_all(after)
             return
         if (state.get("vessel_mesh_cache") or {}).get("verts") is None:
             print("Measure: build the vessel mesh first (Vessel mesh tab).", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         if (state.get("dapi_state") or {}).get("labels") is None:
             print("Measure: compute nuclei first (Nuclei tab → Compute).", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         layer_names = [lay.name for lay in viewer.layers]
         if "Adhesion instances" not in layer_names:
             print("Measure: run RF predict + Apply first "
                   "(Adhesion RF tab → Apply post-process).", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
 
-        force_vol = state["force_vol"]
+        force_vol = state.get("force_vol")
         vessel_verts = state["vessel_mesh_cache"]["verts"]
         nuc_labels_full = state["dapi_state"]["labels"]
         scale = state.get("scale", (1.0, 1.0, 1.0))
@@ -112,16 +130,29 @@ def build(state, viewer):
                 ],
             )
 
-            # Step 3 — force statistics
-            force_mean = np.array(sndi.mean(force_vol, labels, index=unique_ids))
-            force_std  = np.array(sndi.standard_deviation(force_vol, labels,
-                                                            index=unique_ids))
+            # Step 3 — force statistics. NaN when FRET isn't configured for this
+            # dataset (no force volume was computed); the columns export blank.
+            if force_vol is None:
+                force_mean = np.full(unique_ids.shape, np.nan, dtype=np.float64)
+                force_std = np.full(unique_ids.shape, np.nan, dtype=np.float64)
+            else:
+                force_mean = np.array(sndi.mean(force_vol, labels, index=unique_ids))
+                force_std  = np.array(sndi.standard_deviation(force_vol, labels,
+                                                                index=unique_ids))
 
             # Step 3b — per-adhesion clover/ruby ratio on NATIVE Z (matches the
             # Adhesion RF tab). The isotropic adhesion labels are mapped down to
-            # the native Z planes (nearest neighbour) so the ratio averages
-            # measured, non-interpolated voxels. Aligned to unique_ids; NaN where
-            # an adhesion has no ruby > 0 native voxel.
+            # the native Z planes (nearest neighbour) so the ratio uses measured,
+            # non-interpolated voxels.
+            #
+            # Total clover / total ruby over the adhesion, both background-
+            # subtracted per Z plane first. Summing before dividing keeps one dim
+            # voxel from dominating (a mean of per-voxel ratios is driven by its
+            # smallest denominators), and the background subtraction stops dim
+            # (deep) adhesions from drifting toward a fixed offset ratio — which
+            # would masquerade as a curvature effect, since depth and curvature
+            # covary on a tube. Aligned to unique_ids; NaN where an adhesion's
+            # ruby is entirely at/below background.
             if (clover_native is not None and ruby_native is not None
                     and clover_native.shape[1:] == labels.shape[1:]):
                 Zn = clover_native.shape[0]
@@ -129,17 +160,19 @@ def build(state, viewer):
                 iso_idx = np.clip(np.rint(np.arange(Zn) * zf).astype(np.int64),
                                   0, labels.shape[0] - 1)
                 labels_n = labels[iso_idx]                    # (Zn, Y, X)
-                ruby_f = ruby_native.astype(np.float32)
-                inside = (labels_n > 0) & (ruby_f > 0)
-                rv = clover_native.astype(np.float32)[inside] / ruby_f[inside]
+                clover_bs = _bs_per_z(clover_native)
+                ruby_bs = _bs_per_z(ruby_native)
+                inside = labels_n > 0
                 lv = labels_n[inside]
                 nmax = int(labels.max())
-                sums = np.bincount(lv, weights=rv, minlength=nmax + 1)
-                cnts = np.bincount(lv, minlength=nmax + 1)
+                c_sum = np.bincount(lv, weights=clover_bs[inside],
+                                    minlength=nmax + 1)
+                r_sum = np.bincount(lv, weights=ruby_bs[inside],
+                                    minlength=nmax + 1)
                 with np.errstate(invalid="ignore", divide="ignore"):
-                    ratio_by_label = sums / cnts
+                    ratio_by_label = c_sum / r_sum
+                ratio_by_label[r_sum <= 0] = np.nan
                 ratio_mean = ratio_by_label[unique_ids].astype(np.float32)
-                ratio_mean[cnts[unique_ids] == 0] = np.nan
             else:
                 ratio_mean = np.full(unique_ids.shape, np.nan, dtype=np.float32)
 
@@ -249,6 +282,10 @@ def build(state, viewer):
                 "dist_nuc_um":    nuc_min,
                 "nuc_id":         nuc_assignment,
                 "ratio_clover_ruby": ratio_mean,
+                # regionprops_table was given `spacing=scale`, so these are µm.
+                "centroid_z_um":  props["centroid-0"],
+                "centroid_y_um":  props["centroid-1"],
+                "centroid_x_um":  props["centroid-2"],
                 "curv_mean":      curv_out["mean"],
                 "curv_k1":        curv_out["k1"],
                 "curv_k2":        curv_out["k2"],
@@ -260,8 +297,6 @@ def build(state, viewer):
         def _done(result):
             if result is None:
                 print("Measure: no adhesion instances found.", flush=True)
-                if after:
-                    after()
                 return
             state["measure_result"] = result
 
@@ -275,10 +310,14 @@ def build(state, viewer):
             cr_f = cr[np.isfinite(cr)]
             cr_line = (f"  Clover/Ruby:     {cr_f.mean():.3f} ± {cr_f.std():.3f}"
                        if cr_f.size else "  Clover/Ruby:     n/a (no ruby data)")
+            fm_f = fm[np.isfinite(fm)]
+            fm_line = (f"  Force:           {fm_f.mean():.2f} ± "
+                       f"{fm_f.std():.2f} pN" if fm_f.size else
+                       "  Force:           n/a (FRET not configured)")
 
             print(
                 f"Measured {n_adh} adhesions across {n_nuc} nuclei\n"
-                f"  Force:           {fm.mean():.2f} ± {fm.std():.2f} pN\n"
+                f"{fm_line}\n"
                 f"  Dist to mesh:    {dm.mean():.2f} ± {dm.std():.2f} µm\n"
                 f"  Dist to nucleus: {dn.mean():.2f} ± {dn.std():.2f} µm\n"
                 f"  Volume:          {vol.mean():.2f} ± {vol.std():.2f} µm³\n"
@@ -315,25 +354,27 @@ def build(state, viewer):
                     _update_plots(result)
                 except Exception as exc:
                     print(f"Measure: plot update skipped ({exc})", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             import traceback
             print(f"Measure error: {exc}\n{traceback.format_exc()}", flush=True)
-            if after:
-                after()
 
         print("Measuring adhesions ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Measure"))
+        w.errored.connect(with_after(_err, after, "Measure"))
         w.start()
 
     measure_btn.changed.connect(_measure)
 
     def _kde_overlay(ax, data, color):
-        """Histogram with KDE overlay (density-normalised)."""
+        """Histogram with KDE overlay (density-normalised).
+
+        Drops non-finite values first: force is all-NaN when FRET isn't
+        configured, and hist/linspace on NaN would blow up the whole figure.
+        """
+        data = np.asarray(data)
+        data = data[np.isfinite(data)]
         if data.size < 2:
             return
         from scipy.stats import gaussian_kde
@@ -422,6 +463,7 @@ def build(state, viewer):
         # Requested columns first (clover/ruby ratio, distance to vessel mesh),
         # then the rest of the per-adhesion metrics.
         cols = ["label", "ratio_clover_ruby", "dist_mesh_um",
+                "centroid_z_um", "centroid_y_um", "centroid_x_um",
                 "path_curv_xy", "dist_branch_um",
                 "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
                 "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
@@ -475,16 +517,15 @@ def build(state, viewer):
     # predict + post-process didn't create adhesion instances).
     def _run_measure_step(after=None):
         state["measure_result"] = None   # so export fires only on a fresh result
-        def _after():
+        def _export_if_measured():
             if state.get("measure_result") is not None:
                 _export()
             else:
                 print("Run all: measure produced no result — skipping export. "
                       "Check that RF predict + post-process created adhesion "
                       "instances (look for 'Adhesion instances: N').", flush=True)
-            if after:
-                after()
-        _measure(after=_after)
+        _measure(after=lambda: call_all(_export_if_measured, after,
+                                        label="run_measure"))
     state["run_measure"] = _run_measure_step
 
     controls = Container(widgets=[measure_btn, export_path_w, export_btn],

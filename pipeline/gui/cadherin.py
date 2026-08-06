@@ -28,7 +28,7 @@ from ..denoise import (
     sauvola_mask,
     suggest_floor_k,
 )
-from .widgets import Histogram, debounce, pyramid_views
+from .widgets import Histogram, call_all, debounce, pyramid_views, with_after
 
 METHOD_NIBLACK = "niblack"
 METHOD_SAUVOLA = "sauvola"
@@ -138,8 +138,7 @@ def build(state, viewer) -> Container:
         cadh_raw = state.get("cadh_raw")
         if cadh_raw is None:
             print("Load a stack with a 'substrate' channel first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         scale = state["scale"]
         method = threshold_controls["method"].value
@@ -201,21 +200,17 @@ def build(state, viewer) -> Container:
                 _layer.visible = True
             _redraw(int(filter_controls.min_size.value))
             filter_controls()
-            if after:
-                after()
 
         def _err(exc):
             print(f"Cadherin error: {exc}", flush=True)
-            if after:
-                after()
 
         floor = robust_floor_value(cadh_raw, floor_k)
         floor_str = f"{floor:.1f}" if floor is not None else "off"
         print(f"Cadherin: {method} running (window_xy={window_xy}, "
               f"floor_k={floor_k} → floor={floor_str}) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Cadherin"))
+        w.errored.connect(with_after(_err, after, "Cadherin"))
         w.start()
 
     def _seed_floor():
@@ -283,18 +278,14 @@ def build(state, viewer) -> Container:
                 state["cadh_mask_layer"].visible = False
             print(f"Loaded VE-Cadherin components <- {path}: {sizes.size} "
                   f"components.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Load cadherin error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Loading VE-Cadherin components from {path} ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Load cadherin"))
+        w.errored.connect(with_after(_err, after, "Load cadherin"))
         w.start()
 
     save_cadh_w.changed.connect(_save_cadh)
@@ -304,7 +295,8 @@ def build(state, viewer) -> Container:
     # Chainable "Run all" step: force Sauvola, compute, save, then `after`.
     def _run_cadherin_step(after=None):
         threshold_controls["method"].value = METHOD_SAUVOLA
-        _run_cadherin(after=(lambda: (_save_cadh(), after() if after else None)))
+        _run_cadherin(after=lambda: call_all(_save_cadh, after,
+                                             label="run_cadherin"))
     state["run_cadherin"] = _run_cadherin_step
     state.setdefault("save_path_widgets", []).append(
         (cadh_path_w, "cadherin_labels.npz"))

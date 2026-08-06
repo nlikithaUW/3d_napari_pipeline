@@ -1,9 +1,15 @@
 """Standalone per-adhesion measurement (no napari / no Qt).
 
-Mirrors the Measure tab's worker exactly so the headless batch produces the same
-CSV columns. Given the adhesion label volume + the saved intermediates (force
-volume, vessel vertices, DAPI labels, native clover/ruby channels, surface
-curvature, centerline), it returns the same result dict the GUI assembles.
+Produces the same result dict — and therefore the same CSV columns — as the
+Measure tab's worker, given the adhesion label volume + the saved intermediates
+(force volume, vessel vertices, DAPI labels, native clover/ruby channels,
+surface curvature, centerline).
+
+NOT a byte-for-byte mirror of the GUI worker: this copy has no X-Y ROI filter,
+so it measures every adhesion in the volume where the GUI would measure only
+those inside a drawn region. The two implementations are duplicated and have
+already diverged once — see TODO.md ("measure_core.py duplicates the Measure
+worker").
 """
 
 from __future__ import annotations
@@ -13,11 +19,33 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from scipy.spatial import cKDTree as KDTree
 
+from .fret import background_subtract
+
+
+def _bs_per_z(vol: np.ndarray) -> np.ndarray:
+    """Per-Z-plane background subtraction, via the frozen ``fret`` routine.
+
+    Each plane's modal intensity is its own background (the mode shifts with
+    depth as the illumination attenuates), so this must be applied plane by
+    plane rather than once over the volume.
+    """
+    out = np.empty(vol.shape, dtype=np.float32)
+    for z in range(vol.shape[0]):
+        # background_subtract returns float64; write straight into the float32
+        # buffer so only one plane's worth of float64 exists at a time (np.stack
+        # of every plane would peak at 2x the volume in float64).
+        out[z] = background_subtract(vol[z])
+    return out
+
 
 def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale,
                          clover_native, ruby_native, raw_voxel, curvature,
                          centerline):
-    """Return the per-adhesion measurement dict (or None if no adhesions)."""
+    """Return the per-adhesion measurement dict (or None if no adhesions).
+
+    ``force_vol`` may be None when FRET is not configured; the force columns are
+    then all-NaN and export blank.
+    """
     from skimage.measure import regionprops_table
     import scipy.ndimage as sndi
 
@@ -32,11 +60,19 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
                     "axis_minor_length", "centroid"],
     )
 
-    force_mean = np.array(sndi.mean(force_vol, labels, index=unique_ids))
-    force_std = np.array(sndi.standard_deviation(force_vol, labels,
-                                                 index=unique_ids))
+    if force_vol is None:
+        force_mean = np.full(unique_ids.shape, np.nan, dtype=np.float64)
+        force_std = np.full(unique_ids.shape, np.nan, dtype=np.float64)
+    else:
+        force_mean = np.array(sndi.mean(force_vol, labels, index=unique_ids))
+        force_std = np.array(sndi.standard_deviation(force_vol, labels,
+                                                     index=unique_ids))
 
-    # Per-adhesion clover/ruby ratio on native Z.
+    # Per-adhesion clover/ruby ratio on native Z: total clover / total ruby over
+    # the adhesion, both background-subtracted per Z plane first. Summing before
+    # dividing keeps one dim voxel from dominating (a mean of per-voxel ratios
+    # is driven by its smallest denominators), and the background subtraction
+    # stops dim/deep adhesions from drifting toward a fixed offset ratio.
     if (clover_native is not None and ruby_native is not None
             and clover_native.shape[1:] == labels.shape[1:]):
         Zn = clover_native.shape[0]
@@ -44,17 +80,18 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         iso_idx = np.clip(np.rint(np.arange(Zn) * zf).astype(np.int64),
                           0, labels.shape[0] - 1)
         labels_n = labels[iso_idx]
-        ruby_f = ruby_native.astype(np.float32)
-        inside = (labels_n > 0) & (ruby_f > 0)
-        rv = clover_native.astype(np.float32)[inside] / ruby_f[inside]
+        clover_bs = _bs_per_z(clover_native)
+        ruby_bs = _bs_per_z(ruby_native)
+        inside = labels_n > 0
         lv = labels_n[inside]
         nmax = int(labels.max())
-        sums = np.bincount(lv, weights=rv, minlength=nmax + 1)
-        cnts = np.bincount(lv, minlength=nmax + 1)
+        c_sum = np.bincount(lv, weights=clover_bs[inside], minlength=nmax + 1)
+        r_sum = np.bincount(lv, weights=ruby_bs[inside], minlength=nmax + 1)
         with np.errstate(invalid="ignore", divide="ignore"):
-            ratio_by_label = sums / cnts
+            ratio_by_label = c_sum / r_sum
+        # An adhesion whose ruby is entirely at/below background has no ratio.
+        ratio_by_label[r_sum <= 0] = np.nan
         ratio_mean = ratio_by_label[unique_ids].astype(np.float32)
-        ratio_mean[cnts[unique_ids] == 0] = np.nan
     else:
         ratio_mean = np.full(unique_ids.shape, np.nan, dtype=np.float32)
 
@@ -146,6 +183,10 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         "dist_nuc_um": nuc_min,
         "nuc_id": nuc_assignment,
         "ratio_clover_ruby": ratio_mean,
+        # regionprops_table was given `spacing=scale`, so these are µm.
+        "centroid_z_um": props["centroid-0"],
+        "centroid_y_um": props["centroid-1"],
+        "centroid_x_um": props["centroid-2"],
         "curv_mean": curv_out["mean"],
         "curv_k1": curv_out["k1"],
         "curv_k2": curv_out["k2"],

@@ -3,8 +3,9 @@
 Probes for cupy once at import. If a working CUDA device is present, the
 wrappers below run on the GPU (``cp.asarray`` -> ``cupyx.scipy.ndimage`` ->
 ``cp.asnumpy``); otherwise they transparently call ``scipy.ndimage``. An
-out-of-memory error on a single call degrades to CPU for that call rather than
-crashing, so a too-large volume is handled gracefully.
+out-of-memory error on a single call degrades to CPU for that call (with a
+printed note) rather than crashing, so a too-large volume is handled gracefully.
+Any *other* CUDA failure propagates — see ``_oom`` / ``_is_oom``.
 
 cupy is entirely optional: a GPU-less env (the import fails) just uses scipy.
 """
@@ -29,31 +30,84 @@ def gpu_enabled() -> bool:
     return HAS_GPU
 
 
+# CUDA runtime status codes (driver_types.h). cupy raises a single
+# ``CUDARuntimeError`` carrying the code in ``.status`` but does not re-export
+# the names (checked against cupy 14.1), so they are spelled out here.
+cudaErrorMemoryAllocation = 2
+cudaErrorAlreadyMapped = 208
+
+
 def _oom():
-    """cupy exception types that mean "the device couldn't do this call" — a
-    signal to retry the call on the CPU. Covers both the memory-pool OOM
-    (``OutOfMemoryError``) and runtime-level failures such as a pinned host
-    alloc OOM or ``cudaErrorAlreadyMapped`` (``CUDARuntimeError``), which are a
-    *different* exception class and would otherwise escape the fallback. Empty
-    (never-raised) on a CPU-only env."""
+    """cupy exception types that *may* mean "the device ran out of room" — the
+    only condition worth retrying on the CPU.
+
+    Two classes qualify. ``OutOfMemoryError`` is the memory-pool OOM and always
+    counts. ``CUDARuntimeError`` is the base class for *every* CUDA runtime
+    failure — an illegal memory access and a kernel launch failure raise it just
+    as a pinned-host-alloc OOM does — so catching it alone would silently demote
+    real bugs to a slow CPU path. ``_is_oom`` filters it down by status code.
+
+    Empty (never-raised) on a CPU-only env.
+    """
     if HAS_GPU:
         return (cp.cuda.memory.OutOfMemoryError,
                 cp.cuda.runtime.CUDARuntimeError)
     return ()
 
 
-def _run(gpu_op, cpu_op, arr: np.ndarray, **kw) -> np.ndarray:
+def _is_oom(exc) -> bool:
+    """True only for genuine resource exhaustion, so everything else re-raises.
+
+    ``cudaErrorMemoryAllocation`` is device/pinned-host alloc failure.
+    ``cudaErrorAlreadyMapped`` is the pinned-transfer pool being exhausted by
+    concurrent host threads (see ``fret.resample_fret_outputs``). Both are
+    retryable on the CPU; an illegal access or launch failure is not.
+    """
+    if isinstance(exc, cp.cuda.memory.OutOfMemoryError):
+        return True
+    status = getattr(exc, "status", None)
+    return status in (cudaErrorMemoryAllocation, cudaErrorAlreadyMapped)
+
+
+def _free_pools() -> None:
+    """Drain the cupy memory pools, tolerating a sticky CUDA error.
+
+    Called from inside an exception handler. After a sticky error every
+    subsequent CUDA call — including these — raises, so an unguarded drain
+    replaces the original exception with a traceback pointing at the cleanup.
+    """
+    try:
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
+
+
+def _fallback(exc, what: str) -> None:
+    """Re-raise unless ``exc`` is a retryable OOM; otherwise drain and report.
+
+    The report matters: a silent fallback turns "the GPU is out of memory" into
+    "why did this run take twenty minutes", with nothing on screen to explain it.
+    """
+    if not _is_oom(exc):
+        raise exc
+    _free_pools()
+    print(f"  gpu: {what} fell back to CPU ({type(exc).__name__}: {exc})",
+          flush=True)
+
+
+def _run(gpu_op, cpu_op, arr: np.ndarray, name: str = "", **kw) -> np.ndarray:
     """Run ``gpu_op`` on the GPU if available, else ``cpu_op`` on the CPU.
 
-    Falls back to CPU for this single call on out-of-memory.
+    Falls back to CPU for this single call on out-of-memory; any other CUDA
+    failure propagates. ``name`` labels the fallback message — pass it when
+    ``cpu_op`` is a lambda and so has no useful ``__name__``.
     """
     if HAS_GPU:
         try:
             return cp.asnumpy(gpu_op(cp.asarray(arr), **kw))
-        except _oom():
-            if cp is not None:
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()
+        except _oom() as exc:
+            _fallback(exc, name or getattr(cpu_op, "__name__", "op"))
     return cpu_op(arr, **kw)
 
 
@@ -103,8 +157,8 @@ def uniform_filter(arr: np.ndarray, size, **kw) -> np.ndarray:
             sizes = tuple(size) if isinstance(size, (tuple, list)) else (int(size),) * a.ndim
             out = _box_mean_gpu(a, sizes)
             return cp.asnumpy(out).astype(arr.dtype, copy=False)
-        except _oom():
-            cp.get_default_memory_pool().free_all_blocks()
+        except _oom() as exc:
+            _fallback(exc, "uniform_filter")
     return _sndi.uniform_filter(arr, size=size, **kw)
 
 
@@ -132,8 +186,8 @@ def local_mean_std(v: np.ndarray, win) -> tuple[np.ndarray, np.ndarray]:
             var = m2 - m * m
             cp.maximum(var, 0.0, out=var)
             return cp.asnumpy(m + mu), cp.asnumpy(cp.sqrt(var))
-        except _oom():
-            cp.get_default_memory_pool().free_all_blocks()
+        except _oom() as exc:
+            _fallback(exc, "local_mean_std")
     vf = v.astype(np.float32, copy=False)
     mu = float(vf.mean())
     vs = vf - mu
@@ -162,10 +216,10 @@ def maximum_filter(arr: np.ndarray, **kw) -> np.ndarray:
 def zoom(arr: np.ndarray, *args, **kw) -> np.ndarray:
     gpu_op = (lambda a, **k: cndi.zoom(a, *args, **k)) if HAS_GPU else None
     cpu_op = lambda a, **k: _sndi.zoom(a, *args, **k)
-    return _run(gpu_op, cpu_op, arr, **kw)
+    return _run(gpu_op, cpu_op, arr, name="zoom", **kw)
 
 
 def gaussian_filter(arr: np.ndarray, sigma, order=0, **kw) -> np.ndarray:
     gpu_op = (lambda a, **k: cndi.gaussian_filter(a, sigma, order=order, **k)) if HAS_GPU else None
     cpu_op = lambda a, **k: _sndi.gaussian_filter(a, sigma, order=order, **k)
-    return _run(gpu_op, cpu_op, arr, **kw)
+    return _run(gpu_op, cpu_op, arr, name="gaussian_filter", **kw)

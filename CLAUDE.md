@@ -20,8 +20,7 @@ stays narrow.
 
 ### Two cell types — both DAPI-positive
 
-This is the fact that matters most, and the one whose absence caused several of
-PR #1's problems:
+This is the fact that matters most.
 
 | Cell type | Marker | Notes |
 |---|---|---|

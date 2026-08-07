@@ -289,9 +289,19 @@ One row per adhesion, in each `<stem>_saved/<stem>_adhesion_measures_<ts>.csv`.
 
 ## What not to trust yet
 
-Three sets of numbers are produced but are **not** yet suitable for
-interpretation. `TODO.md` has the full detail and what fixing each involves.
+Several outputs are produced but are **not** yet suitable for interpretation.
+`TODO.md` has the full detail and what fixing each involves.
 
+- **`ratio_clover_ruby`** — the tension readout itself carries two caveats,
+  both measured on `V3_..._04step_002` (2092 adhesions):
+  - **mRuby sits only ~6% above its own background** (30 counts over ~490,
+    versus mClover's 664 over ~530). Because `background_subtract` quantises
+    the background to ±5 counts, that is a **~16% systematic error on every
+    ratio**, and the highest ratios are the adhesions with the least ruby.
+    Treat the ratio as a rank, not a calibrated quantity.
+  - **It drifts ~23% with imaging depth** (shallowest quartile 25.6, deepest
+    19.7). mClover attenuates 24% with depth while mRuby does not, which fully
+    accounts for the drift — it is optics, not biology.
 - **`force_mean_pN` / `force_std_pN` / `force_total_pN`** — blank on this
   dataset by design (no FRET calibration). If you *do* configure a `fret` block,
   the numbers are only as good as your calibration; the LUT shipped here is for
@@ -305,18 +315,28 @@ interpretation. `TODO.md` has the full detail and what fixing each involves.
   first is a product of two curvatures, so the signs cancel; the second is
   computed in-plane without surface normals).
 
-**Before believing any tension-vs-curvature relationship,** plot
-`ratio_clover_ruby` against `centroid_z_um`. Depth and curvature covary on a
-tube, so if optical attenuation still drives the ratio, an attenuation artefact
-will present as a curvature effect. Also note that adhesions are not independent
-observations — many per cell, few images — so pooled correlation p-values mostly
-reflect adhesion count. Report per-image first.
+**Before believing any tension-vs-curvature relationship,** run:
+
+```bash
+python Scripts/depth_check.py --dir 3d_images_folder/images/WT --channels
+```
+
+The tube lies in xy and is imaged through it, so depth is effectively "near wall
+vs far wall" — and curvature covaries with depth. On the one image measured so
+far the depth drift is large enough that a curvature relationship would be
+substantially an attenuation artefact. Also note that adhesions are not
+independent observations — many per cell, few images — so pooled correlation
+p-values mostly reflect adhesion count. Report per-image first.
 
 ## Helper scripts (`Scripts/`)
 
 - `nd2_to_ometiff.py` — convert raw `.nd2` to OME-TIFF, dropping junk channels
   and writing pixel size + channel names into the OME metadata.
 - `gputest.py` — quick check that the cupy/CUDA GPU path works.
+- `depth_check.py` — tests whether `ratio_clover_ruby` drifts with imaging depth
+  (it does; see above). `--channels` splits the ratio into mClover and mRuby to
+  show which channel drives the drift and how much signal each has over
+  background.
 - `vecad_mip.py` — batch max-intensity-projection PNGs of the VE-cadherin channel.
 - `fibroblast_cellpose.py` — count endothelial cells from the VE-cadherin channel
   with Cellpose (needs `pip install cellpose`), for deriving fibroblast counts.

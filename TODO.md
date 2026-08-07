@@ -8,7 +8,91 @@ that don't exist yet, which cannot.
 
 # Known problems
 
-## 1. Curvature sign inverts on branched vessels
+## 1. The ruby channel is barely above background
+
+**Where:** the data itself, surfacing in `ratio_clover_ruby` — the primary
+tension output. Diagnose with
+`python Scripts/depth_check.py --dir <images/WT> --channels`.
+
+**What's wrong:** measured on `V3_CorrectSettings_40xWater_04step_002`
+(2092 adhesions), per voxel inside adhesions, after per-plane background
+subtraction:
+
+| channel | signal | background | contrast |
+|---|---|---|---|
+| mClover | 664 counts | ~530 | **125%** |
+| mRuby   | 30 counts  | ~490 | **6.2%** |
+
+The denominator of the tension ratio sits ~6% above its own background. Two
+consequences:
+
+- `fret.background_subtract` finds the background as the mode of a histogram
+  with `bin_size=10`, so the estimate is quantised to ±5 counts. On a 664-count
+  clover signal that is 0.8%; on a 30-count ruby signal it is **~16% systematic
+  error on every ratio**, before any noise.
+- The adhesions with the highest ratios are the ones with the *least* ruby
+  (weakest decile: 18.8 counts/voxel → median ratio 34.4, against 22.0 overall).
+  The high tail of the tension distribution is where the measurement is least
+  reliable.
+
+**What you see:** `ratio_clover_ruby` values that look precise (median 22.0,
+range 6.7–151.5) but whose spread is substantially denominator noise. Note the
+ratio is inherently coupled to its denominator, so a strong ratio–ruby
+correlation is expected; it is the *contrast* figures above that make it a
+problem, not the correlation alone.
+
+**Fixing it** is mostly not a code change — mRuby2 needs more signal
+(acquisition: longer exposure / higher gain / better acceptor expression). On
+the code side, `background_subtract`'s `bin_size` is far too coarse for a
+channel this dim, but `pipeline/fret.py` is **frozen** and that function is
+shared with the FRET path, so changing it needs an explicit decision. Until
+then, treat the ratio as ordinal (rank) rather than a calibrated quantity, and
+be wary of the high tail.
+
+## 2. The tension readout drifts with imaging depth
+
+**Where:** an optical confound in `ratio_clover_ruby`, not a code defect.
+Reproduce with `python Scripts/depth_check.py --dir <images/WT> --channels`.
+
+**What's wrong:** on the same image, comparing the shallowest depth quartile
+against the deepest:
+
+| | shallow 25% | deep 25% | change |
+|---|---|---|---|
+| `ratio_clover_ruby` | 25.55 | 19.71 | **−23%** |
+| clover / voxel | 748 | 572 | −24% |
+| ruby / voxel | 29.2 | 29.6 | +1% |
+
+Clover (~515 nm) attenuates with depth; mRuby2 (~600 nm) does not measurably.
+A 24% drop in the numerator against a flat denominator fully accounts for the
+23% drop in the ratio. Adhesion volume (rho −0.007) and `dist_mesh_um`
+(rho +0.046) do *not* vary with depth, so this is not a segmentation or
+placement artefact.
+
+Note the ruby channel's flatness has two possible readings and both are bad:
+either red genuinely penetrates better, or ruby is too close to its noise floor
+(problem 1) to register attenuation at all.
+
+**Why it matters:** the tube lies in xy and is imaged through, so depth is
+essentially "near wall vs far wall" — the depth histogram is bimodal (1402
+adhesions at 0–20 µm, 447 at 80–100 µm, few between). `curv_mean` covaries with
+depth (rho −0.139), so **a tension-vs-curvature correlation on this data would
+be substantially an attenuation artefact**. That said, `curv_mean` is itself
+unreliable (problem 3), so the curvature–depth link may partly *be* the
+normal-sign bug; the two are entangled and problem 3 has to be fixed before the
+size of the confound can be measured.
+
+**What you see:** a real-looking tension gradient across the vessel that is
+optics, not biology.
+
+**Fixing it** needs, in order: (a) confirm it replicates across all six images
+— one field cannot distinguish a depth effect from a peculiarity of that field;
+(b) fix problem 3 so curvature is trustworthy; (c) then either correct for
+depth (fit and divide out the attenuation per channel), restrict analysis to a
+depth band, or include depth as a covariate rather than ignoring it. Do not
+report a curvature relationship before this is settled.
+
+## 3. Curvature sign inverts on branched vessels
 
 **Where:** `pipeline/cell_mesh.py::vertex_outward_normals`, consumed by
 `mesh_curvature`.
@@ -34,7 +118,7 @@ reference and is already computed in `pipeline/centerline.py`), or take the sign
 from a signed distance field of the filled lumen. Deliberately deferred — it is
 a design decision about what "outward" means on a branched tube.
 
-## 2. Fibroblast / endothelial classifier is unvalidated
+## 4. Fibroblast / endothelial classifier is unvalidated
 
 **Where:** `pipeline/gui/nuclei.py`, the "Count fibroblasts" step →
 `n_fibroblasts`.
@@ -66,7 +150,7 @@ there's no way to tell a fix from a regression. Two cell types that are both
 DAPI-positive and distinguished only by which marker they carry is the core
 unsolved problem in this project.
 
-## 3. `measure_core.py` duplicates the Measure worker and has diverged
+## 5. `measure_core.py` duplicates the Measure worker and has diverged
 
 **Where:** `pipeline/measure_core.py::compute_measurements` vs the `_run` worker
 inside `pipeline/gui/measure.py`.
@@ -85,7 +169,7 @@ symptom.
 **Fixing it** means extracting one implementation both call — a restructure that
 should not share a commit with behaviour changes. Deliberately deferred.
 
-## 4. Curvature is assigned with no distance limit
+## 6. Curvature is assigned with no distance limit
 
 **Where:** `measure_core.py` / `gui/measure.py`, the curvature block.
 
@@ -103,7 +187,7 @@ far an adhesion can sit from the wall and still be "on" it. Needs a number from
 the user. **Interim workaround: filter on `dist_mesh_um` yourself when
 analysing the CSV.**
 
-## 5. Path curvature is undefined at branch nodes but still reported
+## 7. Path curvature is undefined at branch nodes but still reported
 
 **Where:** `pipeline/centerline.py` → `path_curv_xy`.
 
@@ -115,7 +199,7 @@ artefact of whichever branch the skeletonisation happened to trace through.
 `dist_branch_um` column exists and is the tool for this: **filter out small
 `dist_branch_um` when using `path_curv_xy`.** Nothing does that automatically.
 
-## 6. `cadherin_junction_proba` has no consumer
+## 8. `cadherin_junction_proba` has no consumer
 
 **Where:** `pipeline/gui/cadherin_rf.py`.
 
@@ -129,7 +213,7 @@ a dead end. It is a reasonable path to endothelial-cell segmentation (a clean
 junction network is far more segmentable than thresholded VE-cad), but that
 consumer has not been written.
 
-## 7. Corrections to the record
+## 9. Corrections to the record
 
 Statements in the deleted `CHANGES.md` that were wrong, recorded here so they
 don't get rediscovered:
@@ -144,9 +228,9 @@ don't get rediscovered:
   intermediates only. Use `pipeline.batch_measure` for headless CSVs.
 - **Undocumented in PR #1:** the force-proxy tab was **removed** (superseded by
   the clover/ruby ratio; `pipeline/gui/force_proxy.py` has now been deleted), and
-  the **VE-cad RF tab was added** (see problem 6).
+  the **VE-cad RF tab was added** (see problem 8).
 
-## 8. Statistical caution for the force-vs-curvature goal
+## 10. Statistical caution for the force-vs-curvature goal
 
 Not a code defect — a analysis trap this dataset is shaped to fall into.
 
@@ -216,7 +300,7 @@ sanely in the Log dock rather than emitting one line per update.
 
 ## 2. Fibroblast / endothelial scatter diagnostic
 
-**Want:** a validation signal for problem 2 above, before touching the
+**Want:** a validation signal for problem 4 above, before touching the
 classifier itself.
 
 **Idea:** one point per cell, plotted as **per-cell sensor signal (mClover)** vs
@@ -240,9 +324,9 @@ change against.
 
 Recorded so the omissions are deliberate, not forgotten:
 
-- **Curvature normal-sign fix** (problem 1) — needs a design decision.
-- **`measure_core` deduplication** (problem 3) — a restructure that shouldn't
+- **Curvature normal-sign fix** (problem 3) — needs a design decision.
+- **`measure_core` deduplication** (problem 5) — a restructure that shouldn't
   share a commit with behaviour changes.
-- **Fibroblast classifier** (problem 2) — needs the diagnostic first.
-- **`dist_mesh_um` gate on curvature** (problem 4) — needs a threshold from the
+- **Fibroblast classifier** (problem 4) — needs the diagnostic first.
+- **`dist_mesh_um` gate on curvature** (problem 6) — needs a threshold from the
   user.

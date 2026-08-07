@@ -125,12 +125,24 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
 
 Making the exported numbers trustworthy, in this order:
 
-1. **Rule out the depth confound** — `ratio_clover_ruby` vs `centroid_z_um`.
-   Nothing about curvature can be believed until this is checked.
-2. **Fibroblast / endothelial separation** — the unsolved core problem. Start
-   with the scatter diagnostic in `TODO.md`, not with threshold tuning.
+1. **The depth confound is real — it was checked and it FAILED.** On
+   `V3_..._04step_002`, `ratio_clover_ruby` drops **23%** from the shallowest
+   depth quartile to the deepest, because mClover attenuates 24% with depth
+   while mRuby does not. Depth is effectively "near wall vs far wall" on a tube,
+   and `curv_mean` covaries with it — so a tension-vs-curvature result right now
+   would be substantially an attenuation artefact. Next: replicate across all
+   six images (`Scripts/depth_check.py --channels`); one field can't distinguish
+   a depth effect from a peculiarity of that field.
+2. **mRuby is only ~6% above background** (30 counts over ~490, vs mClover's 664
+   over ~530), and `background_subtract`'s ±5-count quantisation puts ~16%
+   systematic error on every ratio. This is largely an *acquisition* problem, not
+   a code one. Until it improves, treat `ratio_clover_ruby` as a rank, not a
+   calibrated value.
 3. **Curvature normal orientation** — signs invert on branched vessels, which
-   corrupts `curv_mean` / `curv_k1` / `curv_k2`.
+   corrupts `curv_mean` / `curv_k1` / `curv_k2`. Blocks measuring how large the
+   depth confound actually is, since the two are entangled.
+4. **Fibroblast / endothelial separation** — the unsolved core problem. Start
+   with the scatter diagnostic in `TODO.md`, not with threshold tuning.
 
 `TODO.md` is the live list of known defects; read it before trusting or
 extending any output. Segmentation quality and the vessel-surface reconstruction

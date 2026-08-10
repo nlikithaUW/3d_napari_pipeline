@@ -8,8 +8,8 @@ surface curvature, centerline).
 NOT a byte-for-byte mirror of the GUI worker: this copy has no X-Y ROI filter,
 so it measures every adhesion in the volume where the GUI would measure only
 those inside a drawn region. The two implementations are duplicated and have
-already diverged once — see TODO.md ("measure_core.py duplicates the Measure
-worker").
+already diverged once — see docs/ISSUES.md P11 ("measure_core duplicates the
+Measure worker and has diverged").
 """
 
 from __future__ import annotations

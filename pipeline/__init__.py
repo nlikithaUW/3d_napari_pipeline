@@ -16,5 +16,5 @@ Layout:
 - `view`        — the napari app; `gui/` holds one module per tab.
 
 Start with `python -m pipeline.view`. See README.md for configuration and
-TODO.md for what is known to be wrong.
+docs/ISSUES.md for what is known to be wrong.
 """

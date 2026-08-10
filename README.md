@@ -1,52 +1,86 @@
 # 3d_napari_pipeline
 
-A napari-based image-analysis pipeline for 3D confocal z-stacks of a co-culture
-grown on a vessel/lumen surface: **hiPSC cardiac fibroblasts** carrying the VnTs
-tension sensor (mClover donor / mRuby2 acceptor) together with **endothelial
-cells** marked by VE-cadherin. It turns raw multi-channel stacks into
-per-adhesion measurements — a tension readout, size, and geometry (distance to
-the vessel wall, to nuclei, and local vessel curvature) — and exports them to
-CSV.
+A napari-based image-analysis pipeline for 3D confocal z-stacks of cells grown on
+a **vessel / lumen** surface. It turns raw multi-channel stacks into
+**per-adhesion measurements** — a tension readout, size, and local geometry
+(distance to the vessel wall, distance to nuclei, vessel curvature) — and exports
+them to CSV.
 
-> **On the tension number.** The pipeline supports FRET efficiency → force via a
-> calibration LUT, but **that path only runs when you configure it** (see
-> [Configuring `params.json`](#configuring-paramsjson)). The images shipped with
-> this repo have **no valid FRET calibration**, so FRET is skipped and the
-> uncalibrated **mClover/mRuby ratio** (`ratio_clover_ruby`) is the tension
-> proxy. See [What not to trust yet](#what-not-to-trust-yet).
+The biological question it is built for: **do the forces that fibroblasts exert
+through their focal adhesions depend on the local geometry of the vessel they sit
+on?**
+
+> ### ⚠️ Read this before using the numbers
+>
+> This pipeline is under active development and **several exported columns are
+> not yet trustworthy** — including the surface-curvature columns and the tension
+> readout itself. The defects are known, measured, and documented; they are not
+> hidden in the code.
+>
+> **[`docs/ISSUES.md`](docs/ISSUES.md)** is the authoritative list. A summary
+> table is in [What not to trust yet](#what-not-to-trust-yet) below.
+>
+> The code is shared because the methods and the failure modes are both useful.
+> It is not a validated instrument.
+
+---
+
+## The imaging setup
+
+Cells are cultured on a curved 3D vessel/lumen surface and imaged as z-stacks.
+**Two cell types share every field, and both are DAPI-positive:**
+
+| Cell type | Marker | Role |
+|---|---|---|
+| **hiPSC cardiac fibroblasts** | VnTs tension sensor (mClover donor / mRuby2 acceptor) | The cells whose adhesion tension is measured |
+| **Endothelial cells** | VE-cadherin at cell–cell junctions | Form the vessel surface |
+
+Because a nucleus alone does not say which cell it belongs to, **separating the
+two cell types is an open problem** in this pipeline
+([P05](docs/ISSUES.md#p05)).
+
+There is also **no dedicated vessel stain.** The VE-cadherin junction rings are
+embedded in the curved surface, so the union of rings approximates the vessel
+surface — that is how all geometry is inferred.
+
+### The tension readout
+
+The pipeline supports FRET efficiency → force via a calibration LUT, but **that
+path only runs when you configure it** (see
+[Configuring `params.json`](#configuring-paramsjson)). Without a calibrated
+`fret` block, FRET is skipped, `force_*_pN` exports blank, and the **uncalibrated
+mClover/mRuby ratio** (`ratio_clover_ruby`) is the tension proxy. That proxy has
+substantial known problems — see [P02](docs/ISSUES.md#p02).
 
 ## What it does
 
 For each image it can:
 
-- **Segment nuclei** (DAPI) with Otsu + connected components, and split touching
+- **Segment nuclei** (DAPI) with Otsu + connected components, splitting touching
   nuclei by watershed.
 - **Segment the VE-cadherin** junctional network and build a 3D **vessel mesh**
-  (alpha-shape) from it.
-- **Measure vessel curvature** two ways: local *surface* curvature (quadric fit
-  on the mesh) and *in-plane (X-Y) path* curvature of the vessel centerline
-  (which distinguishes straight vs. branched vessels).
-- **Segment focal adhesions** with a trained random-forest pixel classifier,
-  then split/clean them into instances.
-- **Compute FRET efficiency and force** per voxel from the mClover/mRuby2
-  channels using the calibration LUT in `Fret_LUT/` — *only when a `fret` block
-  is present in `params.json`*.
-- **Quantify each adhesion:** the mClover/mRuby ratio (on the native-Z grid),
-  FRET force if configured, volume, axis lengths, centroid position, distance to
-  the vessel wall, distance to the nearest nucleus, and the local vessel
-  curvature — all exported to a timestamped CSV with a settings JSON.
+  (alpha shape or marching cubes) from it.
+- **Measure vessel curvature** two ways: local *surface* curvature (quadric fit on
+  the mesh) and *in-plane (X-Y) path* curvature of the vessel centerline, which
+  distinguishes straight from branched vessels.
+- **Segment focal adhesions** with a trained random-forest pixel classifier on the
+  mClover channel, then split and clean them into instances.
+- **Compute FRET efficiency and force** per voxel from the mClover/mRuby2 channels
+  using the calibration LUT in `Fret_LUT/` — *only when a `fret` block is present
+  in `params.json`*.
+- **Quantify each adhesion** — the mClover/mRuby ratio, FRET force if configured,
+  volume, axis lengths, centroid, distance to the vessel wall, distance to the
+  nearest nucleus, and local vessel curvature — exported to a timestamped CSV
+  with a companion settings JSON.
 
 ## Installation
 
 ### 1. Install Miniforge (conda)
 
-If you don't already have `conda`, install
-[Miniforge](https://github.com/conda-forge/miniforge) — it provides the `conda`
-command on the conda-forge channel.
+If you do not already have `conda`, install
+[Miniforge](https://github.com/conda-forge/miniforge).
 
-### 2. Create the `image_analysis` environment
-
-The simplest path is the pinned spec, which installs everything below in one go:
+### 2. Create the environment
 
 ```bash
 conda env create -f environment.yml      # macOS: use environment-mac.yml
@@ -55,21 +89,17 @@ conda activate image_analysis
 
 ### What gets installed
 
-- **Core scientific stack** — Python 3.11, numpy, scipy, scikit-image,
-  tifffile, pandas, matplotlib, zarr, dask.
+- **Core scientific stack** — Python 3.11, numpy, scipy, scikit-image, tifffile,
+  pandas, matplotlib, zarr, dask.
 - **napari GUI** — `napari=0.6.0` + `vispy=0.14.3` (**pinned** — newer vispy
-  breaks 3D rendering, so keep these versions) + PyQt.
+  breaks 3D rendering with a `Cannot SIZE object N` GLIR crash) + PyQt.
 - **Segmentation / IO (pip)** — scikit-learn + joblib (the random-forest
-  adhesion / VE-cad junction classifiers) and `nd2` (reading raw `.nd2` files).
+  classifiers) and `nd2` (reading raw `.nd2` files).
 - **GPU acceleration (pip, optional)** — `cupy-cuda12x` plus
-  `nvidia-cuda-runtime-cu12` / `nvidia-cuda-nvrtc-cu12` (the CUDA 12 runtime and
-  NVRTC libraries cupy needs to JIT-compile its kernels, especially on Windows).
-  If no GPU is present these go unused and the code falls back to CPU
-  automatically.
+  `nvidia-cuda-runtime-cu12` / `nvidia-cuda-nvrtc-cu12`. With no GPU present these
+  go unused and the code falls back to CPU automatically.
 
 ### Building it manually (alternative)
-
-If you'd rather assemble the environment by hand instead of from the YAML:
 
 ```bash
 conda create -n image_analysis -c conda-forge python=3.11 numpy scipy \
@@ -102,8 +132,8 @@ python Scripts/gputest.py     # prints ... OK if the GPU JIT path works
 
 ## Configuring `params.json`
 
-Image data is not shipped with this repo, so **you bring your own** — and
-`params.json` is how you describe it. It lives at
+Image data is not shipped with this repository, so **you bring your own** —
+and `params.json` is how you describe it. It lives at
 `3d_images_folder/params.json` and has one required key.
 
 ```json
@@ -121,8 +151,8 @@ Image data is not shipped with this repo, so **you bring your own** — and
 ### `channels` (required)
 
 A list of `{"name", "role"}` pairs. **`name` must match the channel name inside
-the OME-TIFF exactly** — the loader reads names out of the OME XML and looks
-each one up; a mismatch raises rather than guessing.
+the OME-TIFF exactly** — the loader reads names out of the OME XML and looks each
+one up; a mismatch raises rather than guessing.
 (`Scripts/nd2_to_ometiff.py` writes those names when converting from `.nd2`.)
 List only the channels you have; extra channels in the file are ignored.
 
@@ -132,22 +162,22 @@ List only the channels you have; extra channels in the file are ignored.
 |---|---|---|
 | `nuclei` | DAPI | Nuclei tab; `dist_nuc_um` / `nuc_id`; the fibroblast count |
 | `substrate` | VE-cadherin | Cadherin tab; vessel mesh; all curvature; `dist_mesh_um` |
-| `clover` | mClover (donor) | Adhesion RF segmentation; numerator of the tension ratio |
+| `clover` | mClover (donor) | Adhesion segmentation; numerator of the tension ratio |
 | `ruby` | mRuby2 (acceptor) | Denominator of the tension ratio |
 | `fret` | FRET (sensitised emission) | FRET efficiency / force only |
 
 **Omitting a role** disables what depends on it rather than failing: the tab
-prints why it can't run and the affected CSV columns come out blank. `clover`
-and `substrate` are the two you effectively can't do without — `clover` drives
+prints why it cannot run and the affected CSV columns come out blank. `clover` and
+`substrate` are the two you effectively cannot do without — `clover` drives
 adhesion segmentation and `substrate` drives every geometry column.
 
 ### Voxel size is *not* configured here
 
 It is read from each image's own OME metadata (`PhysicalSizeZ/Y/X`, parsed by
 `io.py::_parse_ome_voxel_zyx`), so files acquired at different z-spacing each
-resample onto their own isotropic grid automatically. There is no voxel-size key
-in `params.json`; adding one would only create a way for it to disagree with the
-image.
+resample onto their own isotropic grid automatically. There is deliberately no
+voxel-size key in `params.json`; adding one would only create a way for it to
+disagree with the image.
 
 ### The optional `fret` block
 
@@ -169,10 +199,11 @@ instrument with your own sensor:**
 - `venus_thres` — acceptor intensity below which a voxel is excluded.
 - `leave_neg` — keep negative efficiencies instead of clipping to `[0, 1]`.
 
-**These values are instrument- and sensor-specific. Do not copy them from this
-file or from another lab's.** They encode the spectral bleedthrough of one
-particular filter set and detector; borrowed values produce force numbers that
-look plausible and mean nothing.
+> **These values are instrument- and sensor-specific. Do not copy them from this
+> file or from another lab's.** They encode the spectral bleedthrough of one
+> particular filter set and detector; borrowed values produce force numbers that
+> look plausible and mean nothing. This has already happened once in this
+> project's history — see [P18](docs/ISSUES.md#p18).
 
 Behaviour is driven by presence, not by a flag: FRET runs only when the `fret`
 block exists **and** the `clover`, `ruby`, and `fret` roles are all mapped.
@@ -198,9 +229,8 @@ Fret_LUT/                    # efficiency -> force calibration table
 ```
 
 **`images/*/*.tif` is exactly one folder deep.** The loader globs that shape
-(`imgs_dir.glob("*/*.tif")`), so a stack sitting directly in `images/`, or
-nested two levels down, will not appear in the image picker. Keep the condition
-folder.
+(`imgs_dir.glob("*/*.tif")`), so a stack sitting directly in `images/`, or nested
+two levels down, will not appear in the image picker. Keep the condition folder.
 
 Convert raw `.nd2` to the expected OME-TIFF with:
 
@@ -208,16 +238,12 @@ Convert raw `.nd2` to the expected OME-TIFF with:
 python Scripts/nd2_to_ometiff.py
 ```
 
-### Filename convention
+### About `adhesion_rf.joblib`
 
-`V3b_CorrectSettings_40xWater_04step_001.tif` reads as
-`<sample>_<settings>_<objective>_<z-step>_<series>`.
-
-⚠️ **`09step` was acquired at 0.9 µm z-spacing**, versus 0.4 µm for the other
-five. Nothing breaks — voxel size comes from each file's own metadata and the
-stack is resampled accordingly — but it is ~2× coarser in z, so treat its
-z-resolved results (adhesion volumes, surface curvature) as less reliable and
-don't pool it with the 0.4 µm images without checking.
+A trained random-forest adhesion classifier is included at the repository root.
+It was **trained on one specific dataset** (one microscope, one sensor, one set of
+acquisition settings) and is a starting point, not a general-purpose model.
+Expect to retrain it on your own data via the Adhesion RF tab.
 
 ## Running it
 
@@ -227,16 +253,15 @@ don't pool it with the 0.4 µm images without checking.
 python -m pipeline.view
 ```
 
-This opens napari with a tab per stage — **Load, Display, Nuclei, Cadherin,
-Cell mesh, Vessel mesh, Clover, Adhesion RF, VE-cad RF, ROI, Measure**. Typical
-flow: Load an image → segment nuclei → VE-cadherin mask → vessel mesh +
-curvature → (load a trained RF model) → Adhesion RF predict → post-process →
-Measure → export CSV. Progress prints appear in the terminal **and** in the
-in-app **Log** dock.
+Opens napari with a tab per stage — **Load, Display, Nuclei, Cadherin, Cell mesh,
+Vessel mesh, Clover, Adhesion RF, VE-cad RF, ROI, Measure**. Typical flow: load an
+image → segment nuclei → VE-cadherin mask → vessel mesh + curvature → load a
+trained RF model → Adhesion RF predict → post-process → Measure → export CSV.
+Progress prints appear in the terminal **and** in the in-app **Log** dock.
 
-Every stage has Save/Load buttons (results land in the image's `_saved/`
-folder), plus **Load all saved features** and a one-click **Run all** that
-chains the whole pipeline through Measure and the CSV export.
+Every stage has Save/Load buttons (results land in the image's `_saved/` folder),
+plus **Load all saved features** and a one-click **Run all** that chains the whole
+pipeline through Measure and the CSV export.
 
 ### Headless batch (whole folder, no window)
 
@@ -245,14 +270,16 @@ python -m pipeline.batch --dir "3d_images_folder/images/WT" --model adhesion_rf.
 ```
 
 Runs on every OME-TIFF in a folder with the window hidden — faster, unattended,
-freeing GPU memory between images. A failing image is reported and skipped so
-one bad file can't stall the batch.
+freeing GPU memory between images. A failing image is reported and skipped so one
+bad file cannot stall the batch.
 
-⚠️ **The batch stops before Measure and writes no CSV.** Its step list
-(`batch.py::_RUN_STEPS`) deliberately omits the Measure + export step, which
-crashes headless on a GL/Qt draw. It produces every *intermediate* in each
-`<stem>_saved/` folder (proba, instances, mesh, curvature, DAPI labels, cadherin
-mask, fibroblast count). To get CSVs, do one of:
+> **The batch stops before Measure and writes no CSV.** Its step list
+> (`batch.py::_RUN_STEPS`) deliberately omits the Measure + export step, which
+> crashes headless on a GL/Qt draw. It produces every *intermediate* in each
+> `<stem>_saved/` folder (proba, instances, mesh, curvature, DAPI labels, cadherin
+> mask, fibroblast count).
+
+To get CSVs, either:
 
 ```bash
 # Headless Measure + export over a folder of already-batched images:
@@ -262,6 +289,10 @@ python -m pipeline.batch_measure --dir "3d_images_folder/images/WT"
 or, per image in the GUI: **Load** → **Load all saved features** → **Measure** →
 **Export measures (CSV)**.
 
+Note that `batch_measure` recomputes adhesion instances from the saved probability
+map at standard settings and **rewrites `adhesion_instances.npz`** as a side
+effect ([P12](docs/ISSUES.md#p12)).
+
 ## Output columns
 
 One row per adhesion, in each `<stem>_saved/<stem>_adhesion_measures_<ts>.csv`.
@@ -270,17 +301,17 @@ One row per adhesion, in each `<stem>_saved/<stem>_adhesion_measures_<ts>.csv`.
 |---|---|
 | `image` | Source filename, so concatenated CSVs stay identifiable |
 | `label` | Adhesion instance ID within that image |
-| `ratio_clover_ruby` | **The tension readout.** Σ(clover) ÷ Σ(ruby) over the adhesion, each background-subtracted per z-plane, on the native-Z grid. Uncalibrated. |
+| `ratio_clover_ruby` | **The tension readout.** Σ(clover) ÷ Σ(ruby) over the adhesion, each background-subtracted per z-plane, on the native-Z grid. Uncalibrated |
 | `dist_mesh_um` | Distance from the adhesion to the nearest vessel-mesh vertex (µm) |
-| `centroid_z_um`, `centroid_y_um`, `centroid_x_um` | Adhesion centroid in µm — needed for any spatial check, including the depth confound below |
-| `path_curv_xy` | In-plane (X-Y) centerline curvature κ at the nearest centerline point (1/µm) |
+| `centroid_z_um`, `centroid_y_um`, `centroid_x_um` | Adhesion centroid in µm — needed for any spatial check |
+| `path_curv_xy` | In-plane (X-Y) centerline curvature κ at the nearest centerline point (1/µm). Unsigned |
 | `dist_branch_um` | X-Y distance to the nearest vessel branch node (µm) |
 | `curv_mean` | Mean curvature H = (κ1+κ2)/2 of the vessel surface at the nearest surface vertex (1/µm) |
 | `curv_k1`, `curv_k2` | Principal curvatures κmax, κmin (1/µm) |
 | `curv_gaussian` | Gaussian curvature K = κ1·κ2 (1/µm²) |
 | `dist_nuc_um` | Distance to the nearest nucleus (µm) |
-| `force_mean_pN`, `force_std_pN` | Mean / SD of the FRET force over the adhesion. **Blank unless FRET is configured.** |
-| `force_total_pN` | `force_mean_pN` × volume |
+| `force_mean_pN`, `force_std_pN` | Mean / SD of the FRET force over the adhesion. **Blank unless FRET is configured** |
+| `force_total_pN` | `force_mean_pN` × volume. Units are pN·µm³, not pN ([P10](docs/ISSUES.md#p10)) |
 | `volume_um3` | Adhesion volume (µm³) |
 | `axis_major_um`, `axis_minor_um` | Fitted ellipsoid axis lengths (µm) |
 | `eccentricity` | `axis_major_um / axis_minor_um` |
@@ -289,77 +320,87 @@ One row per adhesion, in each `<stem>_saved/<stem>_adhesion_measures_<ts>.csv`.
 
 ## What not to trust yet
 
-Several outputs are produced but are **not** yet suitable for interpretation.
-`TODO.md` has the full detail and what fixing each involves.
+Summary only. **[`docs/ISSUES.md`](docs/ISSUES.md) is the authoritative list**,
+with measurements, mechanisms, and what fixing each involves.
+[`docs/audit.md`](docs/audit.md) is the frozen evidence behind them.
 
-- **`ratio_clover_ruby`** — the tension readout itself carries two caveats,
-  both measured on `V3_..._04step_002` (2092 adhesions):
-  - **mRuby sits only ~6% above its own background** (30 counts over ~490,
-    versus mClover's 664 over ~530). Because `background_subtract` quantises
-    the background to ±5 counts, that is a **~16% systematic error on every
-    ratio**, and the highest ratios are the adhesions with the least ruby.
-    Treat the ratio as a rank, not a calibrated quantity.
-  - **It drifts ~23% with imaging depth** (shallowest quartile 25.6, deepest
-    19.7). mClover attenuates 24% with depth while mRuby does not, which fully
-    accounts for the drift — it is optics, not biology.
-- **`force_mean_pN` / `force_std_pN` / `force_total_pN`** — blank on this
-  dataset by design (no FRET calibration). If you *do* configure a `fret` block,
-  the numbers are only as good as your calibration; the LUT shipped here is for
-  a Clover–mRuby2 GGSGGS7 sensor on one specific setup.
-- **`n_fibroblasts`** — the fibroblast/endothelial classifier is unvalidated. It
-  samples a ~2 µm shell around each nucleus, which is where *both* markers are
-  dimmest, and the reported fraction swings by ~2× across one slider step.
-- **`curv_mean` / `curv_k1` / `curv_k2`** — the curvature sign inverts on
-  branched vessels: normals are oriented "away from the mesh centroid", which a
-  Y-junction breaks. `curv_gaussian` and `path_curv_xy` are unaffected (the
-  first is a product of two curvatures, so the signs cancel; the second is
-  computed in-plane without surface normals).
+| Column(s) | Problem | ID |
+|---|---|---|
+| `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **Do not use.** A destroyed triangle winding makes the curvature fitting frame near-random; correlation with the correctly-computed value is ρ = +0.048 | [P01](docs/ISSUES.md#p01) |
+| `ratio_clover_ruby` | Driven by the ruby channel's noise floor, not by tension — ρ(ratio, ruby) = −0.773 vs ρ(ratio, clover) = +0.068. Spread exceeds what the sensor can physically produce. Treat as a rank at best | [P02](docs/ISSUES.md#p02) |
+| *every column* | Adhesion detection is depth-truncated: the far vessel wall yields 37% of the near wall's detection density per unit surface area | [P03](docs/ISSUES.md#p03) |
+| `nuc_id`, `n_fibroblasts`, `n_nuclei_total` | Two different nucleus segmentations; `nuc_id` cannot be joined to the fibroblast classification | [P04](docs/ISSUES.md#p04) |
+| `n_fibroblasts` | The fibroblast/endothelial classifier is unvalidated; the reported fraction swings ~2× across one slider step | [P05](docs/ISSUES.md#p05) |
+| `ratio_clover_ruby` | Drifts with imaging depth (ρ = −0.187); on this geometry depth is confounded with position along the vessel | [P06](docs/ISSUES.md#p06) |
+| `path_curv_xy` | Contaminated within `smooth_um` (20 µm default) of a branch — filter on `dist_branch_um`. Also unsigned, so inside and outside of a bend are indistinguishable | [P08](docs/ISSUES.md#p08) |
+| `dist_mesh_um`, `curv_*` | Measured to a ~2 µm-spaced point cloud including geometry the mesh rejected; curvature is assigned with no distance limit | [P09](docs/ISSUES.md#p09) |
+| `force_*_pN` | Blank by design without a FRET calibration. If you configure one, the numbers are only as good as your calibration | [P18](docs/ISSUES.md#p18) |
 
-**Before believing any tension-vs-curvature relationship,** run:
+### Before drawing any conclusion from this CSV
+
+Adhesions are **not independent observations** — many per cell, few images, and
+curvature varies slowly in space, so the effective sample size is closer to the
+number of cells (or images) than the number of adhesions. A pooled correlation
+p-value across all adhesions mostly reports adhesion count.
+
+`docs/ISSUES.md` § **Analysis notes** sets out the design that follows: per-image
+first, a spatial null rather than a permutation null, a falsification battery, and
+pre-specified exclusions.
 
 ```bash
+# Test whether the tension readout drifts with imaging depth on your own data:
 python Scripts/depth_check.py --dir 3d_images_folder/images/WT --channels
 ```
 
-The tube lies in xy and is imaged through it, so depth is effectively "near wall
-vs far wall" — and curvature covaries with depth. On the one image measured so
-far the depth drift is large enough that a curvature relationship would be
-substantially an attenuation artefact. Also note that adhesions are not
-independent observations — many per cell, few images — so pooled correlation
-p-values mostly reflect adhesion count. Report per-image first.
-
 ## Helper scripts (`Scripts/`)
 
-- `nd2_to_ometiff.py` — convert raw `.nd2` to OME-TIFF, dropping junk channels
-  and writing pixel size + channel names into the OME metadata.
+- `nd2_to_ometiff.py` — convert raw `.nd2` to OME-TIFF, dropping junk channels and
+  writing pixel size + channel names into the OME metadata.
 - `gputest.py` — quick check that the cupy/CUDA GPU path works.
-- `depth_check.py` — tests whether `ratio_clover_ruby` drifts with imaging depth
-  (it does; see above). `--channels` splits the ratio into mClover and mRuby to
-  show which channel drives the drift and how much signal each has over
-  background.
+- `depth_check.py` — tests whether `ratio_clover_ruby` drifts with imaging depth.
+  `--channels` splits the ratio into mClover and mRuby to show which channel
+  drives the drift and how much signal each has over background.
 - `vecad_mip.py` — batch max-intensity-projection PNGs of the VE-cadherin channel.
 - `fibroblast_cellpose.py` — count endothelial cells from the VE-cadherin channel
-  with Cellpose (needs `pip install cellpose`), for deriving fibroblast counts.
+  with Cellpose (needs `pip install cellpose`).
 
 ## Repository layout
 
 ```
 pipeline/            core package (I/O, FRET, RF, meshing, curvature, GUI tabs,
                      batch runners)
+pipeline/gui/        one module per napari tab
 Scripts/             standalone utility scripts (see above)
+docs/
+  ISSUES.md          known problems — the living development log. Read this
+  audit.md           frozen pipeline audit, 2026-08-10, commit 5077918
 3d_images_folder/    data root (images are git-ignored; only config is tracked)
 Fret_LUT/            FRET efficiency -> force calibration
 environment.yml      conda spec (image_analysis)
-TODO.md              known problems + deferred ideas — read before trusting output
-CLAUDE.md            project notes / conventions
+CLAUDE.md            project conventions and working notes
 ```
+
+### Filename convention (this project's data)
+
+`V3b_CorrectSettings_40xWater_04step_001.tif` reads as
+`<sample>_<settings>_<objective>_<z-step>_<series>`. The `09step` file was
+acquired at 0.9 µm z-spacing versus 0.4 µm for the others — nothing breaks, since
+voxel size comes from each file's own metadata, but it is ~2× coarser in z, so
+treat its z-resolved results (adhesion volumes, surface curvature) as less
+reliable and do not pool it with the 0.4 µm images without checking.
 
 ## Notes
 
 - Image data, per-image `_saved/` outputs, and derived `.npy`/`.csv`/figures are
   git-ignored; only code and small config are tracked.
-- Hardware: developed on a 32-core / RTX 3090 (24 GB) workstation; also run on an
-  RTX 4070 SUPER (12 GB VRAM). Large-volume GPU work can approach the smaller
-  card's limit. On a genuine out-of-memory error the code falls back to CPU for
-  that call and prints a note; any other CUDA error is raised rather than
-  silently degrading (`pipeline/gpu.py`).
+- Developed on a 32-core / RTX 3090 (24 GB) workstation; also run on an RTX 4070
+  SUPER (12 GB VRAM). Large-volume GPU work can approach the smaller card's
+  limit. On a genuine out-of-memory error the code falls back to CPU for that call
+  and prints a note; any other CUDA error is raised rather than silently degrading
+  (`pipeline/gpu.py`).
+
+## License
+
+**Not yet licensed** — see [H01](docs/ISSUES.md#h01). Until a `LICENSE` file is
+added, default copyright applies and the code is not licensed for reuse. If you
+would like to use it, please open an issue.

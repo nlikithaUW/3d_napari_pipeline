@@ -29,8 +29,9 @@ This is the fact that matters most.
 
 **Both stain with DAPI, so a nucleus alone does not tell you which cell it
 belongs to.** Separating them is **unsolved** — the current classifier is
-unvalidated and its output swings ~2× on one slider step (see `TODO.md`).
-Never assume a nucleus count, or anything derived from one, is fibroblast-only.
+unvalidated and its output swings ~2× on one slider step
+(`docs/ISSUES.md` P05). Never assume a nucleus count, or anything derived from
+one, is fibroblast-only.
 
 - Channels (see `3d_images_folder/params.json`):
   - `mClover` — donor, VnTs sensor (fibroblasts)
@@ -96,16 +97,19 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
 
 ## Environment
 
-- **Dev (mine):** WSL2, conda env `image_analysis` (see `environment.yml`).
-- **Run (user's):** Windows Anaconda terminal, same env name (separate env,
-  same name `image_analysis`).
+Two machines, two separate environments that happen to share a name:
+
+- **Development:** WSL2, conda env `image_analysis` (see `environment.yml`).
+- **Running the GUI:** Windows Anaconda terminal, a *separate* env also called
+  `image_analysis`. Installing a package in one does not install it in the other.
 - **GUI stack is pinned** to `napari=0.6.0` + `vispy=0.14.3`. vispy 0.15
   breaks 3D rendering (`Cannot SIZE object N` GLIR crash). Keep dev and run
   envs on the same pinned versions.
 - **Hardware:** 32/64 c/t CPU, RTX 3090. **The GPU is in use** — `pipeline/gpu.py`
   accelerates the windowed filters and resampling via cupy.
-- **If I add a dependency, I must tell the user to install it in their
-  Windows conda env.** I cannot install it for them.
+- **A new dependency has to be installed by hand in the Windows env.** Adding it
+  to `environment.yml` is not enough; say so explicitly whenever one is added,
+  or the GUI will fail there and not in development.
 
 ## Working agreement (durable preferences)
 
@@ -118,32 +122,28 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
 - FRET math is load-bearing and copied from the old pipeline; treat it
   as frozen unless the user asks otherwise.
 - **Don't report a number as meaningful when it isn't.** If a column can't be
-  trusted, it belongs in `TODO.md` and in the README's "What not to trust yet",
-  not quietly in the CSV.
+  trusted, it belongs in `docs/ISSUES.md` and in the README's "What not to trust
+  yet" table, not quietly in the CSV.
 
-## Current focus
+## Where the known problems live
 
-Making the exported numbers trustworthy, in this order:
+**`docs/ISSUES.md` is the single development log** — every known defect, its
+status, and the dates it was opened, last verified, and resolved. Read it before
+trusting or extending any output. Do not keep a second copy of the priority list
+here; it will drift.
 
-1. **The depth confound is real — it was checked and it FAILED.** On
-   `V3_..._04step_002`, `ratio_clover_ruby` drops **23%** from the shallowest
-   depth quartile to the deepest, because mClover attenuates 24% with depth
-   while mRuby does not. Depth is effectively "near wall vs far wall" on a tube,
-   and `curv_mean` covaries with it — so a tension-vs-curvature result right now
-   would be substantially an attenuation artefact. Next: replicate across all
-   six images (`Scripts/depth_check.py --channels`); one field can't distinguish
-   a depth effect from a peculiarity of that field.
-2. **mRuby is only ~6% above background** (30 counts over ~490, vs mClover's 664
-   over ~530), and `background_subtract`'s ±5-count quantisation puts ~16%
-   systematic error on every ratio. This is largely an *acquisition* problem, not
-   a code one. Until it improves, treat `ratio_clover_ruby` as a rank, not a
-   calibrated value.
-3. **Curvature normal orientation** — signs invert on branched vessels, which
-   corrupts `curv_mean` / `curv_k1` / `curv_k2`. Blocks measuring how large the
-   depth confound actually is, since the two are entangled.
-4. **Fibroblast / endothelial separation** — the unsolved core problem. Start
-   with the scatter diagnostic in `TODO.md`, not with threshold tuning.
+- **`docs/ISSUES.md`** — living state. One entry per problem, permanent IDs
+  (`P01`, `P02`, …). Closed entries stay, including ones closed as `invalid`.
+- **`docs/audit.md`** — frozen evidence: a dated snapshot of the full audit
+  (2026-08-10, commit `5077918`). Never edited to reflect a fix. `ISSUES.md`
+  cites it as `audit F1`, `audit F2`, …
+- **`README.md`** — public. Carries only a short limitations table linking here.
 
-`TODO.md` is the live list of known defects; read it before trusting or
-extending any output. Segmentation quality and the vessel-surface reconstruction
-are in reasonable shape; the gap is validation, not features.
+When a problem is found, opened, or fixed, update `ISSUES.md` — add a `History`
+line with the date rather than rewriting the entry in place, so the record of what
+was believed and when survives.
+
+As of the 2026-08-10 audit the top of the queue is **P01 → P04 → P07 → P03 →
+P02**; `ISSUES.md` carries the current ordering and the reasoning. Segmentation
+quality and the vessel-surface reconstruction are in reasonable shape; the gap is
+validation, not features.

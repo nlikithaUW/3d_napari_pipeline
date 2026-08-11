@@ -122,7 +122,7 @@ afterwards.
 | **Severity** | S1 |
 | **Opened** | 2026-08-10 (audit F1) |
 | **Last verified** | 2026-08-10 |
-| **Resolved** | 2026-08-10 (commit `5d0a9c6`) |
+| **Resolved** | 2026-08-10 (commit `af8e6c0`) |
 | **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/cell_mesh.py:246` (`vertex_outward_normals`) |
 | **Affects** | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian`; the Vessel-mesh tab's "implied caliber" readout; the Measure tab's `Spearman(ratio, curv_*)` lines |
 | **Evidence** | `docs/audit.md` §3 F1 |
@@ -534,7 +534,7 @@ and [P03](#p03) both have to land first for any of those to mean anything.
 | **Severity** | S2 |
 | **Opened** | 2026-08-10 (audit F5) |
 | **Last verified** | 2026-08-10 (scikit-image 0.26.0) |
-| **Resolved** | 2026-08-10 (commit `5d0a9c6`) |
+| **Resolved** | 2026-08-10 (commit `af8e6c0`) |
 | **Where** | `pipeline/gui/nuclei.py:207`, `pipeline/rf.py:606,613` |
 | **Affects** | `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries (**not** `nuc_id` / `dist_nuc_um` — see History) |
 | **Evidence** | `docs/audit.md` §3 F5 |
@@ -1086,7 +1086,7 @@ that varies by construction.
 | **Severity** | S3 (display only — no exported column changes) |
 | **Opened** | 2026-08-10 |
 | **Last verified** | 2026-08-10 |
-| **Resolved** | 2026-08-10 (commit `5d0a9c6`) |
+| **Resolved** | 2026-08-10 (commit `af8e6c0`) |
 | **Where** | `pipeline/gui/vessel_mesh.py:397` (`_path_z_um`, `_show_path`) |
 | **Affects** | the `Vessel path curvature (X-Y)` layer only |
 

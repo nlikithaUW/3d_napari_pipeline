@@ -22,7 +22,7 @@ from scipy.spatial import cKDTree as KDTree
 from .fret import background_subtract
 from .saved_check import (
     centerline_notes, curvature_notes, force_notes, mesh_notes, native_notes,
-    nuclei_notes, ratio_dropout_note,
+    nuclei_notes, ratio_dropout_note, volume_shape_notes,
 )
 
 
@@ -124,6 +124,11 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
     adhesion_um = adhesion_vox * np.array(scale)
 
     notes += mesh_notes(vessel_verts)
+    # A nucleus volume from a different image would not crash — it would just
+    # produce wrong distances — so this has to be said rather than caught.
+    notes += volume_shape_notes("the nucleus label volume",
+                                np.shape(nuc_labels_full),
+                                "the adhesion label volume", labels.shape)
     vessel_tree = KDTree(vessel_verts)
     nuc_sub = nuc_labels_full[::3, ::3, ::3]
     nuc_vox = np.argwhere(nuc_sub > 0)

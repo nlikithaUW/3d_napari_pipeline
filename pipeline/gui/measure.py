@@ -15,7 +15,7 @@ from scipy.spatial import KDTree
 from ..fret import background_subtract
 from ..saved_check import (
     centerline_notes, curvature_notes, force_notes, mesh_notes, native_notes,
-    nuclei_notes, ratio_dropout_note,
+    nuclei_notes, ratio_dropout_note, volume_shape_notes,
 )
 from .widgets import call_all, with_after
 
@@ -216,6 +216,10 @@ def build(state, viewer):
 
             # Step 5 — vessel mesh KD-tree (built here; no cached tree)
             notes += mesh_notes(vessel_verts)
+            notes += volume_shape_notes("the nucleus label volume",
+                                        np.shape(nuc_labels_full),
+                                        "the adhesion label volume",
+                                        labels.shape)
             vessel_tree = KDTree(vessel_verts)
 
             # Step 6 — nucleus KD-tree (subsampled every 3rd voxel)

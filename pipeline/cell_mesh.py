@@ -137,6 +137,14 @@ def suggest_alpha_um(circumradii: np.ndarray) -> float:
 def alpha_shape_faces(points_um: np.ndarray, alpha_um: float) -> np.ndarray:
     """Boundary triangles of the 3D alpha shape. Returns int array (M, 3)
     indexing into `points_um`. Empty (0, 3) if no tets survive.
+
+    Rows are wound consistently outward: each boundary triangle belongs to
+    exactly one surviving tetrahedron, so its outward side is the one facing
+    away from that tet's fourth vertex. Winding is what gives
+    `vertex_outward_normals` a coherent normal field, and hence what makes the
+    sign of the curvature in `mesh_curvature` mean anything — sorting the
+    indices (as this used to) throws it away and leaves orientation set by
+    index order, i.e. arbitrary.
     """
     if len(points_um) < 4:
         return np.zeros((0, 3), dtype=np.int64)
@@ -152,14 +160,31 @@ def alpha_shape_faces(points_um: np.ndarray, alpha_um: float) -> np.ndarray:
         tets[:, [0, 1, 3]],
         tets[:, [0, 2, 3]],
         tets[:, [1, 2, 3]],
-    ])
-    faces = np.sort(faces, axis=1).astype(np.int64, copy=False)
-    # Hash each (i, j, k) row as one void value — ~5x faster than np.unique(axis=0).
-    fc = np.ascontiguousarray(faces)
-    view = fc.view([("", fc.dtype)] * 3).reshape(-1)
-    uniq_v, counts = np.unique(view, return_counts=True)
-    boundary = uniq_v[counts == 1]
-    return boundary.view(fc.dtype).reshape(-1, 3)
+    ]).astype(np.int64, copy=False)
+    # The tet vertex each face leaves out, in the same row order as `faces`.
+    opp = np.concatenate(
+        [tets[:, 3], tets[:, 2], tets[:, 1], tets[:, 0]],
+    ).astype(np.int64, copy=False)
+
+    # Hash each row's *sorted* (i, j, k) as one void value so that the two
+    # copies of an interior face match whatever their winding — ~5x faster than
+    # np.unique(axis=0). Only the key is sorted; the rows returned below keep
+    # the winding they were built with.
+    key = np.ascontiguousarray(np.sort(faces, axis=1))
+    view = key.view([("", key.dtype)] * 3).reshape(-1)
+    _uniq, first, counts = np.unique(view, return_index=True,
+                                     return_counts=True)
+    sel = first[counts == 1]
+    bf = faces[sel]
+
+    # Orient away from the interior of the owning tet.
+    p0 = points_um[bf[:, 0]]
+    d1 = points_um[bf[:, 1]] - p0
+    d2 = points_um[bf[:, 2]] - p0
+    inward = np.einsum(
+        "ij,ij->i", np.cross(d1, d2), points_um[opp[sel]] - p0) > 0
+    bf[inward] = bf[inward][:, [0, 2, 1]]
+    return bf
 
 
 def filter_faces_by_extent(
@@ -243,15 +268,42 @@ def prune_by_normal(
     return faces[keep]
 
 
+def closed_edge_fraction(faces: np.ndarray) -> float:
+    """Fraction of the mesh's undirected edges that are shared by exactly two
+    faces. 1.0 is watertight; boundary (once-used) edges pull it down.
+    """
+    faces = np.asarray(faces)
+    if len(faces) == 0:
+        return 0.0
+    e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]],
+                        faces[:, [2, 0]]], axis=0)
+    e = np.ascontiguousarray(np.sort(e, axis=1).astype(np.int64, copy=False))
+    view = e.view([("", e.dtype)] * 2).reshape(-1)
+    _uniq, counts = np.unique(view, return_counts=True)
+    return float(np.mean(counts == 2)) if counts.size else 0.0
+
+
 def vertex_outward_normals(
     points_um: np.ndarray,
     faces: np.ndarray,
+    closed_frac_min: float = 0.90,
 ) -> np.ndarray:
     """Per-vertex outward unit normal from the mesh itself.
 
-    Averages incident face normals and sign-flips each vertex normal so it
-    points away from the mesh centroid (works while the lumen is roughly
-    star-shaped about its own axis — fine for short vessel segments).
+    Averaging the incident face normals gives a field that is consistent with
+    the triangle winding, which pins the orientation down to a single global
+    sign. That sign is then read off the mesh: on a (near-)closed surface the
+    enclosed volume ``Σ p0·(p1×p2)/6`` is positive exactly when the winding is
+    outward, so a negative volume flips the whole field at once.
+
+    Open surfaces — marching-cubes patches, or a cell mesh after
+    `prune_by_normal` has deleted faces — enclose nothing, so below
+    ``closed_frac_min`` closed edges we fall back to the older per-vertex "point
+    away from the mesh centroid" rule. That rule only holds while the surface is
+    star-shaped about its own centroid, which a branching vessel that dives
+    through the stack is not: measured on the shipped V3 mesh it overrode the
+    true winding on 44.4% of surface vertices. It is a fallback, not the
+    default.
     """
     if len(points_um) == 0 or len(faces) == 0:
         return np.zeros_like(points_um)
@@ -263,6 +315,13 @@ def vertex_outward_normals(
     for k in range(3):
         np.add.at(vn, faces[:, k], fn)
     vn /= np.linalg.norm(vn, axis=1, keepdims=True) + 1e-12
+
+    if closed_edge_fraction(faces) >= float(closed_frac_min):
+        vol = float(np.einsum("ij,ij->i", p[:, 0],
+                              np.cross(p[:, 1], p[:, 2])).sum())
+        if vol < 0:
+            vn = -vn
+        return vn
 
     centroid = points_um.mean(0)
     radial = points_um - centroid

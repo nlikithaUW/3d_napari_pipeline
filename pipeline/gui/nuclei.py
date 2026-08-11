@@ -204,7 +204,12 @@ def build(state, viewer) -> Container:
             sampling = tuple(float(s) for s in scale)
             dist = ndi.distance_transform_edt(binary, sampling=sampling)
             md = max(1, int(round(min_dist_um / float(scale[0]))))
-            coords = peak_local_max(dist, min_distance=md, labels=binary)
+            # exclude_border=False: the default excludes peaks within
+            # min_distance of the volume edge, which silently drops every
+            # nucleus touching the stack boundary (they get no marker, so
+            # watershed never labels them and they vanish from the count).
+            coords = peak_local_max(dist, min_distance=md, labels=binary,
+                                    exclude_border=False)
             markers = np.zeros(binary.shape, dtype=np.int32)
             if len(coords):
                 markers[tuple(coords.T)] = np.arange(1, len(coords) + 1)

@@ -62,13 +62,13 @@ true of the code and data on that date and may not be true now.
 
 | ID | title | sev | status |
 |---|---|---|---|
-| [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | open |
+| [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | **fixed** |
 | [P02](#p02) | `ratio_clover_ruby` tracks the ruby noise floor, not tension | S1 | open |
 | [P03](#p03) | Adhesion detection is depth-truncated | S1 | open |
 | [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | open |
 | [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open |
 | [P06](#p06) | Tension readout drifts with imaging depth | S2 | open |
-| [P07](#p07) | `peak_local_max` drops border seeds, in two places | S2 | open |
+| [P07](#p07) | `peak_local_max` drops border seeds, in two places | S2 | **fixed** |
 | [P08](#p08) | `path_curv_xy` — 20 µm contamination radius, and κ is unsigned | S2 | open |
 | [P09](#p09) | `dist_mesh_um` measures to rejected geometry; no gate on curvature | S2 | open |
 | [P10](#p10) | `force_total_pN` is not a force | S2 | open |
@@ -83,24 +83,31 @@ true of the code and data on that date and may not be true now.
 | [P19](#p19) | `auto_min_size_otsu` is defeated by a hard-coded floor | S3 | open |
 | [P20](#p20) | `subsample_um` silently sets the vessel mesh's resolution | S2 | open |
 | [P21](#p21) | One global alpha cannot be correct on a tapering vessel | S2 | open |
-| [P22](#p22) | Centerline overlay is drawn at a single wrong z | S3 | open |
+| [P22](#p22) | Centerline overlay is drawn at a single wrong z | S3 | **fixed** |
 | [P23](#p23) | Centerline preprocessing amputates tapering vessels | S2 | open |
 | [I01](#i01) | Progress / completion bars for long-running operations | idea | open |
 | [I02](#i02) | Fibroblast / endothelial scatter diagnostic | idea | open |
 | [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 
-**Suggested order of work** (dependency-ordered, not severity-ordered):
-**P01 → P04 → P07 → P03 → P02 → P08/P09/P10**, then the analysis in
-[Analysis notes](#analysis-notes). P01 first because it is the smallest fix with
-the largest effect and every curvature result depends on it.
+**Suggested order of work** (dependency-ordered, not severity-ordered). The
+original ordering was **P01 → P04 → P07 → P03 → P02 → P08/P09/P10**, then the
+analysis in [Analysis notes](#analysis-notes) — P01 first because it is the
+smallest fix with the largest effect and every curvature result depends on it.
+
+**As of 2026-08-10 P01, P07 and P22 are fixed in the code**, so the queue is now
+**P04 → P03 → P02 → P08/P09/P10**. One thing carries over: no CSV has been
+regenerated yet, so every curvature column on disk is still the pre-P01 noise and
+the [What not to trust yet](../README.md#what-not-to-trust-yet) rows stay as they
+are until a new export exists. Fixing the code and fixing the data are separate
+steps.
 
 The 2026-08-10 vessel-mesh review (P19–P23, [I03](#i03)) does not displace that
-ordering. P22 and the border-flare half of [P08](#p08) are independent of
-everything above and can land at any time. [P21](#p21) and [I03](#i03) are one
-piece of work — reconstruction method plus its calibration — and belong after
-P01, so that corrected curvature can be part of the calibration objective rather
-than something checked afterwards.
+ordering. The border-flare half of [P08](#p08) is independent of everything above
+and can land at any time. [P21](#p21) and [I03](#i03) are one piece of work —
+reconstruction method plus its calibration — and are now unblocked: corrected
+curvature can be part of the calibration objective rather than something checked
+afterwards.
 
 ---
 
@@ -111,12 +118,12 @@ than something checked afterwards.
 
 | | |
 |---|---|
-| **Status** | open |
+| **Status** | fixed |
 | **Severity** | S1 |
 | **Opened** | 2026-08-10 (audit F1) |
 | **Last verified** | 2026-08-10 |
-| **Resolved** | — |
-| **Where** | `pipeline/cell_mesh.py:156` |
+| **Resolved** | 2026-08-10 (commit `5d0a9c6`) |
+| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/cell_mesh.py:246` (`vertex_outward_normals`) |
 | **Affects** | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian`; the Vessel-mesh tab's "implied caliber" readout; the Measure tab's `Spearman(ratio, curv_*)` lines |
 | **Evidence** | `docs/audit.md` §3 F1 |
 
@@ -130,6 +137,16 @@ direction set by index order rather than by the surface.
 `mesh_curvature` builds its local tangent frame from the result. The
 away-from-centroid sign flip in `vertex_outward_normals` is applied *on top of* a
 vector that is already meaningless — it is not the root cause.
+
+> **Correction, 2026-08-10 (left in place above so the original reading is on the
+> record).** The last sentence is wrong, and it mattered. The away-from-centroid
+> flip is a *second, independent* root cause, not a harmless passenger. Once the
+> winding is preserved it is applied on top of a vector that is now meaningful,
+> and it **overrides the true winding on 44.4% of the 7,282 surface vertices** —
+> because on a vessel that branches and dives through the stack "away from the
+> global centroid" is simply the wrong reference direction. Fixing only the
+> winding leaves the curvature broken and fails every acceptance criterion below
+> (see the 2026-08-10 History entry). **Both causes had to be fixed together.**
 
 Measured on `V3_..._04step_002` (8,966 verts, 7,282 surface verts):
 
@@ -151,15 +168,28 @@ what produced every mesh saved so far.
 
 **Not affected:** `prune_by_normal` compares `|dot|` and is sign-agnostic.
 
-**The fix:** keep the unsorted face alongside the sorted key, and orient each
-surviving boundary face away from the fourth vertex of its owning tetrahedron.
-The orientation then comes from the tetrahedralization, so a Y-branch and the
-two-sided wall shell both come out consistent — which removes most of the "what
-does *outward* mean on a branched tube" design question that [P17](#p17)'s
-predecessor deferred.
+**The fix, part A — preserve the winding (`alpha_shape_faces`).** Keep the
+unsorted face alongside the sorted key, and orient each surviving boundary face
+away from the fourth vertex of its owning tetrahedron. The orientation then comes
+from the tetrahedralization, so a Y-branch and the two-sided wall shell both come
+out consistent — which removes most of the "what does *outward* mean on a
+branched tube" design question that [P17](#p17)'s predecessor deferred.
+
+**The fix, part B — orient from the mesh, not the centroid
+(`vertex_outward_normals`).** Preserving the winding fixes the orientation only
+up to one global sign, and the away-from-centroid heuristic that used to supply
+that sign gets it wrong on 44.4% of vertices (see the Correction above). Replace
+it with a single global decision read off the mesh: test closure (the fraction of
+undirected edges shared by exactly two faces — **98.45%** on the shipped mesh, so
+gate at 0.90), and on a closed surface flip the whole normal field by the sign of
+the enclosed volume `Σ p0·(p1×p2)/6`. One decision for the whole mesh cannot
+disagree with itself the way a per-vertex heuristic does. Open surfaces
+(marching-cubes patches; a cell mesh after `prune_by_normal` deletes faces)
+enclose no volume, so they keep the old centroid rule as a fallback — the new
+test cannot apply there and behaviour is unchanged.
 
 **Acceptance test:** ρ(`curv_mean`, `centroid_z_um`) → 0; κ2 consistently signed
-at ≈ −1/R; K ≈ 0; face-normal coherence > 0.9.
+at ≈ −1/R; K ≈ 0; face-normal coherence > 0.9. **Passed** — see below.
 
 **History**
 - 2026-08-06 — recorded in `TODO.md` as "curvature sign inverts on branched
@@ -168,6 +198,50 @@ at ≈ −1/R; K ≈ 0; face-normal coherence > 0.9.
   **noise, not sign-flipped**, and 49.9% of vertices are flipped, not a
   branch-local minority. Old entry superseded; [P17](#p17) closed as invalid as a
   consequence.
+- 2026-08-10 — **fixed, in two parts.** The audit's root cause was real but
+  incomplete: the winding fix *alone* moves almost nothing, and the entry's own
+  acceptance test fails on it. Measured in memory on the shipped
+  `V3_..._04step_002` mesh (8,966 verts / 7,282 surface verts, `alpha3d_um=15.0`,
+  `subsample_um=5.0`, `min_component_um=253.03`, curvature `radius_um=5.0`,
+  `smooth_iter=10`):
+
+  | | shipped | winding only (part A) | **both (A+B)** | target |
+  |---|---|---|---|---|
+  | κ1 median (axial, want ≈ 0) | +0.0170 | +0.0183 | **−0.0027** | ≈ 0 |
+  | κ2 median (1/µm) | −0.0317 | −0.0388 | **−0.0703** | ≈ −1/R |
+  | implied R | 31.6 µm | 25.8 µm | **14.2 µm** | ≈ 13.5 µm |
+  | κ2 sign consistency | 78.6% | 77.1% | **98.3%** | ≥ 96.9% |
+  | K median (1/µm²) | +0.00002 | +0.00015 | **+0.00015** | ≈ 0 |
+  | ρ(`curv_mean`, `centroid_z_um`) | −0.059 | −0.011 | **+0.042** | → 0 |
+
+  Winding checks on the rebuilt mesh: directed edges with a reversed twin
+  **53.7% → 100.0%**; face-normal coherence at a vertex (median) **0.209 →
+  0.972**; closed-edge fraction unchanged at 98.45%.
+
+  **Regression guard passed:** the face *set* is byte-identical before and after
+  part A — 15,790 raw, 15,786 after `filter_faces_by_extent`, and the same set as
+  the shipped `vessel_mesh.npz`. Only the winding of each row moved, so
+  connectivity and every downstream row-subset are untouched.
+
+  Per-vertex ρ(shipped `curv_mean`, corrected `curv_mean`) measures **+0.069**
+  with **54.8%** sign agreement, reproducing `audit.md` F1's +0.048 / 54.6% and
+  confirming the shipped column really was noise. Note that the audit's ρ is
+  **per-vertex**; the acceptance test's ρ is **per-adhesion** (assigned exactly as
+  `measure_core` does — nearest surface vertex per voxel, averaged over the
+  adhesion) and the two are not the same number.
+
+  Independent check of part B on a synthetic watertight mesh: a marching-cubes
+  sphere (r = 20) is closed-fraction 1.0 and comes out **inward**-wound
+  (signed volume −33,360 against a true 33,510), and the volume test flips it so
+  100% of its normals point outward. The vessel alpha shape's own winding is
+  already outward (6V = +2.82e6), so for that mesh part B amounts to *not*
+  applying the centroid flip — which is the whole 44.4%.
+
+  Blast radius traced and accepted: `gui/cell_mesh.py:162,:441` (the "Nuclei
+  normals" arrows may reverse; `offset_centroids` only moves if
+  `inward_offset_um > 0`, GUI default `0.0`) and `gui/clover.py:52-55`, whose
+  one-sided `sd > 0` signed-distance gate can change membership. The other four
+  signed-distance consumers are symmetric or `abs()` and are unaffected.
 
 ---
 
@@ -456,13 +530,13 @@ and [P03](#p03) both have to land first for any of those to mean anything.
 
 | | |
 |---|---|
-| **Status** | open |
+| **Status** | fixed |
 | **Severity** | S2 |
 | **Opened** | 2026-08-10 (audit F5) |
 | **Last verified** | 2026-08-10 (scikit-image 0.26.0) |
-| **Resolved** | — |
-| **Where** | `pipeline/gui/nuclei.py:207`, `pipeline/rf.py:612` |
-| **Affects** | `n_nuclei_total`, `n_fibroblasts`, `nuc_id`, `dist_nuc_um`, adhesion instance boundaries |
+| **Resolved** | 2026-08-10 (commit `5d0a9c6`) |
+| **Where** | `pipeline/gui/nuclei.py:207`, `pipeline/rf.py:606,613` |
+| **Affects** | `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries (**not** `nuc_id` / `dist_nuc_um` — see History) |
 | **Evidence** | `docs/audit.md` §3 F5 |
 
 `peak_local_max` defaults to `exclude_border=True`, which excludes peaks within
@@ -487,6 +561,30 @@ systematically fail to split.
 
 **The fix:** pass `exclude_border=False` in both calls, and raise the adhesion
 crop padding above `min_distance`.
+
+**History**
+- 2026-08-10 — opened from `audit.md` F5.
+- 2026-08-10 — **fixed.** `exclude_border=False` added at `gui/nuclei.py:207` and
+  `rf.py:613`, and `rf.py:606` `pad` raised `2 → 6` (above `min_distance=5`).
+  Both parts of (b) are needed: the pad is clipped at the volume bounds, so
+  padding alone cannot rescue components touching the stack edge. Measured on the
+  shipped `V3_..._04step_002` intermediates:
+
+  | | before | after |
+  |---|---|---|
+  | (a) nucleus seeds → `n_nuclei_total` | 273 → **273** | 276 → **276** |
+  | (b) adhesion instances | **2,092** | **2,147** (+2.6%) |
+
+  Directional only — there is no ground truth to check these against, so the new
+  numbers are recorded, not validated. The post-split size re-filter at
+  `rf.py:633-638` already absorbs the extra sub-threshold fragments the additional
+  seeds produce.
+- 2026-08-10 — **"Affects" corrected.** The original list named `nuc_id` and
+  `dist_nuc_um`. Those come from the *unsplit* DAPI label map: the watershed
+  result `nuc` is never written to `state` (`gui/nuclei.py` writes only
+  `fibroblast_count`, `:248`), so the seeds that (a) restores never reach them.
+  P07(a) affects `n_nuclei_total` and `n_fibroblasts` only; the `nuc_id` half of
+  the original claim belongs to [P04](#p04).
 
 ---
 
@@ -948,6 +1046,22 @@ is consistent with both observations, but that is a hypothesis and has not been
 verified. **Check it when [P01](#p01) lands** — split surface vertices by sheet
 and inspect the κ2 sign histogram.
 
+> **Answer, 2026-08-10 ([P01](#p01) landed).** With both parts of the P01 fix in,
+> κ2 comes out **98.3% consistently signed** (median −0.0703 1/µm, R ≈ 14.2 µm)
+> across all 7,282 surface vertices — up from 78.6% shipped and 77.1% with the
+> winding fix alone. **One sheet dominates**, so the two-sheet ambiguity is not a
+> material contributor to the curvature columns on this image. That does not make
+> the structural argument above wrong: a tapering vessel must still sweep through
+> any fixed alpha, so this is evidence about *this* image, not a general result.
+>
+> The inner/outer split itself **could not be measured directly.** P01 part B
+> applies a single *global* orientation (flip the whole normal field by the sign
+> of the enclosed volume), which is what makes the sign consistent — and which
+> erases exactly the inner-vs-outer distinction this check wanted to see. A direct
+> test would need per-sheet labelling (e.g. ray casting from the centerline)
+> rather than reading it off the normals. Left open; the 98.3% figure bounds how
+> much it can matter.
+
 **Note on the acceptance test.** [P01](#p01)'s test reads "κ1 ≈ 0, κ2 ≈ −1/R
 consistently signed, K ≈ 0". A cone is a *developable* surface, so K = 0 exactly,
 as for a cylinder, and κ1 ≈ 0 still holds — but κ2 is **−1/R(s), varying along the
@@ -968,12 +1082,12 @@ that varies by construction.
 
 | | |
 |---|---|
-| **Status** | open |
+| **Status** | fixed |
 | **Severity** | S3 (display only — no exported column changes) |
 | **Opened** | 2026-08-10 |
 | **Last verified** | 2026-08-10 |
-| **Resolved** | — |
-| **Where** | `pipeline/gui/vessel_mesh.py:404-408` (`_show_path`) |
+| **Resolved** | 2026-08-10 (commit `5d0a9c6`) |
+| **Where** | `pipeline/gui/vessel_mesh.py:397` (`_path_z_um`, `_show_path`) |
 | **Affects** | the `Vessel path curvature (X-Y)` layer only |
 
 `_show_path` places every centerline point at one z — the mean of **all** mesh
@@ -1001,6 +1115,33 @@ because it shows whether a 3D axis estimate is well-behaved before one is built.
 
 **Not a defect in `path_curv_xy` itself** — κ is computed in xy and z never enters
 it. This is the overlay only.
+
+**History**
+- 2026-08-10 — opened.
+- 2026-08-10 — **fixed.** New helper `_path_z_um` gives each centerline point the
+  intensity-weighted mean z of the cadherin voxels in a ±3 µm column beneath it,
+  sampled from `_cadh_mask_array(state)` — the same array `_compute_path` fed the
+  centerline, so the two agree by construction. Only the ~643 needed columns are
+  touched; `_show_path` runs on the GUI thread and must not materialise the
+  volume. Measured on `V3_..._04step_002`:
+
+  | | before | after |
+  |---|---|---|
+  | displayed z | one value, **46.7 µm** | per point, **6.1 → 96.1 µm** (median 38.9, σ 25.2) |
+  | \|new − old\| | — | median **23.5 µm**, max **49.4 µm** |
+  | columns with cadherin signal | — | **643 / 643** |
+  | cost on the GUI thread | — | **0.15 s** |
+
+  The measured span is narrower than the 3.1 → 99.8 µm quoted above because the
+  ±3 µm window averages rather than taking a single column — intended, and it is
+  what makes all 643 points resolvable (the entry's single-column figure covered
+  only 574).
+
+  **Also fixed while here** (not in the original entry): `zc` fell back to `0.0`
+  when no vessel mesh was loaded, silently drawing the whole path on the bottom
+  slice. Points with an empty column now fall back to the mask's own mean z over
+  the points that did hit; only a completely absent cadherin mask can still reach
+  the mesh-mean → `0.0` chain.
 
 ---
 

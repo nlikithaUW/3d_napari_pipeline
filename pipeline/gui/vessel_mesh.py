@@ -394,18 +394,64 @@ def build(state, viewer) -> Container:
     path_btn = PushButton(text="Compute in-plane path curvature (X-Y)")
     PATH_LAYER = "Vessel path curvature (X-Y)"
 
+    def _path_z_um(pts_yx_um, win_um=3.0):
+        """Per-point Z (µm) of the cadherin column under each centerline point.
+
+        The centerline is derived from the X-Y projection of the cadherin mask,
+        so it carries no Z of its own. Drawing the whole path at one Z puts most
+        of it off the vessel — on a tube that dives through the stack that is
+        tens of µm of error. So take the intensity-weighted mean Z of the
+        cadherin voxels in a small column around each point. Uses the same mask
+        `_compute_path` fed the centerline, so the two agree by construction.
+
+        Returns (z_um array, ok mask), or (None, None) with no mask loaded.
+        Only the ~n_points columns are touched — this runs on the GUI thread, so
+        the full volume must not be materialised.
+        """
+        mask = _cadh_mask_array(state)
+        if mask is None:
+            return None, None
+        sz, sy, sx = (float(s) for s in state.get("scale", (1.0, 1.0, 1.0)))
+        nz, ny, nx = mask.shape
+        z_idx = np.arange(nz, dtype=np.float64)
+        wy = max(1, int(round(win_um / sy)))
+        wx = max(1, int(round(win_um / sx)))
+        yi = np.clip(np.round(pts_yx_um[:, 0] / sy).astype(int), 0, ny - 1)
+        xi = np.clip(np.round(pts_yx_um[:, 1] / sx).astype(int), 0, nx - 1)
+
+        zs = np.zeros(len(pts_yx_um), dtype=np.float64)
+        ok = np.zeros(len(pts_yx_um), dtype=bool)
+        for k in range(len(pts_yx_um)):
+            y0, y1 = max(0, yi[k] - wy), min(ny, yi[k] + wy + 1)
+            x0, x1 = max(0, xi[k] - wx), min(nx, xi[k] + wx + 1)
+            per_z = (np.asarray(mask[:, y0:y1, x0:x1]) > 0).sum(axis=(1, 2))
+            tot = per_z.sum()
+            if tot:
+                zs[k] = float((z_idx * per_z).sum() / tot) * sz
+                ok[k] = True
+        return zs, ok
+
     def _show_path(res, visible=True):
-        """Overlay the centerline (points at the vessel's mean Z, coloured by κ)."""
+        """Overlay the centerline (points at the local vessel Z, coloured by κ)."""
         pts = np.asarray(res["pts_yx_um"])
         kap = np.asarray(res["kappa"])
         if len(pts) == 0:
             return
-        zc = 0.0
-        cache = state.get("vessel_mesh_cache") or {}
-        vv = cache.get("verts")
-        if vv is not None and len(vv):
-            zc = float(np.mean(np.asarray(vv)[:, 0]))
-        pts3 = np.column_stack([np.full(len(pts), zc), pts[:, 0], pts[:, 1]])
+        zvals, ok = _path_z_um(pts)
+        if zvals is None:
+            # No cadherin mask to sample: fall back to the mesh's mean Z, and
+            # only then to 0.0 (which draws the path on the bottom slice).
+            zc = 0.0
+            cache = state.get("vessel_mesh_cache") or {}
+            vv = cache.get("verts")
+            if vv is not None and len(vv):
+                zc = float(np.mean(np.asarray(vv)[:, 0]))
+            zvals = np.full(len(pts), zc)
+        elif not ok.all():
+            # Empty column under this point — use the mask's own mean Z over the
+            # points that did hit, not the mesh's and not 0.0.
+            zvals[~ok] = float(zvals[ok].mean()) if ok.any() else 0.0
+        pts3 = np.column_stack([zvals, pts[:, 0], pts[:, 1]])
         if PATH_LAYER in viewer.layers:
             viewer.layers.remove(PATH_LAYER)
         lyr = viewer.add_points(

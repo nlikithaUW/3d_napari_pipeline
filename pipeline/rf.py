@@ -603,14 +603,21 @@ def instance_labels_3d(
             sl = boxes[cid - 1]
             if sl is None:                      # label absent (shouldn't happen)
                 continue
-            pad = 2
+            # Pad wider than peak_local_max's min_distance so an object's own
+            # crop edge is never within the exclusion radius of its peaks.
+            pad = 6
             z0, z1 = max(0, sl[0].start - pad), min(lbl.shape[0], sl[0].stop + pad)
             y0, y1 = max(0, sl[1].start - pad), min(lbl.shape[1], sl[1].stop + pad)
             x0, x1 = max(0, sl[2].start - pad), min(lbl.shape[2], sl[2].stop + pad)
 
             crop_mask = (lbl[z0:z1, y0:y1, x0:x1] == cid)
             dist = _edt(crop_mask)
-            coords = peak_local_max(dist, min_distance=5, labels=crop_mask)
+            # exclude_border=False as well as the pad: the pad is clipped at the
+            # volume bounds, so it cannot rescue objects touching the stack
+            # edge. Without both, those objects keep at most one seed and never
+            # split.
+            coords = peak_local_max(dist, min_distance=5, labels=crop_mask,
+                                    exclude_border=False)
             if len(coords) <= 1:
                 continue
             n_split += 1

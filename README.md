@@ -324,19 +324,21 @@ Summary only. **[`docs/ISSUES.md`](docs/ISSUES.md) is the authoritative list**,
 with measurements, mechanisms, and what fixing each involves.
 [`docs/audit.md`](docs/audit.md) is the frozen evidence behind them.
 
-**These describe the CSVs as exported so far.** Some of the underlying defects
-are now fixed in the code but no CSV has been regenerated against the fixes yet —
-those rows say so explicitly and stay here until a new export exists.
+**These describe the CSVs as exported.** Two of the defects below are now fixed
+in the code, and one image has been re-exported against the fixes
+(`V3_..._04step_002`, `..._adhesion_measures_20260811_105032.csv`). **Every other
+CSV predates the fixes.** Those rows say which is which; a fix in the code does
+not retroactively fix a file already on disk.
 
 | Column(s) | Problem | ID |
 |---|---|---|
-| `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **Do not use any CSV exported before 2026-08-10.** A destroyed triangle winding, plus an away-from-centroid normal flip that overrode the winding on 44% of surface vertices, made the curvature fitting frame near-random; correlation between the shipped column and the corrected one is ρ = +0.069 (54.8% sign agreement — a coin flip). **Fixed in the code on 2026-08-10**: corrected κ2 is 98.3% consistently signed at R ≈ 14 µm, κ1 ≈ 0, K ≈ 0, as a tube must give. Re-export before using these columns | [P01](docs/ISSUES.md#p01) |
+| `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **Do not use any CSV exported before 2026-08-11.** A destroyed triangle winding, plus an away-from-centroid normal flip that overrode the winding on 44% of surface vertices, made the curvature fitting frame near-random; correlation between the old column and the corrected one is ρ = +0.069 (54.8% sign agreement — a coin flip). **Fixed 2026-08-10, verified on the re-export**: κ1 median +0.017 → −0.003, κ2 −0.042 → −0.070 (R 23.7 → 14.3 µm) at 99.5% consistent sign, ρ(`curv_mean`, `centroid_z_um`) −0.059 → +0.040. That is what a tube must produce. Re-export any other image before using these columns | [P01](docs/ISSUES.md#p01) |
 | `ratio_clover_ruby` | Driven by the ruby channel's noise floor, not by tension — ρ(ratio, ruby) = −0.773 vs ρ(ratio, clover) = +0.068. Spread exceeds what the sensor can physically produce. Treat as a rank at best | [P02](docs/ISSUES.md#p02) |
 | *every column* | Adhesion detection is depth-truncated: the far vessel wall yields 37% of the near wall's detection density per unit surface area | [P03](docs/ISSUES.md#p03) |
 | `nuc_id`, `n_fibroblasts`, `n_nuclei_total` | Two different nucleus segmentations; `nuc_id` cannot be joined to the fibroblast classification | [P04](docs/ISSUES.md#p04) |
 | `n_fibroblasts` | The fibroblast/endothelial classifier is unvalidated; the reported fraction swings ~2× across one slider step | [P05](docs/ISSUES.md#p05) |
 | `ratio_clover_ruby` | Drifts with imaging depth (ρ = −0.187); on this geometry depth is confounded with position along the vessel | [P06](docs/ISSUES.md#p06) |
-| `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries | `peak_local_max` discarded watershed seeds near the volume edge, so nuclei touching the stack boundary were dropped and elongated adhesions failed to split. **Fixed in the code on 2026-08-10**; on the shipped image the counts move 273 → 276 nuclei and 2,092 → 2,147 adhesions. Re-export to pick this up | [P07](docs/ISSUES.md#p07) |
+| `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries | `peak_local_max` discarded watershed seeds near the volume edge, so nuclei touching the stack boundary were dropped and elongated adhesions failed to split. **Fixed 2026-08-10**; on the re-exported image the counts move 273 → 276 nuclei and 2,092 → 2,147 adhesions (`n_fibroblasts` happened not to change — all three recovered nuclei were non-fibroblast, which is one image, not a general result). Re-export any other image to pick this up | [P07](docs/ISSUES.md#p07) |
 | `path_curv_xy` | Contaminated within `smooth_um` (20 µm default) of a branch — filter on `dist_branch_um`, but guard for NaN or non-branched images lose every row. Curvature is ~10× inflated within 5 µm of the xy field boundary, and 42% of the highest-κ points sit there. Also unsigned, so inside and outside of a bend are indistinguishable | [P08](docs/ISSUES.md#p08) |
 | `dist_mesh_um`, `curv_*` | Measured to a ~2 µm-spaced point cloud including geometry the mesh rejected; curvature is assigned with no distance limit. The point cloud's resolution is set by `subsample_um` (5.0 in the shipped run — a 169:1 reduction), not by the image | [P09](docs/ISSUES.md#p09), [P20](docs/ISSUES.md#p20) |
 | `force_*_pN` | Blank by design without a FRET calibration. If you configure one, the numbers are only as good as your calibration | [P18](docs/ISSUES.md#p18) |

@@ -96,11 +96,12 @@ analysis in [Analysis notes](#analysis-notes) — P01 first because it is the
 smallest fix with the largest effect and every curvature result depends on it.
 
 **As of 2026-08-10 P01, P07 and P22 are fixed in the code**, so the queue is now
-**P04 → P03 → P02 → P08/P09/P10**. One thing carries over: no CSV has been
-regenerated yet, so every curvature column on disk is still the pre-P01 noise and
-the [What not to trust yet](../README.md#what-not-to-trust-yet) rows stay as they
-are until a new export exists. Fixing the code and fixing the data are separate
-steps.
+**P04 → P03 → P02 → P08/P09/P10**. One caveat carries over: on 2026-08-11 only
+`V3_..._04step_002` was regenerated (`..._20260811_105032.csv`). It is the one
+image that had `_saved` intermediates; the other five have none, so **any older
+CSV, and any CSV for another image, still carries the pre-P01 curvature noise**.
+Fixing the code and fixing the data are separate steps, and the data half is one
+sixth done.
 
 The 2026-08-10 vessel-mesh review (P19–P23, [I03](#i03)) does not displace that
 ordering. The border-flare half of [P08](#p08) is independent of everything above
@@ -242,6 +243,35 @@ at ≈ −1/R; K ≈ 0; face-normal coherence > 0.9. **Passed** — see below.
   `inward_offset_um > 0`, GUI default `0.0`) and `gui/clover.py:52-55`, whose
   one-sided `sd > 0` signed-distance gate can change membership. The other four
   signed-distance consumers are symmetric or `abs()` and are unaffected.
+
+- 2026-08-11 — **verified end to end on a regenerated CSV.**
+  `vessel_mesh.npz` (new winding) and `vessel_curvature.npz` were rewritten for
+  `V3_..._04step_002` and `batch_measure` re-exported it as
+  **`..._adhesion_measures_20260811_105032.csv`** (2,147 rows) — the authoritative
+  post-fix export for this image. The acceptance test passes on the actual
+  exported columns, not just in memory:
+
+  | column-level check | old CSV (20260806) | **new CSV (20260811)** | target |
+  |---|---|---|---|
+  | `curv_k1` median | +0.0167 | **−0.0034** | ≈ 0 |
+  | `curv_k2` median (implied R) | −0.0422 (23.7 µm) | **−0.0701 (14.3 µm)** | ≈ −1/R |
+  | `curv_k2` sign consistency | 90.1% | **99.5%** | ≥ 96.9% |
+  | `curv_gaussian` median | +0.00005 | **+0.00025** | ≈ 0 |
+  | ρ(`curv_mean`, `centroid_z_um`) | −0.059 | **+0.040** | → 0 |
+
+  Sign consistency reads higher per-adhesion (90.1 / 99.5%) than per-vertex
+  (78.6 / 98.3%) because adhesions do not sample surface vertices uniformly —
+  they concentrate where the wall is well reconstructed. Quote the per-vertex
+  figure for the mesh and the per-adhesion figure for the CSV; they are different
+  measurements of the same fix.
+
+  **Three CSVs now sit in that folder — use `20260811_105032`.** `20260806_145720`
+  is the pre-fix baseline, kept deliberately so the before/after above can be
+  re-derived. `20260811_104417` is a **superseded intermediate**: it has the
+  corrected curvature but was exported before `fibroblast_count.npz` was
+  recomputed, so it still carries the pre-[P07](#p07) `n_nuclei_total = 273`.
+  Delete it or ignore it; do not analyse it.
+
 
 ---
 
@@ -579,6 +609,29 @@ crop padding above `min_distance`.
   numbers are recorded, not validated. The post-split size re-filter at
   `rf.py:633-638` already absorbs the extra sub-threshold fragments the additional
   seeds produce.
+- 2026-08-11 — **regenerated for `V3_..._04step_002`.** `fibroblast_count.npz`
+  was recomputed by driving the real `state["run_fibroblasts"]` headlessly (the
+  GUI nuclei tab is the only implementation of the count, so re-implementing it
+  headless would have re-created [P11](#p11)); `auto_min_size_otsu` returned 725,
+  reproducing the shipped `dapi_min_size_vox` exactly, and the mClover threshold
+  came out at the same 832.5.
+
+  | | before | after |
+  |---|---|---|
+  | `n_nuclei_total` | 273 | **276** |
+  | `n_fibroblasts` | 27 | **27** (unchanged) |
+  | "other" (non-VnTs) | 246 | **249** |
+
+  **All three recovered border nuclei classified as non-fibroblast**, so the
+  headline `n_fibroblasts` did not move on this image. That is one image and says
+  nothing about the general case — the border shell is 7.4% of the depth and
+  there is no reason a recovered nucleus should preferentially be endothelial.
+  Do not read it as "P07(a) does not matter".
+
+  Both halves are in the re-export
+  `..._adhesion_measures_20260811_105032.csv`: `n_nuclei_total = 276` and 2,147
+  adhesion rows. **Only this one image has been regenerated** — the other five
+  have no `_saved` intermediates at all, so they carry no post-fix export.
 - 2026-08-10 — **"Affects" corrected.** The original list named `nuc_id` and
   `dist_nuc_um`. Those come from the *unsplit* DAPI label map: the watershed
   result `nuc` is never written to `state` (`gui/nuclei.py` writes only

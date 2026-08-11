@@ -92,6 +92,7 @@ true of the code and data on that date and may not be true now.
 | [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open |
 | [I04](#i04) | `batch.py` has no way to re-run one step | idea | open |
 | [H01](#h01) | Repository has no LICENSE | — | open |
+| [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
 **Suggested order of work** (dependency-ordered, not severity-ordered). The
 original ordering was **P01 → P04 → P07 → P03 → P02 → P08/P09/P10**, then the
@@ -2011,7 +2012,61 @@ prefer; Apache 2.0 adds an express patent grant, which matters if the
 tension-measurement method might be patented or if industry collaborators are
 involved.
 
-Also noted at the same time: `3d_images_folder/Channel Info.rtf` was removed from
+---
+
+<a id="h02"></a>
+## H02 — `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn
+
+**Opened** 2026-08-11 · **Status** open (measured harmless *today*)
+
+`environment.yml` pins `napari=0.6.0` and `vispy=0.14.3` but lists
+`scikit-learn` with no version. The shipped `adhesion_rf.joblib` was trained
+under **scikit-learn 1.9.0**; the WSL development env currently resolves to
+**1.8.0**, so loading it prints:
+
+> `InconsistentVersionWarning: Trying to unpickle estimator RandomForestClassifier
+> from version 1.9.0 when using version 1.8.0. This might lead to breaking code or
+> invalid results.`
+
+A joblib pickle of a fitted estimator is not a portable model format — it is a
+snapshot of sklearn's internal objects. There is nothing in the repo that would
+catch a future version actually changing them, and the failure would be
+**silent**: a forest that loads but traverses differently produces a plausible
+probability map, not an exception.
+
+**Measured on 2026-08-11 — no effect on the current pair.** Features were
+recomputed at 30,000 gated voxels of `V3_..._04step_002` and predicted with the
+1.8.0-loaded forest, then compared against the stored `adhesion_proba.npy`:
+
+| | |
+|---|---|
+| byte-identical probabilities | 29,935 / 30,000 (**99.78%**) |
+| max \|difference\| | 7 / 255 |
+| **voxels flipping the `>= 128` segmentation threshold** | **0** |
+
+And the residual 0.22% is **not** an sklearn effect. `predict_proba` computes
+features on 20-plane z-chunks padded by `ceil(4σ)+1`; the check recomputed them
+over the whole volume, and a 4σ truncation differs slightly from an untruncated
+filter near a chunk edge. The differing voxels are **6.7× enriched within one
+plane of a chunk boundary** (0.92% at the edge plane, decaying monotonically to
+0.00% by six planes in) — chunk geometry, which a version effect could not
+respect. A random forest's `predict_proba` is a mean over leaf class fractions;
+it has no reason to know where a z-chunk starts.
+
+**So the five-image batch is safe to run in either environment as things stand.**
+
+**What to do:** pin `scikit-learn` in `environment.yml` to the version the shipped
+model was trained under, or record that version next to the model and re-verify
+after any upgrade. Better still, treat the check above as the regression test —
+it is cheap (one image, ~4 minutes) and it is the only thing standing between a
+silently-degraded classifier and five images of output.
+
+**Related:** [P12](#p12) (same failure class: an unattended run that produces
+plausible numbers with no message).
+
+---
+
+Also noted under [H01](#h01): `3d_images_folder/Channel Info.rtf` was removed from
 the working tree on 2026-08-10 (lab acquisition notes wrapped in an RTF carrying
 embedded authoring metadata; its useful content — the channel index list — is in
 `params.json` and `CLAUDE.md`). **It remains in git history.** Scrubbing history

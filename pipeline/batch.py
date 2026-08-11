@@ -208,7 +208,7 @@ def main() -> None:
                   "clover_raw_native", "ruby_raw_native", "force_vol",
                   "adhesion_proba", "clover_ruby_ratio", "vessel_centerline",
                   "measure_result", "dapi_mask_layer", "cadh_mask_layer",
-                  "clover_mask_layer"):
+                  "clover_mask_layer", "fibroblast_count"):
             state[k] = None
         state["dapi_state"] = {"labels": None, "sizes": None}
         state["cadh_state"] = {"labels": None, "sizes": None, "centroids": None,

@@ -172,6 +172,11 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
                               "normals": None, "lids": None}
         state["adhesion_proba"] = None
         state["clover_ruby_ratio"] = None
+        # Must be cleared per image (P25). `run_fibroblasts` chains its save
+        # through `call_all`, which fires even when the count bails out early —
+        # so a stale count from the previous image would be written into this
+        # image's fibroblast_count.npz and, from there, into its CSV.
+        state["fibroblast_count"] = None
         for hist in state.get("hists", []):
             hist.clear()
 

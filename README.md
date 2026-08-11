@@ -332,8 +332,8 @@ with measurements, mechanisms, and what fixing each involves.
 | `nuc_id`, `n_fibroblasts`, `n_nuclei_total` | Two different nucleus segmentations; `nuc_id` cannot be joined to the fibroblast classification | [P04](docs/ISSUES.md#p04) |
 | `n_fibroblasts` | The fibroblast/endothelial classifier is unvalidated; the reported fraction swings ~2× across one slider step | [P05](docs/ISSUES.md#p05) |
 | `ratio_clover_ruby` | Drifts with imaging depth (ρ = −0.187); on this geometry depth is confounded with position along the vessel | [P06](docs/ISSUES.md#p06) |
-| `path_curv_xy` | Contaminated within `smooth_um` (20 µm default) of a branch — filter on `dist_branch_um`. Also unsigned, so inside and outside of a bend are indistinguishable | [P08](docs/ISSUES.md#p08) |
-| `dist_mesh_um`, `curv_*` | Measured to a ~2 µm-spaced point cloud including geometry the mesh rejected; curvature is assigned with no distance limit | [P09](docs/ISSUES.md#p09) |
+| `path_curv_xy` | Contaminated within `smooth_um` (20 µm default) of a branch — filter on `dist_branch_um`, but guard for NaN or non-branched images lose every row. Curvature is ~10× inflated within 5 µm of the xy field boundary, and 42% of the highest-κ points sit there. Also unsigned, so inside and outside of a bend are indistinguishable | [P08](docs/ISSUES.md#p08) |
+| `dist_mesh_um`, `curv_*` | Measured to a ~2 µm-spaced point cloud including geometry the mesh rejected; curvature is assigned with no distance limit. The point cloud's resolution is set by `subsample_um` (5.0 in the shipped run — a 169:1 reduction), not by the image | [P09](docs/ISSUES.md#p09), [P20](docs/ISSUES.md#p20) |
 | `force_*_pN` | Blank by design without a FRET calibration. If you configure one, the numbers are only as good as your calibration | [P18](docs/ISSUES.md#p18) |
 
 ### Before drawing any conclusion from this CSV

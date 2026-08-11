@@ -69,7 +69,7 @@ true of the code and data on that date and may not be true now.
 | [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open |
 | [P06](#p06) | Tension readout drifts with imaging depth | S2 | open |
 | [P07](#p07) | `peak_local_max` drops border seeds, in two places | S2 | **fixed** |
-| [P08](#p08) | `path_curv_xy` — 20 µm contamination radius, and κ is unsigned | S2 | open |
+| [P08](#p08) | `path_curv_xy` — 20 µm fit window on a ~140 µm-wide vessel; contamination; unsigned | S1 | open |
 | [P09](#p09) | `dist_mesh_um` measures to rejected geometry; no gate on curvature | S2 | open |
 | [P10](#p10) | `force_total_pN` is not a force | S2 | open |
 | [P11](#p11) | `measure_core` duplicates the Measure worker and has diverged | S3 | open |
@@ -85,6 +85,7 @@ true of the code and data on that date and may not be true now.
 | [P21](#p21) | One global alpha cannot be correct on a tapering vessel | S2 | open |
 | [P22](#p22) | Centerline overlay is drawn at a single wrong z | S3 | **fixed** |
 | [P23](#p23) | Centerline preprocessing amputates tapering vessels | S2 | open |
+| [P24](#p24) | `curv_*` has no scale-independent value — `radius_um` sets the answer | S1 | open |
 | [I01](#i01) | Progress / completion bars for long-running operations | idea | open |
 | [I02](#i02) | Fibroblast / endothelial scatter diagnostic | idea | open |
 | [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open |
@@ -109,6 +110,21 @@ and can land at any time. [P21](#p21) and [I03](#i03) are one piece of work —
 reconstruction method plus its calibration — and are now unblocked: corrected
 curvature can be part of the calibration objective rather than something checked
 afterwards.
+
+**Revision, 2026-08-11 — the geometry work moves up.** [P24](#p24) and
+[P08](#p08)(e) establish that **both** curvature columns are set by their own fit
+scale rather than by the vessel: `curv_*`'s implied radius tracks `radius_um` with
+no plateau, and `path_curv_xy` fits a 20 µm window to a structure ~140 µm wide.
+Neither is a defect that a small fix reaches — both follow from what the
+reconstruction is. That makes [P21](#p21) + [I03](#i03) the critical path for the
+project's end goal rather than a follow-up to it, because there is currently no
+trustworthy geometry variable to relate tension to.
+
+The revised queue is **P04 → P03 → P21/I03 (+ P24) → P02 → P08/P09/P10**, with the
+five un-batched images ([P03](#p03), [P06](#p06), [P19](#p19), [P23](#p23) all
+need them) running unattended alongside. [P04](#p04) stays first: it is small,
+it is the only route to a cell-level unit of analysis, and it is independent of
+everything the geometry work will change.
 
 ---
 
@@ -162,6 +178,16 @@ With the winding preserved the numbers become a textbook tube: κ1 ≈ 0 (axial)
 ≈ 13.5 µm), K ≈ 0. That is what a cylinder must produce, and it is the strongest
 evidence that the corrected version is the right one.
 
+> **Correction, 2026-08-11 (left in place above so the original reading is on the
+> record).** The last sentence overstates it, and the parenthetical "radius
+> ≈ 13.5 µm" is not a measurement of the vessel — it is κ2 inverted. The vessel's
+> real radius is of order **40 µm** ([P24](#p24)(b)), so κ2 = −0.074 is 3–5× too
+> curved to be its circumferential curvature, and the "textbook tube" agreement is
+> self-confirming. The *strongest* evidence for the fix is the winding and
+> orientation evidence — coherence 0.209 → 0.972, directed-edge twins 53.7% →
+> 100%, the synthetic-sphere check — none of which depends on caliber. See
+> [P24](#p24) for what κ2 is actually tracking.
+
 **Only the default mesh method is affected.** `mesh_from_volume` (marching cubes,
 used by the polar and alpha-2D methods) returns consistently-wound faces. The
 GUI default is `alpha 3D (points)` (`pipeline/gui/vessel_mesh.py:96`), which is
@@ -191,6 +217,11 @@ test cannot apply there and behaviour is unchanged.
 
 **Acceptance test:** ρ(`curv_mean`, `centroid_z_um`) → 0; κ2 consistently signed
 at ≈ −1/R; K ≈ 0; face-normal coherence > 0.9. **Passed** — see below.
+
+> **Caveat, 2026-08-11.** The `κ2 ≈ −1/R` clause of this test is **circular** and
+> should not be read as evidence: the R it is scored against was itself read off
+> κ2. The vessel's true caliber is ~5× larger. See the 2026-08-11 History entry
+> and [P24](#p24). The other three clauses stand, and the fix itself stands.
 
 **History**
 - 2026-08-06 — recorded in `TODO.md` as "curvature sign inverts on branched
@@ -271,6 +302,36 @@ at ≈ −1/R; K ≈ 0; face-normal coherence > 0.9. **Passed** — see below.
   corrected curvature but was exported before `fibroblast_count.npz` was
   recomputed, so it still carries the pre-[P07](#p07) `n_nuclei_total = 273`.
   Delete it or ignore it; do not analyse it.
+
+- 2026-08-11 — **the acceptance test's radius clause is circular; the fix is
+  not affected.** Found while investigating whether the X-Y projection in
+  `path_curv_xy` costs anything ([P08](#p08)(e)).
+
+  The entry above reads κ2 = −0.074 → "circumferential, radius ≈ 13.5 µm", then
+  adopts 13.5 µm as the target and scores the fix's 14.2 µm against it. **The
+  target was derived from κ2 itself**, so the agreement is self-confirming and
+  the "textbook tube" reading rests on nothing external. Two independent
+  measurements of the vessel's actual caliber, neither using the mesh:
+
+  | measurement | result |
+  |---|---|
+  | z extent of wall in a 5 µm slab ⟂ to the local axis | **~86 µm**, saturating (87.1 → 85.8 as the in-plane search radius goes 30 → 110 µm) |
+  | xy inscribed half-width of the footprint at centerline points | median **70.6 µm** (p10 21.4, p90 87.8) — an upper bound, `binary_fill_holes` inflates it at the Y |
+
+  So the vessel radius is of order **40 µm, not 13.5 µm**, and κ2 = −0.0703 is
+  ~3–5× too curved to be this tube's circumferential curvature. What it is
+  measuring instead is in [P24](#p24) — the implied radius tracks `radius_um`
+  with no plateau, so it is a property of the reconstruction scale.
+
+  **What still stands, and why the fix is not in question.** Every measurement
+  that established the fix is an *internal-consistency* check and none of them
+  depends on caliber: face-set identity before/after part A, directed-edge twin
+  fraction 53.7% → 100.0%, face-normal coherence 0.209 → 0.972, κ2 sign
+  consistency 78.6% → 98.3%, ρ(shipped, corrected) = +0.069 at 54.8% sign
+  agreement, and the synthetic-sphere check on part B. The columns really were
+  noise before and really are self-consistent now. What is withdrawn is only the
+  claim that they are *validated against the vessel* — they are not, and
+  [P24](#p24) is why.
 
 
 ---
@@ -642,14 +703,14 @@ crop padding above `min_distance`.
 ---
 
 <a id="p08"></a>
-## P08 — `path_curv_xy`: 20 µm contamination radius, and κ is unsigned
+## P08 — `path_curv_xy`: a 20 µm fit window on a ~140 µm-wide vessel, plus contamination and unsigned κ
 
 | | |
 |---|---|
 | **Status** | open |
-| **Severity** | S2 |
+| **Severity** | S1 (raised from S2 on 2026-08-11 — see (e)) |
 | **Opened** | 2026-08-06 |
-| **Last verified** | 2026-08-10 |
+| **Last verified** | 2026-08-11 |
 | **Resolved** | — |
 | **Where** | `pipeline/centerline.py:128` (radius), `:139` (unsigned) |
 | **Affects** | `path_curv_xy` |
@@ -712,9 +773,34 @@ both paths guard with `if len(branch):` (`gui/measure.py:265`,
 `measure_core.py:167`). But `dist_branch_um > 20` is False for NaN, so applying
 the workaround below to such an image **drops every row** rather than none.
 
+**(e) The fit window is a fraction of the vessel's own width, so κ measures
+medial-axis wobble.** This is more fundamental than (a)–(d) and largely subsumes
+them. Measured on `V3_..._04step_002`, independently of the mesh:
+
+| | |
+|---|---|
+| wall z extent in a 5 µm slab ⟂ to the local axis | **~86 µm** (saturates; see [P24](#p24)) |
+| xy inscribed half-width at centerline points | median **70.6 µm** → footprint ~140 µm wide |
+| total skeleton length | ~640 µm (643 points at ~1 µm spacing) |
+| `smooth_um` default | **20 µm** |
+
+The vessel is therefore about **4.5 of its own widths long**, in a field only
+~2.4 widths across, and κ is fitted over a window under **a third of the vessel's
+half-width**. A medial axis extracted from a blob that wide is dominated by
+irregularities in its boundary — including where the field of view cut it, which
+is exactly the mechanism behind (c). Fitting κ at 20 µm on it measures how much
+the medial axis wobbles, not how much the vessel bends.
+
+**Going to 3D does not fix this** (checked 2026-08-11, see History): an object of
+these proportions has no well-defined 1D axis at the 20 µm scale, so the problem
+is the definition of the variable, not the projection that produced it. Any real
+fix has to come from [P21](#p21)/[I03](#i03) — a reconstruction that yields a
+defensible axis — or from abandoning a single-scale κ in favour of one reported
+with its scale attached.
+
 **Interim workaround:** filter `dist_branch_um > 20` yourself when analysing the
 CSV — but guard it, e.g. `dist_branch_um.isna() | (dist_branch_um > 20)`, or the
-non-branched images vanish. See (d).
+non-branched images vanish. See (d). Note this does nothing about (e).
 
 **History**
 - 2026-08-06 — recorded in `TODO.md` as "path curvature is undefined at branch
@@ -724,6 +810,38 @@ non-branched images vanish. See (d).
 - 2026-08-10 (later) — border flare (c) measured and found to be a larger
   contributor to the high-κ tail than the junction, revising the audit's reading.
   The NaN trap (d) added after the user noted that not every vessel is Y-shaped.
+- 2026-08-11 — **(e) added and severity raised S2 → S1**, after the user asked
+  why the centerline is built from a 2-D projection at all. The investigation set
+  out to test whether the projection costs anything and **could not answer that
+  question**, which is itself the finding: there is no trustworthy 3D vessel axis
+  to compare against.
+
+  Two attempts at one, both on `V3_..._04step_002`, judged by residual jitter
+  about a 20 µm local mean (the κ fit window is 20 µm, so jitter at that scale is
+  indistinguishable from bending):
+
+  | Z estimator | \|dz\| to nearest xy neighbour | residual about 20 µm mean |
+  |---|---|---|
+  | column mean — [P22](#p22)'s `_path_z_um` rule | 2.43 µm | **24.4 µm** |
+  | centroid of a 5 µm slab ⟂ to the local xy tangent (median 6,892 voxels/slab) | 1.75 µm | **9.2 µm** |
+
+  The column mean fails structurally: a column through the projection of a
+  *hollow* vessel contains **both walls** — median **2 separated z-lobes spanning
+  a median 85 µm** of a 105 µm stack — so the count-weighted mean sits in the
+  lumen and swings with whichever wall dominates. Weighted median, wall midpoint
+  and a robust p5/p95 midpoint were also tried; all leave 20–31 µm of residual.
+
+  The slab centroid is much better and still not enough. κ fitted on it comes out
+  **flat across every distance-to-edge band** (0.030 / 0.028 / 0.026 / 0.023 1/µm
+  going inward) against the 2D column's 10× variation (0.039 / 0.009 / 0.007 /
+  0.004) — a jitter floor, not a measurement. Spearman(κ_2D, κ_3D) = +0.25, which
+  is **not** reportable as "the projection destroys the column", because the 3D
+  number has no signal in it.
+
+  Chasing why the slab looked wrong produced the caliber measurements in (e), and
+  through them [P24](#p24). Ordering note: (c) border flare is still worth fixing
+  on its own — it is cheap and it removes a known artefact — but with (e) on the
+  record it should no longer be described as making the column trustworthy.
 
 ---
 
@@ -1126,7 +1244,19 @@ The `implied caliber ~ 1/median κ1` readout (`gui/vessel_mesh.py:368`) is
 meaningless on a tapering vessel regardless of [P01](#p01) — it averages a radius
 that varies by construction.
 
-**Related:** [P01](#p01), [P20](#p20), [I03](#i03).
+> **Addendum, 2026-08-11 — the caliber this entry reasons about is now measured.**
+> On `V3_..._04step_002` the wall spans **~86 µm in z** in a slab cut
+> perpendicular to the local axis, saturating against the search radius, and the
+> footprint is ~140 µm wide ([P24](#p24)(b)). A vessel radius of order 40 µm sits
+> **far above** the shipped `alpha3d_um = 15.0`, which is consistent with this
+> entry's measurement that the lumen is not filled here — alpha is nowhere near
+> the local lumen radius, so the two-sheet regime is live, as stated. It also
+> means the *other* half of the alpha condition is the binding one on this image:
+> alpha is being set by the wall-gap scale (~8–10 µm) with a wide margin below the
+> lumen, not squeezed between the two. On a taper the narrow end still closes the
+> gap, so the structural argument is unchanged.
+
+**Related:** [P01](#p01), [P20](#p20), [P24](#p24), [I03](#i03).
 
 ---
 
@@ -1196,6 +1326,23 @@ it. This is the overlay only.
   the points that did hit; only a completely absent cadherin mask can still reach
   the mesh-mean → `0.0` chain.
 
+- 2026-08-11 — **the entry's own question answered: this Z is a good overlay and
+  an unusable axis.** The fix above notes it is "worth doing before any
+  3D-centerline work, because it shows whether a 3D axis estimate is
+  well-behaved before one is built." It is not. A ±3 µm column through the
+  projection of a hollow vessel holds **both walls** — median **2 separated
+  z-lobes, median 85 µm apart** — so the count-weighted mean lands in the lumen
+  and moves with whichever wall has more voxels in that column. Residual about a
+  20 µm local mean is **24.4 µm**; a cross-sectional slab centroid gets that to
+  9.2 µm and is still too noisy to fit curvature on. Full numbers in
+  [P08](#p08)'s 2026-08-11 History entry.
+
+  **No change to this fix or to `_path_z_um`.** The overlay only has to sit on
+  the vessel, and it does — median displacement from the old single-z overlay was
+  23.5 µm, all 643 columns resolve, 0.15 s on the GUI thread. This note exists so
+  the helper is not later mistaken for an axis estimator, which is a use it was
+  never measured for.
+
 ---
 
 <a id="p23"></a>
@@ -1230,6 +1377,108 @@ before choosing values, and consider making both thresholds scale-aware rather
 than absolute.
 
 **Related:** [P08](#p08)(c) (border flare, same function), [P13](#p13).
+
+---
+
+<a id="p24"></a>
+## P24 — `curv_*` has no scale-independent value; `radius_um` sets the answer
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S1 |
+| **Opened** | 2026-08-11 |
+| **Last verified** | 2026-08-11 |
+| **Resolved** | — |
+| **Where** | `pipeline/cell_mesh.py:360` (`mesh_curvature`), the `radius_um` slider in `pipeline/gui/vessel_mesh.py` |
+| **Affects** | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` |
+
+[P01](#p01) fixed the curvature *frame*, and the columns are now internally
+consistent — 98.3% consistent κ2 sign, face-normal coherence 0.972. This entry is
+the separate question of whether they measure **the vessel**. On the evidence
+below they do not: they measure the scale at which they were fitted.
+
+**(a) The implied radius tracks the fit window.** Sweeping `radius_um` on the
+shipped `V3_..._04step_002` mesh — same 8,966 verts / 7,282 surface verts, same
+`smooth_iter = 10`, geometry untouched:
+
+| `radius_um` | κ2 median (1/µm) | implied R | κ2 sign consistency |
+|---|---|---|---|
+| **5.0 (shipped)** | **−0.0703** | **14.2 µm** | 98.3% |
+| 10 | −0.0606 | 16.5 µm | 98.3% |
+| 15 | −0.0277 | 36.2 µm | 98.3% |
+| 20 | −0.0171 | 58.5 µm | 98.0% |
+| 30 | −0.0097 | 102.9 µm | 97.0% |
+| 40 | −0.0074 | 134.7 µm | 96.6% |
+
+For a surface that is genuinely a tube of radius R, **κ2 ≈ −1/R is independent of
+the fit scale** while the window stays well below R. Here the implied radius rises
+monotonically with the window at roughly 3× and **never plateaus**. That is the
+signature of fitting a quadric to a surface rough at every scale: the estimate is
+a property of the window, not of the object.
+
+Note that sign consistency stays ≥96.6% throughout. **A consistently-signed
+number can still be scale-dependent** — [P01](#p01)'s sign-consistency evidence
+does not bear on this, and neither refutes the other.
+
+**(b) The vessel is ~5× larger than the shipped setting implies.** Two
+measurements, neither using the mesh or its curvature:
+
+| measurement | result |
+|---|---|
+| wall z extent in a 5 µm slab ⟂ to the local xy tangent | **~86 µm**, and it **saturates** — 87.1 / 87.4 / 86.8 / 86.4 / 85.8 µm as the in-plane search radius goes 30 / 45 / 60 / 80 / 110 µm |
+| xy inscribed half-width of the solidified footprint at centerline points | median **70.6 µm** (p10 21.4, p90 87.8) |
+
+Read the z figure as the robust one: it involves no `binary_fill_holes`, no mesh,
+and it stops growing with the search window. The xy figure is an upper bound
+because `fill_holes` closes the region enclosed by the Y.
+
+So the vessel radius is of order **40 µm**. The shipped κ2 = −0.0703 (R = 14.2 µm)
+is 3–5× too curved to be its circumferential curvature. Consistent with
+[P03](#p03)'s bimodal surface-area-vs-depth table (large area at 0–20 µm and
+80–105 µm, little between — the top and bottom walls of a vessel that fills the
+stack) and with [P21](#p21)'s finding that the lumen is open at z = 30–80 µm.
+
+**(c) Why there is no good `radius_um` to choose.** Past ~15 µm the estimate
+overshoots the true caliber and keeps falling (R = 103 µm at `radius_um` = 30),
+because at those scales each wall is a broad, gently-curved sheet rather than a
+tube — locally almost flat. So the sweep does not contain a correct answer that a
+better default would find. Below the vessel scale it reports reconstruction
+roughness; above it, sheet flatness. **This cannot be closed by tuning the
+slider.**
+
+**What this does not overturn.** [P01](#p01)'s fix. Every measurement behind it is
+an internal-consistency check independent of caliber (face-set identity, directed
+edge twins 53.7% → 100%, coherence 0.209 → 0.972, ρ(shipped, corrected) = +0.069).
+The pre-fix columns were noise; the post-fix columns are self-consistent. Only the
+claim that they are *validated against the vessel* is withdrawn — see the caveat
+on [P01](#p01)'s acceptance test.
+
+**Where a fix comes from.** Not from `mesh_curvature`, which is doing what it is
+asked. It needs a reconstruction whose surface is smooth at the scale curvature is
+read at — [P21](#p21) + [I03](#i03) — with the roughness–scale relationship above
+usable directly as an objective: a good reconstruction should show a **plateau**
+in implied R across `radius_um`, and the shipped one has none. That is a sharper,
+cheaper test than the topology/coverage scores [I03](#i03) proposes, and it needs
+no ground truth.
+
+**Interim:** do not read `curv_*` as a radius or compare its magnitude across
+images or settings. Its *rank within one mesh at one `radius_um`* is the most that
+is defensible, and even that is a rank of surface roughness of unknown relation to
+the vessel. Any exported `curv_*` should be read together with the `radius_um`
+and `subsample_um` that produced it ([P20](#p20)) — neither is currently recorded
+next to the column.
+
+**Related:** [P01](#p01) (the fix, and its circular acceptance clause),
+[P20](#p20) (`subsample_um` sets the point spacing this is fitted over),
+[P21](#p21), [I03](#i03), [P08](#p08)(e) (the same scale-mismatch failure in the
+other curvature column).
+
+**History**
+- 2026-08-11 — opened. Found while investigating whether `path_curv_xy`'s X-Y
+  projection costs anything ([P08](#p08)(e)); the caliber measurements taken to
+  check a suspect cross-section are what exposed [P01](#p01)'s circular radius
+  target, and the `radius_um` sweep followed from that.
 
 ---
 
@@ -1494,6 +1743,16 @@ columns sit at |ρ| ≤ 0.04 — exactly what [P01](#p01) predicts. Stratifying 
 does not resolve this; it amplifies it (far wall: `dist_branch_um` +0.432,
 `centroid_z_um` −0.330, `path_curv_xy` +0.292 — everything correlating with
 everything, the signature of one underlying gradient).
+
+> **2026-08-11 — there is currently no trustworthy geometry variable in this
+> table.** `path_curv_xy`, the strongest apparent correlate at +0.191, is fitted
+> over a 20 µm window on a vessel ~140 µm wide, so it largely measures
+> medial-axis wobble ([P08](#p08)(e)); the four `curv_*` columns have no
+> scale-independent value ([P24](#p24)). Both are now known to be set by their
+> own fit scale rather than by the vessel. Until [P21](#p21)/[I03](#i03) lands,
+> **the geometry side of "tension vs geometry" has no defensible independent
+> variable**, and the correlations above should be read as a description of one
+> spatial gradient, not as candidate results.
 
 ## Use a spatial null, not a permutation null
 

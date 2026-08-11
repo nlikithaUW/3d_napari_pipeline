@@ -57,7 +57,8 @@ substantial known problems — see [P02](docs/ISSUES.md#p02).
 For each image it can:
 
 - **Segment nuclei** (DAPI) with Otsu + connected components, splitting touching
-  nuclei by watershed.
+  nuclei by watershed and classifying each as VnTs+ (fibroblast) or not. Note
+  that classification is an **open problem** ([P05](docs/ISSUES.md#p05)).
 - **Segment the VE-cadherin** junctional network and build a 3D **vessel mesh**
   (alpha shape or marching cubes) from it.
 - **Measure vessel curvature** two ways: local *surface* curvature (quadric fit on
@@ -70,8 +71,9 @@ For each image it can:
   in `params.json`*.
 - **Quantify each adhesion** — the mClover/mRuby ratio, FRET force if configured,
   volume, axis lengths, centroid, distance to the vessel wall, distance to the
-  nearest nucleus, and local vessel curvature — exported to a timestamped CSV
-  with a companion settings JSON.
+  nearest nucleus and whether that nucleus was classified as a fibroblast, and
+  local vessel curvature — exported to a timestamped CSV with a companion
+  settings JSON.
 
 ## Installation
 
@@ -276,8 +278,14 @@ bad file cannot stall the batch.
 > **The batch stops before Measure and writes no CSV.** Its step list
 > (`batch.py::_RUN_STEPS`) deliberately omits the Measure + export step, which
 > crashes headless on a GL/Qt draw. It produces every *intermediate* in each
-> `<stem>_saved/` folder (proba, instances, mesh, curvature, DAPI labels, cadherin
-> mask, fibroblast count).
+> `<stem>_saved/` folder (proba, instances, mesh, curvature, DAPI labels, split
+> nuclei, cadherin mask, fibroblast count).
+
+> **It also runs all steps or none** — there is no `--steps` flag, and only
+> instances and measurement can be redone headlessly afterwards
+> ([I04](docs/ISSUES.md#i04)). Use `--skip-existing` if the folder already holds
+> results you want to keep: without it, images that have already been processed
+> are processed again and their `_saved` folder overwritten.
 
 To get CSVs, either:
 
@@ -289,9 +297,34 @@ python -m pipeline.batch_measure --dir "3d_images_folder/images/WT"
 or, per image in the GUI: **Load** → **Load all saved features** → **Measure** →
 **Export measures (CSV)**.
 
-Note that `batch_measure` recomputes adhesion instances from the saved probability
-map at standard settings and **rewrites `adhesion_instances.npz`** as a side
-effect ([P12](docs/ISSUES.md#p12)).
+Before spending the compute, check what a folder would actually produce:
+
+```bash
+python -m pipeline.batch_measure --dir "3d_images_folder/images/WT" --check-only
+```
+
+This lists every `_saved` folder's contents and reports which columns would come
+out blank and why — a stale curvature file, a missing centerline, no
+`nuclei_split.npz`. It takes about a second per folder and measures nothing.
+
+`batch_measure` recomputes adhesion instances from the saved probability map at
+standard settings. It **no longer rewrites `adhesion_instances.npz`** unless you
+pass `--rewrite-instances`; without the flag a difference between the recomputed
+and saved labelling is reported and the file left alone
+([P12](docs/ISSUES.md#p12)).
+
+| Flag | Effect |
+|---|---|
+| `--check-only` | Describe every `_saved` folder and exit; measure nothing |
+| `--rewrite-instances` | Write the recomputed standard instances back to disk |
+| `--redo-json` | Also measure folders that already have a settings JSON |
+| `--only SUBSTR` | Restrict to `_saved` folders matching a substring |
+| `--strict` | Exit 2 if any CSV was written with a silently blank column |
+
+Exit codes: `0` all measured, `1` at least one image failed, `2` (with
+`--strict`) something was degraded. Both batch runners print a per-image summary
+and set an exit code, so an unattended run can be checked without reading the
+log.
 
 ## Output columns
 
@@ -315,8 +348,12 @@ One row per adhesion, in each `<stem>_saved/<stem>_adhesion_measures_<ts>.csv`.
 | `volume_um3` | Adhesion volume (µm³) |
 | `axis_major_um`, `axis_minor_um` | Fitted ellipsoid axis lengths (µm) |
 | `eccentricity` | `axis_major_um / axis_minor_um` |
-| `nuc_id` | Label of the nearest nucleus (crude cell assignment) |
+| `nuc_id` | Label of the nearest nucleus (crude cell assignment). **Indexes `nuclei_split.npz`; not comparable with CSVs exported before 2026-08-11** ([P04](docs/ISSUES.md#p04)) |
+| `nuc_is_fibroblast` | `1` if that nucleus was classified VnTs+ (fibroblast), `0` if not, blank if unknown. The classifier is **unvalidated** ([P05](docs/ISSUES.md#p05)) |
 | `n_fibroblasts`, `n_nuclei_total` | Image-level counts, repeated on every row |
+
+Each CSV has a companion `..._settings.json` recording the parameters used, and a
+`nucleus_map` key saying which nucleus segmentation `nuc_id` refers to.
 
 ## What not to trust yet
 
@@ -324,11 +361,13 @@ Summary only. **[`docs/ISSUES.md`](docs/ISSUES.md) is the authoritative list**,
 with measurements, mechanisms, and what fixing each involves.
 [`docs/audit.md`](docs/audit.md) is the frozen evidence behind them.
 
-**These describe the CSVs as exported.** Two of the defects below are now fixed
-in the code, and one image has been re-exported against the fixes
-(`V3_..._04step_002`, `..._adhesion_measures_20260811_105032.csv`). **Every other
-CSV predates the fixes.** Those rows say which is which; a fix in the code does
-not retroactively fix a file already on disk.
+**These describe the CSVs as exported.** Several of the defects below are now
+fixed in the code, and one image has been re-exported against the curvature and
+border-seed fixes (`V3_..._04step_002`,
+`..._adhesion_measures_20260811_105032.csv`). **Every CSV on disk predates the
+2026-08-11 nucleus fixes**, including that one. Those rows say which is which; a
+fix in the code does not retroactively fix a file already on disk. Re-export an
+image to pick a fix up.
 
 | Column(s) | Problem | ID |
 |---|---|---|
@@ -336,8 +375,9 @@ not retroactively fix a file already on disk.
 | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **The value depends on the scale you fit it at, with no plateau.** Sweeping the curvature fit radius on the shipped mesh moves the implied vessel radius 14.2 → 134.7 µm as `radius_um` goes 5 → 40, tracking the fit window at ~3×. A real tube gives the same κ at any window well below its radius. Independently, the vessel measures ~86 µm deep and ~140 µm wide, so its radius is of order 40 µm and the shipped κ2 (R = 14.2 µm) is 3–5× too curved to be its circumferential curvature. These columns currently describe the reconstruction's roughness at the chosen scale, not the vessel. Not fixable by tuning the slider | [P24](docs/ISSUES.md#p24) |
 | `ratio_clover_ruby` | Driven by the ruby channel's noise floor, not by tension — ρ(ratio, ruby) = −0.773 vs ρ(ratio, clover) = +0.068. Spread exceeds what the sensor can physically produce. Treat as a rank at best | [P02](docs/ISSUES.md#p02) |
 | *every column* | Adhesion detection is depth-truncated: the far vessel wall yields 37% of the near wall's detection density per unit surface area | [P03](docs/ISSUES.md#p03) |
-| `nuc_id`, `n_fibroblasts`, `n_nuclei_total` | Two different nucleus segmentations; `nuc_id` cannot be joined to the fibroblast classification | [P04](docs/ISSUES.md#p04) |
-| `n_fibroblasts` | The fibroblast/endothelial classifier is unvalidated; the reported fraction swings ~2× across one slider step | [P05](docs/ISSUES.md#p05) |
+| `nuc_id`, `dist_nuc_um` | **Two different nucleus segmentations, so `nuc_id` means different things before and after 2026-08-11.** Older CSVs' `nuc_id` indexes *unsplit DAPI connected components* — 362 of them, median 81.7 µm³, i.e. mostly sub-nuclear debris — and could not be joined to the fibroblast count at all. **Fixed 2026-08-11**: it now indexes the 276 watershed-split nuclei and carries `nuc_is_fibroblast`. `dist_nuc_um` rose (median 4.24 → 4.88 µm) because the debris is gone. **Do not pool or diff `nuc_id` across that boundary**; the `nucleus_map` key in each settings JSON says which map a CSV used | [P04](docs/ISSUES.md#p04) |
+| `n_fibroblasts`, `nuc_is_fibroblast` | The fibroblast/endothelial classifier is unvalidated; the reported fraction swings ~2× across one slider step. Since 2026-08-11 that call is attached to **every row**, not just two image-level scalars — it is now joinable, which is not the same as correct | [P05](docs/ISSUES.md#p05) |
+| `n_fibroblasts`, `n_nuclei_total` | **Only in CSVs exported before 2026-08-11.** The count was never cleared between images, so an image whose nuclei step failed silently inherited the previous image's counts. Only single-image runs are safe from this; a batch run is not. **Fixed 2026-08-11** | [P25](docs/ISSUES.md#p25) |
 | `ratio_clover_ruby` | Drifts with imaging depth (ρ = −0.187); on this geometry depth is confounded with position along the vessel | [P06](docs/ISSUES.md#p06) |
 | `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries | `peak_local_max` discarded watershed seeds near the volume edge, so nuclei touching the stack boundary were dropped and elongated adhesions failed to split. **Fixed 2026-08-10**; on the re-exported image the counts move 273 → 276 nuclei and 2,092 → 2,147 adhesions (`n_fibroblasts` happened not to change — all three recovered nuclei were non-fibroblast, which is one image, not a general result). Re-export any other image to pick this up | [P07](docs/ISSUES.md#p07) |
 | `path_curv_xy` | **Fitted over a 20 µm window on a vessel ~140 µm wide**, so it largely measures wobble in the extracted centerline rather than bending of the vessel — the skeleton is only ~4.5 vessel-widths long in a field ~2.4 widths across. On top of that: contaminated within `smooth_um` of a branch (filter on `dist_branch_um`, but guard for NaN or non-branched images lose every row); ~10× inflated within 5 µm of the xy field boundary, where 42% of the highest-κ points sit; and unsigned, so inside and outside of a bend are indistinguishable | [P08](docs/ISSUES.md#p08) |

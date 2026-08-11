@@ -65,7 +65,7 @@ true of the code and data on that date and may not be true now.
 | [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | **fixed** |
 | [P02](#p02) | `ratio_clover_ruby` tracks the ruby noise floor, not tension | S1 | open |
 | [P03](#p03) | Adhesion detection is depth-truncated | S1 | open |
-| [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | open |
+| [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | **fixed** |
 | [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open |
 | [P06](#p06) | Tension readout drifts with imaging depth | S2 | open |
 | [P07](#p07) | `peak_local_max` drops border seeds, in two places | S2 | **fixed** |
@@ -73,7 +73,7 @@ true of the code and data on that date and may not be true now.
 | [P09](#p09) | `dist_mesh_um` measures to rejected geometry; no gate on curvature | S2 | open |
 | [P10](#p10) | `force_total_pN` is not a force | S2 | open |
 | [P11](#p11) | `measure_core` duplicates the Measure worker and has diverged | S3 | open |
-| [P12](#p12) | Headless measure fails silently and overwrites saved instances | S3 | open |
+| [P12](#p12) | Headless measure fails silently and overwrites saved instances | S3 | **fixed** |
 | [P13](#p13) | Tunable parameters that are not sliders | S3 | open |
 | [P14](#p14) | `cadherin_junction_proba` has no consumer | S3 | open |
 | [P15](#p15) | Minor defects (five items) | S3 | open |
@@ -86,9 +86,11 @@ true of the code and data on that date and may not be true now.
 | [P22](#p22) | Centerline overlay is drawn at a single wrong z | S3 | **fixed** |
 | [P23](#p23) | Centerline preprocessing amputates tapering vessels | S2 | open |
 | [P24](#p24) | `curv_*` has no scale-independent value — `radius_um` sets the answer | S1 | open |
+| [P25](#p25) | `fibroblast_count` never cleared — a failed image inherits the previous one's counts | S1 | **fixed** |
 | [I01](#i01) | Progress / completion bars for long-running operations | idea | open |
 | [I02](#i02) | Fibroblast / endothelial scatter diagnostic | idea | open |
 | [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open |
+| [I04](#i04) | `batch.py` has no way to re-run one step | idea | open |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 
 **Suggested order of work** (dependency-ordered, not severity-ordered). The
@@ -125,6 +127,35 @@ five un-batched images ([P03](#p03), [P06](#p06), [P19](#p19), [P23](#p23) all
 need them) running unattended alongside. [P04](#p04) stays first: it is small,
 it is the only route to a cell-level unit of analysis, and it is independent of
 everything the geometry work will change.
+
+**Update, 2026-08-11 — P04 and P12 are fixed; the five-image batch is now the
+critical path.** Both were done *before* the batch deliberately: `batch.py` has no
+`--steps` flag and only instances and measurement can be redone headlessly
+(`batch_measure`, `batch_postprocess`), so anything that changes a **saved
+artifact** had to land first. [P04](#p04) adds one (`nuclei_split.npz`);
+[P12](#p12) makes an unattended run report what it degraded instead of writing a
+plausible-looking CSV in silence; [P25](#p25) — found while tracing P04 — stops
+one image's nucleus counts being written into another's file.
+
+The queue is now **the 5-image batch → P03 → P21/I03 (+ P24) → P02 →
+P08/P09/P10**. Producing those five `_saved` folders is the single thing blocking
+[P03](#p03), [P06](#p06), [P19](#p19), [P21](#p21), [P23](#p23) and the whole
+six-image design in [Analysis notes](#analysis-notes).
+
+> **Two operational cautions for that run.**
+>
+> 1. **Use `--skip-existing`.** The WT folder holds six tifs and one `_saved`.
+>    Without the flag the batch reprocesses `V3_..._04step_002` and overwrites
+>    the only post-[P01](#p01) reference folder and its CSV — the baseline every
+>    before/after in this file is measured against.
+> 2. **That leaves image 6 without `nuclei_split.npz`.** Regenerate it afterwards
+>    in the GUI (Load → Load all saved → Count fibroblasts → Save), which is
+>    cheap and skips the RF predict. Until then that image measures through the
+>    documented unsplit fallback and says so.
+>
+> Run `python -m pipeline.batch_measure --dir <dir> --check-only` after the batch
+> and before measuring: it reports which columns would come out blank in about a
+> second per folder.
 
 ---
 
@@ -470,13 +501,13 @@ analysis. If it holds, correcting the intensities will not be enough on its own.
 
 | | |
 |---|---|
-| **Status** | open |
+| **Status** | fixed |
 | **Severity** | S1 |
 | **Opened** | 2026-08-10 (audit F4) |
-| **Last verified** | 2026-08-10 |
-| **Resolved** | — |
+| **Last verified** | 2026-08-11 |
+| **Resolved** | 2026-08-11 (commit `04262b8`) |
 | **Where** | `pipeline/gui/nuclei.py:211` vs `pipeline/gui/measure.py:57` |
-| **Affects** | `nuc_id`, `dist_nuc_um`, `n_fibroblasts`, `n_nuclei_total` |
+| **Affects** | `nuc_id`, `dist_nuc_um`, `n_fibroblasts`, `n_nuclei_total`, and the new `nuc_is_fibroblast` |
 | **Evidence** | `docs/audit.md` §3 F4 |
 
 The Nuclei tab builds two separate segmentations and only one reaches each
@@ -506,8 +537,93 @@ Two consequences:
   identity; until this is fixed you are limited to `(1|image)` with n = 6. See
   [Analysis notes](#analysis-notes).
 
-**The fix:** write the split labels back to `dapi_state`, or have Measure use the
-split map. Either way, one nucleus definition, size-filtered once.
+**The fix (as originally stated — incomplete, see below):** write the split
+labels back to `dapi_state`, or have Measure use the split map. Either way, one
+nucleus definition, size-filtered once.
+
+> **Correction, 2026-08-11 (the original left in place above).** Neither of those
+> delivers the join this entry was opened for. `is_fib` — the per-nucleus
+> fibroblast classification — is computed at `gui/nuclei.py:243-246` and then
+> **thrown away** at `:249-271`: only four scalars (`total`, `fibroblast`,
+> `other`, `threshold`) survive into `state`, and the class map is rendered
+> straight into a napari layer. Unifying the label maps would make `nuc_id` point
+> at nuclei, which is necessary, but there would still be nothing to join it
+> *to*. The split labels, `ids` **and** `is_fib` all have to be co-persisted.
+
+**The fix as implemented, 2026-08-11.** A new per-image artifact,
+`nuclei_split.npz`, holding `labels`, `sizes`, `ids`, `is_fib`, `min_size_vox`
+and `threshold` — and a new CSV column `nuc_is_fibroblast` (1.0 VnTs+, 0.0 other,
+blank unknown).
+
+**Why a second artifact rather than replacing `dapi_state["labels"]`.** These are
+two genuinely different objects, and naming them separately is the fix rather
+than a compromise:
+
+| | `dapi_labels.npz` — **DAPI components** | `nuclei_split.npz` — **nuclei** |
+|---|---|---|
+| what it is | Otsu connected components, ≥10 vox | watershed-split, size-filtered |
+| count here | 362 | 276 |
+| consumers | `min_size` slider, size histogram, displayed mask, the watershed's own input, the RF DAPI gate | `nuc_id`, `dist_nuc_um`, `nuc_is_fibroblast` |
+
+Replacing in place would have made Count non-re-entrant (`_count` reads
+`dapi_state` to build its own watershed input), silently changed what the
+`min_size` slider and histogram refer to, and — decisively — left a failed count
+indistinguishable on disk from a successful one. No step reordering was needed:
+`run_fibroblasts` already runs immediately after `run_dapi`.
+
+`labels` and `is_fib` are written to **one file** deliberately: that is what makes
+them impossible to stale relative to each other, which is the exact failure class
+[P12](#p12) is about.
+
+**Verified not to touch adhesion segmentation.** The concern with changing the
+nucleus map is that it feeds the DAPI gate. It does not, headlessly: there is no
+`run_cell_mesh` step, and `gate_by_dapi` / `gate_by_mesh` both default `False`
+(`gui/adhesion_rf.py:363,368`), so the DAPI cell mesh is never built in the batch
+and no nucleus-map change can reach the adhesion instances.
+
+> ### `nuc_id` is not comparable across this fix
+>
+> Old CSVs' `nuc_id` values run to **355** and index the **362**-component
+> unsplit map. New ones run to ~**276** and index nuclei. **The same integer
+> means a different object.** Do not join, pool or diff `nuc_id` across the
+> boundary; the `nucleus_map` key in each export's settings JSON records which
+> map that CSV used. `dist_nuc_um` shifts too, and should — it is no longer
+> measuring the distance to the nearest speck of sub-nuclear debris.
+
+**History**
+- 2026-08-10 — opened from `audit.md` F4.
+- 2026-08-11 — **fixed.** Measured on `V3_..._04step_002`, comparing a
+  re-measure of the same `_saved` folder with and without `nuclei_split.npz`
+  (2,147 adhesions both times, every other column byte-identical):
+
+  | | unsplit map (before) | split map (after) |
+  |---|---|---|
+  | `nuc_id` max | 355 | **275** |
+  | distinct `nuc_id` | 176 | **170** |
+  | `dist_nuc_um` median | 4.24 µm | **4.88 µm** (mean 5.26 → 6.20) |
+  | rows where `dist_nuc_um` moved | — | 310 / 2,147 |
+  | `nuc_is_fibroblast` | absent | **2,147 / 2,147 populated** |
+
+  The join reconciles against the count: 424 adhesions sit on a VnTs+ nucleus
+  and 1,723 on an "other" nucleus; those 424 belong to **25 distinct fibroblast
+  nuclei out of the 27** in `fibroblast_count.npz` (the other two carry no
+  detected adhesion), and 170 of 276 nuclei carry at least one adhesion.
+
+  `dist_nuc_um` rising is the expected direction and is the clearest single
+  confirmation that the entry's "half of what `dist_nuc_um` measures to is
+  sub-nuclear debris" reading was right — with the debris gone, the nearest
+  *nucleus* is further away.
+
+  **Backward compatibility measured, not assumed.** A `_saved` folder with no
+  `nuclei_split.npz` falls back to the unsplit map, and that path re-exported
+  `V3_..._04step_002` byte-identically across all 24 pre-existing columns, added
+  `nuc_is_fibroblast` blank, and said so with an explicit `WARN`. The fallback is
+  loud precisely because it is the old, wrong-unit behaviour.
+
+  Not addressed here, and unchanged: the classifier producing `is_fib` is still
+  unvalidated ([P05](#p05)). **This makes the classification joinable, not
+  correct** — `nuc_is_fibroblast` inherits every problem in P05, including the
+  ~2× swing across one slider step.
 
 ---
 
@@ -547,15 +663,25 @@ has several compounding issues:
 design has no validation signal at all, so there is no way to tell a fix from a
 regression.
 
-**Related:** [P04](#p04) (the count is not joinable to `nuc_id`), [P07](#p07)
-(border nuclei lose their seed), [P13](#p13) (the cadherin exclusion multiplier
-is hard-coded), [P16](#p16) (a claim from this entry that was retired).
+**Related:** [P04](#p04) (the count is now joinable to `nuc_id` — but see the
+History note below), [P07](#p07) (border nuclei lose their seed), [P13](#p13)
+(the cadherin exclusion multiplier is hard-coded), [P16](#p16) (a claim from this
+entry that was retired).
 
 **History**
 - 2026-08-06 — recorded in `TODO.md`.
 - 2026-08-10 — the "over-splitting inflates `n_nuclei_total`" bullet split out
   and closed as [P16](#p16) (invalid); the shell-shape and border-seed mechanisms
   added from the audit.
+- 2026-08-11 — **this entry got wider, not narrower, when [P04](#p04) was
+  fixed.** The classification now reaches the CSV per adhesion as
+  `nuc_is_fibroblast`, so an unvalidated call that previously affected only two
+  image-level scalars now labels every row. **P04 made the classification
+  joinable; it did nothing to make it correct.** Everything above still holds —
+  the perinuclear shell reads both cell types where they look most alike, and
+  the reported fraction still swings ~2× across one slider step. Do not stratify
+  an analysis on `nuc_is_fibroblast` until [I02](#i02) gives it a validation
+  signal.
 
 ---
 
@@ -699,6 +825,13 @@ crop padding above `min_distance`.
   `fibroblast_count`, `:248`), so the seeds that (a) restores never reach them.
   P07(a) affects `n_nuclei_total` and `n_fibroblasts` only; the `nuc_id` half of
   the original claim belongs to [P04](#p04).
+- 2026-08-11 — **that correction expires with [P04](#p04).** The watershed result
+  *is* now written to `state` and saved as `nuclei_split.npz`, and Measure reads
+  it. So from this commit (`04262b8`) onward P07(a) **does** reach `nuc_id` and
+  `dist_nuc_um`, and the original "Affects" list is right again for any CSV
+  exported after it. The correction remains accurate for every CSV exported
+  before it. This is the reason `nuc_id` is not comparable across the P04
+  boundary — see the box in [P04](#p04).
 
 ---
 
@@ -956,6 +1089,22 @@ active. Both docstrings now say so, which is a patch on the symptom.
 **Fixing it** means extracting one implementation both call — a restructure that
 should not share a commit with behaviour changes. **Deliberately deferred.**
 
+**History**
+- 2026-08-06 — opened.
+- 2026-08-11 — **the duplication got measurably worse, and the cost is now
+  quantified.** [P04](#p04) and [P12](#p12) each had to be written twice: the
+  nucleus-map selection, the `nuc_is_fibroblast` join, and the notes plumbing all
+  exist once in `measure_core.py` and again in `gui/measure.py::_run`. That is
+  three more paired edits on top of the ROI divergence and the sum-then-divide
+  ratio fix already on the record.
+
+  Partially mitigated rather than fixed: the *checks* were extracted into
+  `pipeline/saved_check.py`, which both workers call, so the class of divergence
+  P12 was about ("the GUI warns, the batch does not") cannot recur silently. The
+  *measurement* is still duplicated. Extracting it remains deferred, and the
+  argument for doing it is now stronger than it was — each fix to this pipeline
+  costs two edits and risks a third divergence.
+
 ---
 
 <a id="p12"></a>
@@ -963,25 +1112,99 @@ should not share a commit with behaviour changes. **Deliberately deferred.**
 
 | | |
 |---|---|
-| **Status** | open |
+| **Status** | fixed |
 | **Severity** | S3 |
 | **Opened** | 2026-08-10 (audit F9) |
-| **Last verified** | 2026-08-10 |
-| **Resolved** | — |
-| **Where** | `pipeline/batch_measure.py:143`, `:123` |
+| **Last verified** | 2026-08-11 |
+| **Resolved** | 2026-08-11 (commit `04262b8`) |
+| **Where** | `pipeline/batch_measure.py:143`, `:123`; `pipeline/gui/vessel_mesh.py:547` |
 
 Two asymmetries between the GUI and headless paths:
 
-- `gui/vessel_mesh.py:501` prints an explicit warning when a loaded curvature
+- `gui/vessel_mesh.py:547` prints an explicit warning when a loaded curvature
   file's length does not match the mesh, because Measure will silently NaN every
   curvature column. `batch_measure.py` loads the same two files with **no such
   check**, so a stale pairing produces a CSV with four blank columns and no
   message.
+
+  > **Reference correction, 2026-08-11.** This entry cited `gui/vessel_mesh.py:501`
+  > for that warning. The line number was already stale when the entry was
+  > written; the check is at `:547-552`.
+
 - `_standard_instances` **overwrites `adhesion_instances.npz`** as a side effect
   of measuring. It is documented in the docstring and the reasoning is sound
-  (many folders hold a stale, non-standard labelling), but a command named
+  (a folder may hold a stale, non-standard labelling), but a command named
   "measure" silently rewriting a saved segmentation deserves a flag rather than
   being the default.
+
+**The underlying problem is structural, not two missing checks.** The GUI had
+grown nine of these checks inline and the headless path had none, because each
+was written at the point of use. Adding them inline a second time would have
+recreated the same divergence one release later — the same mechanism that
+produced [P11](#p11).
+
+**The fix, 2026-08-11 — one module both paths call.** New `pipeline/saved_check.py`:
+pure functions (numpy in, `list[str]` out; no Qt, no napari, no `state`, no
+printing) that answer "which columns come out blank, and why?". `measure_core`
+accumulates them into `result["notes"]` and **still prints nothing** — it does not
+know its caller's indent and is the one module a non-CLI caller could reuse — and
+each caller prints at its own indent. `gui/vessel_mesh.py` now calls
+`curvature_notes` instead of its inline warning, so both paths emit *the same
+string*, verified character-for-character.
+
+Notes were added for every degradation that was previously silent:
+
+| column(s) | silent cause now reported |
+|---|---|
+| `curv_*` (all four) | no curvature file / length mismatch / all-NaN `k1` |
+| `curv_<one>` | the per-key branch, which can blank one column while the others survive |
+| `path_curv_xy`, `dist_branch_um` | no centerline |
+| `dist_branch_um` | centerline with no branch nodes (+ the [P08](#p08)(d) NaN-filter trap) |
+| `ratio_clover_ruby` | **native clover/ruby vs labels shape mismatch** — the project's primary output, previously blanked with no message at all |
+| `ratio_clover_ruby` (per row) | the [P15](#p15) `r_sum = 0` dropout, now reported as a count, so a depth-dependent effect is visible |
+| `force_*_pN` | no force volume (previously the *only* announced one; moving it here makes the set uniform) |
+| `nuc_is_fibroblast` | no/inconsistent `nuclei_split.npz` ([P04](#p04)) |
+
+Also in this fix:
+
+- **The instances rewrite is now opt-in** (`--rewrite-instances`).
+  Recompute-from-proba stays the default for correctness on legacy folders, but
+  without the flag the recomputed labels are *compared* against the file and a
+  difference is reported, not applied. Verified to be a **no-op for
+  freshly-batched images**: `run_rf_postprocess` forces `split_merged=True`
+  (`gui/adhesion_rf.py:550`) and the widget defaults (0.5 / 100 / 1000) are
+  byte-identical to `STD_POSTPROCESS`, so the previous behaviour was rewriting a
+  file it had just correctly written. Measured on `V3_..._04step_002`: 2,147
+  adhesions recomputed, 2,147 on disk, npz left untouched.
+- **`--check-only`**, the pre-flight for an unattended run: `describe_saved` over
+  every `*_saved` folder, printing what is present and which columns would come
+  out blank — **before** the compute rather than after. Cheap by construction
+  (an npz is a zip, so only small members are ever decompressed; array shapes are
+  read from `.npy` headers without inflating the payload). Measured at **1.0 s**
+  over a folder containing a 340 MB probability map.
+- **Explicit messages on the two previously silent skips** (no instances;
+  already measured).
+- **Exit codes.** `batch_measure` returns 1 if any image FAILED and, with
+  `--strict`, 2 if any CSV was written with a silently blank column. A
+  degradation warns but does not fail by default — a legitimately FRET-less
+  dataset (this one) must not fail the run. `batch.py` tracks per-image outcome
+  in `_advance` (already the single idempotent funnel), prints
+  `N processed, N skipped` with reasons, and exits non-zero if any image was
+  skipped.
+- **`fibroblast_count.npz` can no longer be a foot-gun.** `int(fc[k])` raised
+  `TypeError` on any non-scalar member, turning a slightly-different file into a
+  hard failure of the whole image. Non-scalar members are now reported and
+  skipped.
+
+**History**
+- 2026-08-10 — opened from `audit.md` F9.
+- 2026-08-11 — **fixed.** Verified end to end on a copy of
+  `V3_..._04step_002_saved` with `vessel_curvature.npz` truncated to 500 of 8,966
+  values: `--check-only` reports it in 1.0 s without measuring; the GUI's
+  `Load curvature` and the headless measure emit **the identical string**; the
+  run reports `1 degraded`; `--strict` exits 2 while the plain run exits 0.
+  Scope note: the uppercase `WARN:` / `FAILED:` convention was applied only in
+  the files this change touches, not swept across the repository.
 
 ---
 
@@ -1054,6 +1277,13 @@ Grouped because each is small and none affects the headline numbers.
       entirely between sampled planes, giving `r_sum = 0` → NaN ratio. Correctly
       NaN'd rather than wrong, but it is a size-dependent (therefore
       depth-dependent) dropout that compounds [P03](#p03).
+      **Now instrumented and measured (2026-08-11):** [P12](#p12) reports the
+      dropout as a count, and on `V3_..._04step_002` it is **0 of 2,147
+      adhesions** — the mechanism is real but is not biting on this image at the
+      standard post-process (`min_size_vox = 100`, so surviving adhesions are
+      large enough to intersect a sampled plane). Worth re-reading on the five
+      un-batched images, and on `09step`, whose 0.9 µm z-spacing is ~2× coarser
+      and is exactly the condition that would trigger it.
 - [ ] `vessel_mesh.py:172` — `alpha_fill_slice` rasterises kept triangles in a
       Python loop over `skimage.draw.polygon`. Slow for alpha-2D on a large mask.
 - [ ] `vessel_mesh.py:233` — `close_volume` uses a cubic structuring element, so
@@ -1482,6 +1712,66 @@ other curvature column).
 
 ---
 
+<a id="p25"></a>
+## P25 — `fibroblast_count` is never cleared, so a failed image inherits the previous image's counts
+
+| | |
+|---|---|
+| **Status** | fixed |
+| **Severity** | S1 |
+| **Opened** | 2026-08-11 |
+| **Last verified** | 2026-08-11 |
+| **Resolved** | 2026-08-11 (commit `da9f15e`) |
+| **Where** | `pipeline/gui/loader.py:162-176`, `pipeline/batch.py:207-211` |
+| **Affects** | `n_fibroblasts`, `n_nuclei_total`, and the saved `fibroblast_count.npz` |
+
+Found while tracing [P04](#p04), not by an audit.
+
+The per-image reset in `loader.py` clears `dapi_state`, `cadh_state`,
+`clover_state`, `vessel_mesh_cache`, `nuc_cache`, `adhesion_proba` and
+`clover_ruby_ratio` — **but not `state["fibroblast_count"]`**, which lives at the
+top level of `state` rather than inside one of those dicts.
+`batch.py::_free_image_memory` did not clear it either.
+
+The leak has a path to disk. `state["run_fibroblasts"]` chains `_save_fib`
+through `call_all`, which fires **even when `_count` bails out early** — and
+`_count` bails whenever there is no clover channel (`gui/nuclei.py:175-177`) or
+no DAPI labels (`:179-182`), the latter being exactly what happens when
+`run_dapi` fails. `batch.py:280-285` catches a failed step and continues to the
+next one. So:
+
+> if `run_dapi` fails on image N, image N−1's counts are written into image N's
+> `fibroblast_count.npz`, and from there into image N's CSV.
+
+Silent cross-image contamination, with nothing in the log to distinguish it from
+a real count — in precisely the unattended five-image run this work was
+preparing for.
+
+**Reproduced** headlessly on 2026-08-11 by driving the real
+`state["run_fibroblasts"]` with a bailing `_count`: with a stale count in state
+the bailed-out step still wrote `27/276` for the next image; with the count
+cleared it wrote nothing and the chain continued normally in both cases.
+
+**The fix** is two lines: `state["fibroblast_count"] = None` in the loader's
+per-image reset, and `"fibroblast_count"` added to `_free_image_memory`'s key
+list. The loader line fixes the GUI and the batch at once, since the batch drives
+the same loader; the `batch.py` line covers the free-between-images path.
+
+**Why the fix is placed there rather than in `_save_fib`.** Guarding the save
+("don't save if the count is from another image") would need the count to carry
+its image identity, which is a larger change for a narrower fix. Clearing state
+per image is what every other artifact already does — `fibroblast_count` was
+simply missed. This is also why [P04](#p04)'s split nuclei were deliberately put
+*inside* `dapi_state` rather than at the top level: that dict is replaced
+wholesale by all three of `loader.py`, `batch.py` and `view.py`, so it cannot
+develop this failure mode.
+
+**Related:** [P04](#p04) (found while tracing it), [P07](#p07) (the `27/276`
+figures above), [P12](#p12) (the same "unattended run, silent wrong number"
+class).
+
+---
+
 # Closed
 
 <a id="p16"></a>
@@ -1672,6 +1962,38 @@ a commit with [P01](#p01).
 
 ---
 
+<a id="i04"></a>
+## I04 — `batch.py` has no way to re-run one step
+
+**Opened** 2026-08-11 · **Status** open · **Relates to** [P04](#p04), [P12](#p12)
+
+`pipeline.batch` runs `_RUN_STEPS` all or nothing: there is no `--steps` flag.
+Only two things can be redone headlessly afterwards — adhesion instances
+(`batch_postprocess`) and measurement (`batch_measure`). Everything else (DAPI,
+the split nuclei, the cadherin mask, the vessel mesh, both curvatures, the RF
+probability map) can only be regenerated by re-running the whole image, which is
+the expensive part.
+
+**Why it is worth recording rather than just fixing.** It is the reason
+[P04](#p04), [P12](#p12) and [P25](#p25) had to land *before* the five-image
+batch instead of alongside it: a run is effectively one-shot, so any change to a
+**saved artifact** must be in place first or the compute is wasted. That
+sequencing constraint is invisible in the code and cost real ordering work.
+
+A `--steps` flag is not hard — the step list is already a list of
+`(label, state_key)` pairs, and each `run_*` is independently chainable through
+`call_all`. What needs thought is dependencies: `run_fibroblasts` needs
+`run_dapi`'s output in `state`, so re-running one step alone means loading the
+prerequisite artifacts first, which is `load_*`-shaped work rather than a bare
+filter over the list. The GUI's "Load all saved features" already does exactly
+that and could be reused.
+
+**Until then:** `--skip-existing` is the only safety mechanism, and it keys on
+`adhesion_instances.npz` — the *last* artifact written — so it is all-or-nothing
+per image too.
+
+---
+
 # Housekeeping
 
 <a id="h01"></a>
@@ -1720,6 +2042,25 @@ not a result.**
 The cell level is currently unavailable — see [P04](#p04). Until that is fixed you
 have `(1|image)` with n = 6, or a spatial clustering of adhesions as a rough cell
 proxy.
+
+> **2026-08-11 — [P04](#p04) is fixed, so `(1|image/nucleus)` is now available**
+> on any CSV exported after commit `04262b8`: `nuc_id` indexes nuclei rather than
+> DAPI components, and `nuc_is_fibroblast` says which class each belongs to. On
+> `V3_..._04step_002` that is 2,147 adhesions across **170 nuclei**, median ~8
+> adhesions per nucleus.
+>
+> Three cautions before using it as the grouping factor:
+>
+> - **A nucleus is not a cell.** `nuc_id` is still nearest-nucleus assignment,
+>   with no cell segmentation and no maximum distance. It is a better proxy than
+>   before, not a measurement of cell identity.
+> - **Do not stratify on `nuc_is_fibroblast`** — the classifier behind it is
+>   unvalidated and swings ~2× on one slider step ([P05](#p05)). As a grouping
+>   variable it is fine; as a *biological* split it is not yet.
+> - **The independent variable is still the problem.** Adding a cell level
+>   improves the error structure; it does nothing for the fact that neither
+>   curvature column currently measures the vessel ([P24](#p24),
+>   [P08](#p08)(e)).
 
 ## Everything spatial correlates, because it is all one gradient
 

@@ -80,14 +80,27 @@ true of the code and data on that date and may not be true now.
 | [P16](#p16) | Nucleus splitting inflates `n_nuclei_total` | — | **invalid** |
 | [P17](#p17) | `curv_gaussian` is unaffected by the curvature bug | — | **invalid** |
 | [P18](#p18) | FRET constants set but not calibrated | — | **fixed** |
+| [P19](#p19) | `auto_min_size_otsu` is defeated by a hard-coded floor | S3 | open |
+| [P20](#p20) | `subsample_um` silently sets the vessel mesh's resolution | S2 | open |
+| [P21](#p21) | One global alpha cannot be correct on a tapering vessel | S2 | open |
+| [P22](#p22) | Centerline overlay is drawn at a single wrong z | S3 | open |
+| [P23](#p23) | Centerline preprocessing amputates tapering vessels | S2 | open |
 | [I01](#i01) | Progress / completion bars for long-running operations | idea | open |
 | [I02](#i02) | Fibroblast / endothelial scatter diagnostic | idea | open |
+| [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 
 **Suggested order of work** (dependency-ordered, not severity-ordered):
 **P01 → P04 → P07 → P03 → P02 → P08/P09/P10**, then the analysis in
 [Analysis notes](#analysis-notes). P01 first because it is the smallest fix with
 the largest effect and every curvature result depends on it.
+
+The 2026-08-10 vessel-mesh review (P19–P23, [I03](#i03)) does not displace that
+ordering. P22 and the border-flare half of [P08](#p08) are independent of
+everything above and can land at any time. [P21](#p21) and [I03](#i03) are one
+piece of work — reconstruction method plus its calibration — and belong after
+P01, so that corrected curvature can be part of the calibration objective rather
+than something checked afterwards.
 
 ---
 
@@ -511,17 +524,55 @@ column is used as *the* curvature variable.
 
 Also worth knowing: the shipped centerline has median κ = 0.0040 1/µm (radius
 250 µm) on a 332 µm field — **most of the vessel is nearly straight**, with the
-signal concentrated in a few high-κ points near the junction, which are the same
-points contaminated by (a).
+signal concentrated in a few high-κ points. The audit attributed that
+concentration to the junction; see (c), which is the larger contributor.
+
+**(c) Border flare at the vessel exits dominates the κ signal.** The medial axis
+of a shape with a flat cut end forks toward the corners of that cut. The vessel
+exits through the xy walls of the volume, so the max-projected footprint is
+truncated by a straight edge and `skeletonize` produces a fork at each exit.
+`_prune_spurs` does not remove them — those forks run longer than
+`prune_um = 30 µm`.
+
+Measured on `V3_..._04step_002` (643 centerline points, 2 branch nodes):
+
+| centerline points within… | count | median κ there | median κ interior |
+|---|---|---|---|
+| 5 µm of the volume edge | 17 (2.6%) | **0.0388** | 0.0038 |
+| 10 µm | 28 (4.4%) | 0.0218 | 0.0038 |
+| 20 µm | 65 (10.1%) | 0.0087 | 0.0036 |
+
+**10× the interior curvature in the outer 5 µm, and 42% of all top-decile κ
+points lie within 30 µm of an edge.** Both detected branch nodes are well
+interior (51.7 and 143.6 µm from any edge), so this is not junction
+contamination — it is an artefact of where the field of view was cropped.
+`path_curv_xy` is the column with the strongest apparent correlation to the
+tension proxy (ρ = +0.191), so a large share of its dynamic range is a
+consequence of framing.
+
+**The fix:** drop centerline points within `smooth_um` of the xy boundary, or
+discard skeleton branches that touch the border before fitting κ. Costs ~10% of
+centerline points.
+
+**(d) The interim workaround silently empties a non-branched image.** Some
+vessels in this dataset are a single tunnel or a cone rather than a Y. With no
+branch node, `dist_branch_um` is left all-NaN — correctly and without crashing,
+both paths guard with `if len(branch):` (`gui/measure.py:265`,
+`measure_core.py:167`). But `dist_branch_um > 20` is False for NaN, so applying
+the workaround below to such an image **drops every row** rather than none.
 
 **Interim workaround:** filter `dist_branch_um > 20` yourself when analysing the
-CSV.
+CSV — but guard it, e.g. `dist_branch_um.isna() | (dist_branch_um > 20)`, or the
+non-branched images vanish. See (d).
 
 **History**
 - 2026-08-06 — recorded in `TODO.md` as "path curvature is undefined at branch
   nodes but still reported".
 - 2026-08-10 — audit established the contamination radius (20 µm, not
   point-local) and added the unsigned-κ limitation.
+- 2026-08-10 (later) — border flare (c) measured and found to be a larger
+  contributor to the high-κ tail than the junction, revising the audit's reading.
+  The NaN trap (d) added after the user noted that not every vessel is Y-shaped.
 
 ---
 
@@ -552,8 +603,17 @@ adhesions have one of them as their nearest vertex. The numerical effect is smal
 a large error.
 
 **(b) The resolution is coarser than the column suggests.** Surface vertex spacing
-is **2.25 µm** (median nearest-neighbour, at `subsample_um = 1.0`). `dist_mesh_um`
-is a distance to a point cloud with ~2 µm granularity, not to a surface.
+is **2.25 µm** (median nearest-neighbour). `dist_mesh_um` is a distance to a
+point cloud with ~2 µm granularity, not to a surface.
+
+> **Correction to `audit.md` F7.** The audit attributes that spacing to
+> `subsample_um = 1.0`. The shipped settings JSON records **`subsample_um = 5.0`**
+> (`..._settings.json` → `settings.vessel_mesh`), and rebuilding the point cloud
+> at 5.0 reproduces the shipped mesh's vertex count exactly (8,966). The measured
+> 2.25 µm spacing stands; the parameter attributed to it does not. `audit.md` is
+> frozen and is not edited — see [P20](#p20) for what `subsample_um` actually
+> controls, and re-read this entry's threshold discussion against a 5 µm grid
+> rather than a 1 µm one.
 
 **(c) No distance gate on curvature.** Every adhesion is assigned the curvature of
 its nearest surface vertex with no maximum distance, so `curv_*` is populated for
@@ -574,6 +634,9 @@ voxel). **Needs a number from the user.**
   limit", with an example of an adhesion 30 µm from the wall.
 - 2026-08-10 — measured: that case is 2 rows, not the bulk of the table. The
   rejected-geometry and vertex-spacing problems added.
+- 2026-08-10 (later) — `audit.md` F7's `subsample_um = 1.0` attribution corrected
+  to 5.0 from the shipped settings JSON; the (c) threshold must be read against
+  that. Cross-linked to [P20](#p20).
 
 ---
 
@@ -732,6 +795,250 @@ Grouped because each is small and none affects the headline numbers.
 
 ---
 
+<a id="p19"></a>
+## P19 — `auto_min_size_otsu` is defeated by a hard-coded floor
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S3 |
+| **Opened** | 2026-08-10 |
+| **Last verified** | 2026-08-10 |
+| **Resolved** | — |
+| **Where** | `pipeline/denoise.py:61`, `pipeline/gui/cadherin.py:42,171,191` |
+| **Affects** | the cadherin mask, and therefore every vessel-geometry column |
+
+The Cadherin tab does auto-select the despeckle size cut — `auto_min_size_otsu(sizes)`
+— but the returned value is then overridden by a module constant:
+
+```python
+MIN_SIZE_FLOOR = 12                                    # gui/cadherin.py:42
+filter_controls.min_size.value = max(suggested, MIN_SIZE_FLOOR)   # :191
+```
+
+Measured on `V3_..._04step_002`, `auto_min_size_otsu` returns **3**, so the value
+actually in use is always the constant. The comment at `gui/cadherin.py:38-42`
+states the auto value is "~5"; it is 3.
+
+So the operative parameter is a hand-tuned constant, and one that is **worse
+placed than a slider**: it is invisible in the GUI and it is not written to
+`run_settings`, so the exported settings JSON records the threshold parameters
+but not the size cut that shaped the mask.
+
+**Why Otsu fails here.** It splits `log10(sizes)` into two variance-minimising
+classes. The size distribution is not two lumps in log space — it is a noise
+power-law plus a broad real distribution:
+
+| min component size | components kept | % of components | % of voxels |
+|---|---|---|---|
+| ≥1 vox | 226,093 | 100% | 100% |
+| ≥5 vox (0.17 µm³) | 9,345 | 4.1% | 84.8% |
+| ≥12 vox (**in use**) | 3,764 | 1.7% | 82.8% |
+| ≥50 vox (1.72 µm³) | 1,616 | 0.7% | 80.1% |
+
+95%+ of components are 1–4 voxels, and that spike dominates the histogram so
+completely that Otsu's split lands *inside* the noise. The knee is sharp and
+objectively locatable — the issue is the criterion, not the absence of one.
+
+**Note:** whether `MIN_SIZE_FLOOR = 12` is right for the other five images has
+never been checked. A single constant across images with different expression and
+exposure is the assumption being made silently.
+
+**Related:** [P13](#p13) (other hard-coded tunables), [I03](#i03) (scoring the
+mesh rather than the size histogram is the better criterion).
+
+---
+
+<a id="p20"></a>
+## P20 — `subsample_um` silently sets the vessel mesh's resolution
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S2 |
+| **Opened** | 2026-08-10 |
+| **Last verified** | 2026-08-10 |
+| **Resolved** | — |
+| **Where** | `pipeline/vessel_mesh.py:47` (`voxel_subsample`), `pipeline/gui/vessel_mesh.py:90` |
+| **Affects** | `dist_mesh_um`, all four `curv_*` columns, and the alpha value that is meaningful |
+
+The shipped mesh used `subsample_um = 5.0`. That step turned **1,517,396 mask
+voxels into 8,966 points — a 169:1 reduction** (rebuilding at 5.0 reproduces the
+shipped vertex count exactly). Every downstream geometric property follows from
+it, and none of this is documented:
+
+- `dist_mesh_um` cannot resolve finer than the point lattice ([P09](#p09)(b)).
+- `mesh_curvature` at `radius_um = 5.0` fits a **five**-parameter quadric to
+  whatever lies within 5 µm — at 5 µm point spacing that is roughly 6–12
+  neighbours, right at the rank-deficiency boundary the function guards against
+  (`cell_mesh.py:383`).
+- `alpha3d_um` must be ≳3× the point spacing simply to connect neighbours, so it
+  is not principally tuning "how large a biological gap to bridge" — it is
+  compensating for how sparse the subsample made the cloud. The two sliders are
+  coupled and are presented as independent.
+
+`voxel_subsample` also **discards the evidence it collects**. It quantises to a
+grid and keeps one representative per occupied cell
+(`np.unique(keys, axis=0, return_index=True)`), so a cell holding 2,244 wall
+voxels and a cell holding 1 stray voxel become the same single point. Measured
+occupancy on the 5 µm grid actually in use — median 69 voxels per cell, p10 = 4:
+
+| votes required | cells kept | signal retained |
+|---|---|---|
+| ≥1 (**current**) | 8,966 (100%) | 100% |
+| ≥5 | 7,909 (88.2%) | 99.8% |
+| ≥10 | 7,318 (81.6%) | **99.6%** |
+| ≥25 | 6,162 (68.7%) | 98.3% |
+
+**Requiring ≥10 votes discards 18.4% of the points for 0.4% of the signal** — and
+those are precisely the isolated points the alpha shape bridges to. Keeping the
+count would give a noise gate whose failure mode is monotone in one threshold,
+unlike the alpha shape's, which is combinatorial (any 4 points within a
+circumradius create surface). It would not help against *correlated* error: a
+debris clump or a neighbouring membrane votes as strongly as real wall.
+
+**Related:** [P09](#p09)(b), [P21](#p21), [I03](#i03).
+
+---
+
+<a id="p21"></a>
+## P21 — One global alpha cannot be correct on a tapering vessel
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S2 |
+| **Opened** | 2026-08-10 |
+| **Last verified** | 2026-08-10 (measured on one image; the taper case is predicted, not yet measured) |
+| **Resolved** | — |
+| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/gui/vessel_mesh.py:91` |
+| **Affects** | what surface `dist_mesh_um` and `curv_*` refer to |
+
+`alpha_shape_faces` returns the boundary of a **solid** — the faces bounding
+exactly one surviving tetrahedron. Verified on the shipped mesh: **zero** edges
+belong to exactly one face (98.4% belong to exactly two), one face-connected
+component, and 1,684 of 8,966 vertices (18.8%) belong to no face because they are
+strictly *inside* the solid. It is watertight, not a sheet draped over the wall.
+
+Alpha must therefore satisfy two conditions at once: **above** the wall-gap scale
+so gaps bridge, and **below** the local lumen radius so the lumen is not filled
+with tets. The vessels in this dataset are not all uniform tubes — some are a
+single tunnel, some a cone tapering to a point — so the lumen radius varies along
+the axis and necessarily sweeps through any chosen alpha. **The narrow end fills
+solid while the wide end stays hollow, for every possible alpha.** This is a
+structural property of the method, not a tuning difficulty.
+
+Two consequences:
+
+- Where the lumen is hollow the wall is a slab whose boundary has **two sheets**,
+  inner and outer. "Outward from the solid" points away from the axis on the outer
+  sheet and *toward* it on the inner, so the same tube yields κ2 = −1/R on one and
+  **+1/R** on the other. An adhesion receives whichever sheet its nearest vertex
+  sits on. Where the lumen is filled there is one sheet and no such ambiguity — so
+  a single image can contain both regimes.
+- `dist_mesh_um` then measures to the outer envelope in one part of an image and
+  to a filled rod in another.
+
+**Status of the evidence.** Measured on `V3_..._04step_002` at the shipped
+`alpha3d_um = 15.0`: the lumen is **not** filled (0% of centerline points at
+z = 30–80 µm fall inside a surviving tet), so the two-sheet regime is live there.
+Against that, `audit.md` F1 measured κ2 at **96.9% consistently signed** once
+winding was preserved, which implies one sheet dominates. A partly-filled vessel
+is consistent with both observations, but that is a hypothesis and has not been
+verified. **Check it when [P01](#p01) lands** — split surface vertices by sheet
+and inspect the κ2 sign histogram.
+
+**Note on the acceptance test.** [P01](#p01)'s test reads "κ1 ≈ 0, κ2 ≈ −1/R
+consistently signed, K ≈ 0". A cone is a *developable* surface, so K = 0 exactly,
+as for a cylinder, and κ1 ≈ 0 still holds — but κ2 is **−1/R(s), varying along the
+axis**. The test should check sign consistency and smooth variation, not agreement
+with a single radius, or it will read as a failure on a taper image. K ≈ 0 applies
+away from junctions only; a Y-junction is a saddle, K < 0.
+
+The `implied caliber ~ 1/median κ1` readout (`gui/vessel_mesh.py:368`) is
+meaningless on a tapering vessel regardless of [P01](#p01) — it averages a radius
+that varies by construction.
+
+**Related:** [P01](#p01), [P20](#p20), [I03](#i03).
+
+---
+
+<a id="p22"></a>
+## P22 — Centerline overlay is drawn at a single wrong z
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S3 (display only — no exported column changes) |
+| **Opened** | 2026-08-10 |
+| **Last verified** | 2026-08-10 |
+| **Resolved** | — |
+| **Where** | `pipeline/gui/vessel_mesh.py:404-408` (`_show_path`) |
+| **Affects** | the `Vessel path curvature (X-Y)` layer only |
+
+`_show_path` places every centerline point at one z — the mean of **all** mesh
+vertices — so the overlay is a flat sheet at an arbitrary depth rather than
+anything tracking the vessel.
+
+Measured on `V3_..._04step_002` (display z = 46.7 µm), taking the mean z of the
+cadherin column beneath each centerline point:
+
+| | |
+|---|---|
+| true per-column wall z along the path | **3.1 → 99.8 µm** (the stack is 105 µm) |
+| median \|true z − displayed z\| | **32.8 µm** |
+| p90 / max | 48.7 / 53.2 µm |
+
+The vessel traverses essentially the whole depth ([P06](#p06): it dives through
+the stack), so the overlay sits on average a third of the stack away from it.
+Independently confirmed by the [P21](#p21) measurement: 0% of centerline points at
+the mean z fall inside the mesh solid.
+
+**The fix** is small and changes no exported number: give each centerline point the
+mean z of the cadherin column beneath it (defined for 574/643 points here; a small
+neighbourhood average covers the rest). Worth doing before any 3D-centerline work,
+because it shows whether a 3D axis estimate is well-behaved before one is built.
+
+**Not a defect in `path_curv_xy` itself** — κ is computed in xy and z never enters
+it. This is the overlay only.
+
+---
+
+<a id="p23"></a>
+## P23 — Centerline preprocessing amputates tapering vessels
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S2 |
+| **Opened** | 2026-08-10 |
+| **Last verified** | 2026-08-10 (predicted from the code and the stated geometry; not yet measured on a taper image) |
+| **Resolved** | — |
+| **Where** | `pipeline/centerline.py:109` (`open_um`), `:118` (`prune_um`) |
+| **Affects** | `path_curv_xy`, `dist_branch_um` on non-uniform vessels |
+
+Some vessels in this dataset taper to a fine point rather than running as a
+uniform tube. `vessel_path_curvature_xy` removes such a tip twice over:
+
+- `binary_opening(foot, disk(open_um / ppm))` with `open_um = 4.0 µm` deletes any
+  part of the footprint narrower than the structuring element, so the taper is cut
+  off once its radius falls below ~4 µm.
+- `_prune_spurs(..., prune_um = 30.0 µm)` then removes terminal branches shorter
+  than 30 µm — which is what a surviving tip looks like to it.
+
+Both are **function defaults with no slider** and neither scales with the vessel.
+The tip is where the geometry is most extreme (tightest caliber, highest
+curvature), so this removes the most informative part of exactly the images where
+it exists.
+
+**Not yet measured** — no taper image has saved intermediates. Quantify it on one
+before choosing values, and consider making both thresholds scale-aware rather
+than absolute.
+
+**Related:** [P08](#p08)(c) (border flare, same function), [P13](#p13).
+
+---
+
 # Closed
 
 <a id="p16"></a>
@@ -875,6 +1182,53 @@ change against.
 
 ---
 
+<a id="i03"></a>
+## I03 — Objective-scored auto-calibration of the vessel mesh
+
+**Opened** 2026-08-10 · **Status** open · **Relates to** [P19](#p19),
+[P20](#p20), [P21](#p21)
+
+The vessel surface currently depends on four coupled knobs — `min_size`
+(a hidden constant, [P19](#p19)), `subsample_um` (dominant and undocumented,
+[P20](#p20)), `alpha3d_um` (structurally unsatisfiable on a taper,
+[P21](#p21)), and `min_component_um` — tuned by eye per image. The goal is to
+replace that with a measurement.
+
+**Score the mesh, not the mask.** [P19](#p19) shows why: a component-size
+histogram does not know what the mask is *for*, which is how Otsu on it comes to
+need a magic constant to rescue it. Candidate objectives, none needing a human
+eye:
+
+- **Topology.** The strongest, because the answer is known a priori. The shipped
+  mesh is one component of genus ≈ 125 (χ = −248); a real vessel wall shell is
+  single-digit genus. **State it as minimise-genus subject to a coverage floor,
+  not as a target value** — expected genus differs by image (roughly 0 for a cone
+  closing to a point, 1 for a single tunnel, 2 for a Y), so a fixed target would
+  reintroduce exactly the hidden constant this is meant to remove. Genus alone is
+  gameable by collapsing to a blob; the coverage term is what prevents that.
+- **Coverage.** Fraction of retained cadherin voxels within *d* of the surface.
+- **Parsimony.** Surface area per unit covered signal — penalises grabbing noise.
+- **Stability.** Rebuild from a random half of the components; a good setting
+  reproduces, one tuned to noise does not.
+
+**Method selection can be automatic too.** Branch count is already computed by
+`vessel_path_curvature_xy`. With zero branches, `polar_fill_slice`'s
+one-star-shaped-lumen-per-slice assumption holds and it has no gap-bridging knob
+at all (it interpolates empty angular bins by construction) — so on the
+non-branched images the cheapest and most noise-robust method already in the repo
+applies. The Y-focused module docstrings obscure this.
+
+**Cost.** An alpha sweep ran 10–25 s per point on `V3_..._04step_002`, so a
+coarse grid over three parameters is minutes. Acceptable for a "calibrate once per
+image" button; not for live slider feedback.
+
+**Sequencing.** After [P01](#p01), so that corrected curvature can be part of the
+objective rather than something validated afterwards. This and [P21](#p21) are one
+piece of work — a reconstruction method and its calibration — and should not share
+a commit with [P01](#p01).
+
+---
+
 # Housekeeping
 
 <a id="h01"></a>
@@ -969,8 +1323,15 @@ Given the correlation structure above, this is not optional.
 ## Pre-specify the exclusions
 
 Before looking at tension, fix and write down: the `dist_mesh_um` gate
-([P09](#p09)), `dist_branch_um > smooth_um` ([P08](#p08)), the depth band, and
-whether `09step` (0.9 µm z-spacing) is in. Each is otherwise a fork in the garden.
+([P09](#p09)), `dist_branch_um > smooth_um` ([P08](#p08)), a margin from the xy
+field boundary ([P08](#p08)(c) — 42% of top-decile κ is border flare), the depth
+band, and whether `09step` (0.9 µm z-spacing) is in. Each is otherwise a fork in
+the garden.
+
+**Guard the branch filter.** Not every vessel here is Y-shaped — some are a single
+tunnel or a cone. Those images have no branch node, so `dist_branch_um` is all-NaN
+and a bare `dist_branch_um > 20` drops **every** row rather than none. Write it as
+`dist_branch_um.isna() | (dist_branch_um > 20)`. See [P08](#p08)(d).
 
 ## State the ceiling
 

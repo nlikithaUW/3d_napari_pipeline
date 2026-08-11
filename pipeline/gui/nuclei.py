@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from magicgui import magicgui
 from magicgui.widgets import (
@@ -215,8 +217,18 @@ def build(state, viewer) -> Container:
                 markers[tuple(coords.T)] = np.arange(1, len(coords) + 1)
             nuc = watershed(-dist, markers, mask=binary)
             ids = np.unique(nuc[nuc > 0])
+            # Sizes + dtype cast happen HERE, in the worker: a bincount over
+            # ~340M voxels on the Qt thread stalls the UI, and int32 at
+            # (324,1024,1024) is 1.36 GB — dapi_state already holds one of
+            # those. sizes_n[k-1] is the voxel count of label k and
+            # sizes_n.size == nuc.max(), the invariant filter_by_size and
+            # cell_mesh._keep_mask depend on.
+            counts = np.bincount(nuc.ravel())
+            sizes_n = counts[1:] if counts.size > 1 else np.zeros(0, np.int64)
+            nuc = (nuc.astype(np.uint16) if int(nuc.max()) < 65536
+                   else nuc.astype(np.int32))
             if ids.size == 0:
-                return nuc, ids, np.zeros(0, bool), 0.0, 0.0
+                return nuc, sizes_n, ids, np.zeros(0, bool), 0.0, 0.0
             # Perinuclear signal per nucleus (~2 µm shell around each nucleus):
             # mClover (VnTs) always, VE-cadherin too when excluding endothelial.
             cf = clover.astype(np.float32)
@@ -244,14 +256,29 @@ def build(state, viewer) -> Container:
             if cad is not None:
                 cbg = float(np.median(cad))
                 is_fib &= cad_means < cbg * 1.3   # drop VE-cadherin+ endothelial
-            return nuc, ids, is_fib, T, mbg
+            return nuc, sizes_n, ids, is_fib, T, mbg
 
         def _done(result):
-            nuc, ids, is_fib, T, mbg = result
+            nuc, sizes_n, ids, is_fib, T, mbg = result
             n_tot = int(ids.size)
             n_fib = int(is_fib.sum())
             state["fibroblast_count"] = {"total": n_tot, "fibroblast": n_fib,
                                          "other": n_tot - n_fib, "threshold": T}
+            # Keep the split map and its per-nucleus classification (P04). These
+            # are a DIFFERENT object from dapi_state["labels"]: that one is the
+            # unsplit Otsu connected components — the min_size slider's input,
+            # the histogram, the displayed mask and this step's own watershed
+            # input. These are *nuclei*, the analysis unit. Measure joins
+            # nuc_id -> is_fibroblast through them. They live inside dapi_state
+            # (not at the top level) because loader.py, batch.py and view.py all
+            # replace that dict wholesale per image, so the volume is freed and
+            # cannot go stale across images the way fibroblast_count did (P25).
+            ds = state["dapi_state"]
+            ds["nuclei"] = nuc
+            ds["nuclei_sizes"] = sizes_n
+            ds["nuclei_ids"] = ids.astype(np.int32)
+            ds["nuclei_is_fib"] = np.asarray(is_fib, bool)
+            ds["nuclei_min_size_vox"] = int(size_controls.min_size.value)
             # NB: do NOT write the computed auto threshold back into the manual
             # slider — that would make it "sticky" and be reused (as a manual
             # value, with the wrong background) on the next image.
@@ -280,6 +307,98 @@ def build(state, viewer) -> Container:
         w.start()
 
     count_btn.changed.connect(_count)
+
+    # ---- Save / load the split nuclei + their fibroblast classification ----
+    # The analysis unit, and the only artifact that can answer "was this
+    # adhesion's nucleus classified as a fibroblast?" (P04). Deliberately a
+    # separate file from dapi_labels.npz, which holds the unsplit DAPI
+    # components — two genuinely different objects, so they get two names.
+    #
+    # labels and is_fib are written to ONE file on purpose: that is what makes
+    # them impossible to stale relative to each other, which is the exact class
+    # of bug P12 is about.
+    nuc_path_w = FileEdit(value="nuclei_split.npz", label="nuclei_path",
+                          mode="w")
+    save_nuc_w = PushButton(text="Save split nuclei + classes")
+    load_nuc_w = PushButton(text="Load split nuclei + classes")
+
+    def _save_nuc(*_):
+        ds = state.get("dapi_state") or {}
+        nuc = ds.get("nuclei")
+        if nuc is None:
+            print("No split nuclei to save — click 'Count fibroblasts' first.",
+                  flush=True)
+            return
+        path = str(nuc_path_w.value)
+        fc = state.get("fibroblast_count") or {}
+        np.savez_compressed(
+            path,
+            labels=np.asarray(nuc),
+            sizes=np.asarray(ds.get("nuclei_sizes")),
+            ids=np.asarray(ds.get("nuclei_ids")),
+            is_fib=np.asarray(ds.get("nuclei_is_fib")),
+            min_size_vox=int(ds.get("nuclei_min_size_vox", 0)),
+            threshold=float(fc.get("threshold", 0.0)),
+        )
+        ids = np.asarray(ds.get("nuclei_ids"))
+        is_fib = np.asarray(ds.get("nuclei_is_fib"))
+        print(f"Saved split nuclei -> {path} ({ids.size} nuclei, "
+              f"{int(is_fib.sum())} VnTs+).", flush=True)
+
+    def _load_nuc(*_, after=None, visible=True):
+        path = str(nuc_path_w.value)
+        # Check for the file up front so a folder that never had this step run
+        # (every pre-P04 _saved folder) prints a clean skip rather than an
+        # Errno 2 traceback out of the worker.
+        if not Path(path).exists():
+            print(f"No split nuclei file at {path} — skipped (run 'Count "
+                  f"fibroblasts' to create it).", flush=True)
+            call_all(after, label="Load split nuclei")
+            return
+
+        @thread_worker
+        def _run():
+            d = np.load(path)
+            return (d["labels"], d["sizes"], d["ids"], d["is_fib"],
+                    int(d["min_size_vox"]) if "min_size_vox" in d.files else 0)
+
+        def _done(result):
+            labels, sizes, ids, is_fib, min_size_vox = result
+            dapi_raw = state.get("dapi_raw")
+            if dapi_raw is not None and labels.shape != dapi_raw.shape:
+                print(f"  WARNING: loaded split nuclei {labels.shape} != "
+                      f"current DAPI {dapi_raw.shape}; load the matching image "
+                      f"first. nuc_id / dist_nuc_um would be nonsense.",
+                      flush=True)
+            if ids.size and int(ids.max()) > int(labels.max()):
+                print(f"  WARNING: ids run to {int(ids.max())} but the label "
+                      f"volume only reaches {int(labels.max())} — this file is "
+                      f"inconsistent; nuc_is_fibroblast will be blank.",
+                      flush=True)
+            ds = state["dapi_state"]
+            ds["nuclei"] = labels
+            ds["nuclei_sizes"] = sizes
+            ds["nuclei_ids"] = ids
+            ds["nuclei_is_fib"] = np.asarray(is_fib, bool)
+            ds["nuclei_min_size_vox"] = min_size_vox
+            print(f"Loaded split nuclei <- {path}: {ids.size} nuclei, "
+                  f"{int(np.asarray(is_fib).sum())} VnTs+ "
+                  f"(min_size_vox = {min_size_vox}).", flush=True)
+
+        def _err(exc):
+            print(f"Load split nuclei error: {exc}", flush=True)
+
+        print(f"Loading split nuclei from {path} ...", flush=True)
+        w = _run()
+        w.returned.connect(with_after(_done, after, "Load split nuclei"))
+        w.errored.connect(with_after(_err, after, "Load split nuclei"))
+        w.start()
+
+    save_nuc_w.changed.connect(_save_nuc)
+    load_nuc_w.changed.connect(_load_nuc)
+    state["load_nuclei_split"] = _load_nuc
+    state.setdefault("save_path_widgets", []).append(
+        (nuc_path_w, "nuclei_split.npz"))
 
     # ---- Save / load the fibroblast count so the CSV's n_fibroblasts column can
     # be restored without re-running (the count itself is not otherwise saved).
@@ -324,8 +443,12 @@ def build(state, viewer) -> Container:
     # guarantees the hand-off even if the save throws.
     state["run_dapi"] = lambda after=None: _run_dapi(
         after=lambda: call_all(_save_labels, after, label="run_dapi"))
+    # Saves both artifacts of this step — the split nuclei + classes and the
+    # scalar count. `call_all` takes varargs and isolates each failure, so a
+    # problem writing one does not cost the other or the chain.
     state["run_fibroblasts"] = lambda after=None: _count(
-        after=lambda: call_all(_save_fib, after, label="run_fibroblasts"))
+        after=lambda: call_all(_save_nuc, _save_fib, after,
+                               label="run_fibroblasts"))
     state.setdefault("save_path_widgets", []).append(
         (fib_path_w, "fibroblast_count.npz"))
 
@@ -337,6 +460,7 @@ def build(state, viewer) -> Container:
     return (Container(widgets=[otsu_controls, size_controls,
                               labels_path_w, save_lbl_w, load_lbl_w,
                               fib_params, count_btn,
+                              nuc_path_w, save_nuc_w, load_nuc_w,
                               fib_path_w, save_fib_w, load_fib_w],
                      labels=False),
             hist.canvas)

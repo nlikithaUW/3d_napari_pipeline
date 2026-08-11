@@ -107,7 +107,9 @@ def main() -> None:
         "scale": (1.0, 1.0, 1.0),
         "dapi_mask_layer": None, "cadh_mask_layer": None,
         "clover_mask_layer": None,
-        "dapi_state": {"labels": None, "sizes": None},
+        "dapi_state": {"labels": None, "sizes": None, "nuclei": None,
+                       "nuclei_sizes": None, "nuclei_ids": None,
+                       "nuclei_is_fib": None, "nuclei_min_size_vox": None},
         "cadh_state": {
             "labels": None, "sizes": None,
             "centroids": None, "normals": None, "label_ids": None,

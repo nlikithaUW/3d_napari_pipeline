@@ -76,7 +76,9 @@ def _fresh_state() -> dict:
         "scale": (1.0, 1.0, 1.0),
         "dapi_mask_layer": None, "cadh_mask_layer": None,
         "clover_mask_layer": None,
-        "dapi_state": {"labels": None, "sizes": None},
+        "dapi_state": {"labels": None, "sizes": None, "nuclei": None,
+                       "nuclei_sizes": None, "nuclei_ids": None,
+                       "nuclei_is_fib": None, "nuclei_min_size_vox": None},
         "cadh_state": {"labels": None, "sizes": None, "centroids": None,
                        "normals": None, "label_ids": None, "keep_mask": None},
         "clover_state": {"labels": None, "sizes": None, "method": None},
@@ -165,11 +167,25 @@ def main() -> None:
         print(f"Could not load RF model {args.model}: {exc}", flush=True)
         sys.exit(1)
 
+    # Per-image outcome, so an unattended run ends with a verdict instead of a
+    # screen of scrolled-past output. Recorded in _advance, which is already the
+    # single idempotent funnel every image passes through exactly once.
+    outcome: dict[str, list[str]] = {"done": [], "skipped": []}
+    rc = {"code": 0}
+
     def _finish():
-        print("\nBatch complete. Intermediates saved for every image "
-              "(proba, instances, mesh, curvatures, DAPI, cadherin, fibroblast). "
-              "Run Measure + export per image in the GUI (Load all saved → "
-              "Measure → export) to produce the CSVs.", flush=True)
+        n_ok, n_bad = len(outcome["done"]), len(outcome["skipped"])
+        print(f"\nBatch complete: {n_ok} of {len(images)} image(s) processed, "
+              f"{n_bad} skipped.", flush=True)
+        for line in outcome["skipped"]:
+            print(f"  SKIPPED: {line}", flush=True)
+        print("Intermediates saved for every processed image (proba, instances, "
+              "mesh, curvatures, DAPI, split nuclei, cadherin, fibroblast "
+              "count). Run `python -m pipeline.batch_measure --dir <dir>` (or "
+              "the GUI: Load all saved → Measure → export) to produce the "
+              "CSVs.", flush=True)
+        if n_bad:
+            rc["code"] = 1
         _free_gpu()
         try:
             viewer.close()
@@ -210,7 +226,10 @@ def main() -> None:
                   "measure_result", "dapi_mask_layer", "cadh_mask_layer",
                   "clover_mask_layer", "fibroblast_count"):
             state[k] = None
-        state["dapi_state"] = {"labels": None, "sizes": None}
+        state["dapi_state"] = {"labels": None, "sizes": None, "nuclei": None,
+                               "nuclei_sizes": None, "nuclei_ids": None,
+                               "nuclei_is_fib": None,
+                               "nuclei_min_size_vox": None}
         state["cadh_state"] = {"labels": None, "sizes": None, "centroids": None,
                                "normals": None, "label_ids": None,
                                "keep_mask": None}
@@ -229,6 +248,12 @@ def main() -> None:
         _disarm()
         if reason:
             print(f"  {images[i].name}: {reason}", flush=True)
+        # "done." is the only success path into _advance; every other reason is
+        # a load failure, a timeout or an unexpected error.
+        if reason == "done.":
+            outcome["done"].append(images[i].name)
+        else:
+            outcome["skipped"].append(f"{images[i].name} — {reason or 'unknown'}")
         _free_image_memory()
         process(i + 1)
 
@@ -291,6 +316,10 @@ def main() -> None:
     # Kick off once the Qt event loop is running, then run the loop.
     QTimer.singleShot(0, lambda: process(0))
     napari.run()
+    # napari.run() returns when _finish quits the app; exit non-zero if any
+    # image was skipped, so a wrapper script can tell a clean run from a partial
+    # one without parsing the log.
+    sys.exit(rc["code"])
 
 
 if __name__ == "__main__":

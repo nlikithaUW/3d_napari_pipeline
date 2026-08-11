@@ -159,7 +159,14 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         state["cadh_mask_layer"] = _mask_layer(cadh_raw, "VE-Cadherin mask", "magenta")
         state["clover_mask_layer"] = _mask_layer(clover_raw, "Clover filter mask", "green")
 
-        state["dapi_state"] = {"labels": None, "sizes": None}
+        # "labels"/"sizes" are the unsplit DAPI connected components; "nuclei"
+        # and friends are the watershed-split nuclei + their per-nucleus
+        # fibroblast class (P04). Two different objects, one dict, replaced
+        # wholesale per image so neither can leak across images.
+        state["dapi_state"] = {"labels": None, "sizes": None,
+                               "nuclei": None, "nuclei_sizes": None,
+                               "nuclei_ids": None, "nuclei_is_fib": None,
+                               "nuclei_min_size_vox": None}
         state["cadh_state"] = {
             "labels": None, "sizes": None,
             "centroids": None, "normals": None, "label_ids": None,
@@ -245,6 +252,7 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
     # (label, state key) in dependency-friendly order.
     _LOADERS = [
         ("DAPI labels", "load_dapi_labels"),
+        ("Split nuclei + classes", "load_nuclei_split"),
         ("VE-Cadherin mask", "load_cadh"),
         ("Vessel mesh", "load_vessel_mesh"),
         ("Vessel curvature", "load_vessel_curvature"),

@@ -13,6 +13,10 @@ from napari.qt.threading import thread_worker
 from scipy.spatial import KDTree
 
 from ..fret import background_subtract
+from ..saved_check import (
+    centerline_notes, curvature_notes, force_notes, mesh_notes, native_notes,
+    nuclei_notes, ratio_dropout_note,
+)
 from .widgets import call_all, with_after
 
 N_WORKERS = max(1, (os.cpu_count() or 8) - 4)
@@ -54,7 +58,8 @@ def build(state, viewer):
             print("Measure: build the vessel mesh first (Vessel mesh tab).", flush=True)
             call_all(after)
             return
-        if (state.get("dapi_state") or {}).get("labels") is None:
+        ds = state.get("dapi_state") or {}
+        if ds.get("nuclei") is None and ds.get("labels") is None:
             print("Measure: compute nuclei first (Nuclei tab → Compute).", flush=True)
             call_all(after)
             return
@@ -67,7 +72,24 @@ def build(state, viewer):
 
         force_vol = state.get("force_vol")
         vessel_verts = state["vessel_mesh_cache"]["verts"]
-        nuc_labels_full = state["dapi_state"]["labels"]
+        # The watershed-split nuclei when available, else the unsplit DAPI
+        # components (P04). Captured into locals here, before the worker, so
+        # they are closed over rather than re-read off `state` on another
+        # thread. The fallback is loud: the two maps mean different things and
+        # only the split one can be joined to the fibroblast classification.
+        nuc_ids = np.asarray(ds["nuclei_ids"]) if ds.get("nuclei_ids") is not None else None
+        nuc_is_fib = np.asarray(ds["nuclei_is_fib"]) if ds.get("nuclei_is_fib") is not None else None
+        if ds.get("nuclei") is not None:
+            nuc_labels_full = ds["nuclei"]
+        else:
+            nuc_labels_full = ds["labels"]
+            nuc_ids = nuc_is_fib = None
+            print("Measure: WARN: no split nuclei — using the UNSPLIT DAPI "
+                  "components for nuc_id and dist_nuc_um, and "
+                  "nuc_is_fibroblast will be blank. Those are DAPI connected "
+                  "components, not nuclei (most are sub-nuclear debris), and "
+                  "nuc_id is then not joinable to n_fibroblasts. Run 'Count "
+                  "fibroblasts' on the Nuclei tab first.", flush=True)
         scale = state.get("scale", (1.0, 1.0, 1.0))
         clover_native = state.get("clover_raw_native")
         ruby_native = state.get("ruby_raw_native")
@@ -83,6 +105,11 @@ def build(state, viewer):
         def _run():
             from skimage.measure import regionprops_table
             import scipy.ndimage as sndi
+
+            # Degradations are accumulated and printed by `_done`, so the same
+            # string reaches the Log dock here and the terminal in the headless
+            # path — see pipeline/saved_check.py.
+            notes: list[str] = []
 
             labels = np.asarray(labels_raw).astype(np.int32)
 
@@ -132,6 +159,7 @@ def build(state, viewer):
 
             # Step 3 — force statistics. NaN when FRET isn't configured for this
             # dataset (no force volume was computed); the columns export blank.
+            notes += force_notes(force_vol)
             if force_vol is None:
                 force_mean = np.full(unique_ids.shape, np.nan, dtype=np.float64)
                 force_std = np.full(unique_ids.shape, np.nan, dtype=np.float64)
@@ -153,8 +181,9 @@ def build(state, viewer):
             # would masquerade as a curvature effect, since depth and curvature
             # covary on a tube. Aligned to unique_ids; NaN where an adhesion's
             # ruby is entirely at/below background.
-            if (clover_native is not None and ruby_native is not None
-                    and clover_native.shape[1:] == labels.shape[1:]):
+            ratio_bad = native_notes(clover_native, ruby_native, labels.shape)
+            notes += ratio_bad
+            if not ratio_bad:
                 Zn = clover_native.shape[0]
                 zf = float(raw_voxel[0]) / float(scale[0])
                 iso_idx = np.clip(np.rint(np.arange(Zn) * zf).astype(np.int64),
@@ -173,6 +202,8 @@ def build(state, viewer):
                     ratio_by_label = c_sum / r_sum
                 ratio_by_label[r_sum <= 0] = np.nan
                 ratio_mean = ratio_by_label[unique_ids].astype(np.float32)
+                notes += ratio_dropout_note(int(np.isnan(ratio_mean).sum()),
+                                            int(ratio_mean.size))
             else:
                 ratio_mean = np.full(unique_ids.shape, np.nan, dtype=np.float32)
 
@@ -184,6 +215,7 @@ def build(state, viewer):
             adhesion_um = adhesion_vox * np.array(scale)
 
             # Step 5 — vessel mesh KD-tree (built here; no cached tree)
+            notes += mesh_notes(vessel_verts)
             vessel_tree = KDTree(vessel_verts)
 
             # Step 6 — nucleus KD-tree (subsampled every 3rd voxel)
@@ -221,6 +253,23 @@ def build(state, viewer):
             ])
             nuc_assignment = s_nuc_id[group_argmin]
 
+            # Step 7a — join each adhesion's nucleus to that nucleus's
+            # fibroblast class (P04). float32 + NaN, not an int sentinel: the
+            # exporter blanks NaN and only NaN, so a -1 would export literally.
+            nuc_is_fibroblast = np.full(len(first), np.nan, dtype=np.float32)
+            if nuc_ids is not None or nuc_is_fib is not None:
+                nuc_max = int(np.asarray(nuc_labels_full).max())
+                nn = nuclei_notes(nuc_ids, nuc_is_fib, nuc_max)
+                notes += nn
+                if not nn:
+                    lut = np.full(nuc_max + 1, np.nan, dtype=np.float32)
+                    lut[np.asarray(nuc_ids).astype(np.int64)] = np.asarray(
+                        nuc_is_fib, bool).astype(np.float32)
+                    nuc_is_fibroblast = lut[
+                        np.asarray(nuc_assignment).astype(np.int64)]
+            else:
+                notes += nuclei_notes(None, None, 0)
+
             # Step 7b — per-adhesion vessel curvature at the nearest *surface*
             # vertex, averaged over the adhesion's voxels. The alpha-shape vessel
             # mesh is a point cloud whose interior vertices carry no valid
@@ -228,6 +277,7 @@ def build(state, viewer):
             # on those. So restrict to surface vertices (finite curvature) and
             # query a tree over just those. NaN if curvature not computed/stale.
             nverts = len(vessel_verts)
+            notes += curvature_notes(curvature, nverts)
             curv_out = {}
             k1_all = None if curvature is None else curvature.get("k1")
             k1_all = None if k1_all is None else np.asarray(k1_all)
@@ -254,6 +304,7 @@ def build(state, viewer):
             n_ad = len(first)
             path_curv = np.full(n_ad, np.nan, dtype=np.float32)
             dist_branch = np.full(n_ad, np.nan, dtype=np.float32)
+            notes += centerline_notes(centerline)
             if centerline is not None and len(centerline.get("pts_yx_um", [])):
                 adh_yx = adhesion_um[:, 1:3]
                 cl_tree = KDTree(np.asarray(centerline["pts_yx_um"]))
@@ -281,6 +332,9 @@ def build(state, viewer):
                 "dist_mesh_um":   mesh_min,
                 "dist_nuc_um":    nuc_min,
                 "nuc_id":         nuc_assignment,
+                # 1.0 = VnTs+ fibroblast, 0.0 = other, blank = unknown. Always
+                # present so the CSV header does not depend on the join.
+                "nuc_is_fibroblast": nuc_is_fibroblast,
                 "ratio_clover_ruby": ratio_mean,
                 # regionprops_table was given `spacing=scale`, so these are µm.
                 "centroid_z_um":  props["centroid-0"],
@@ -292,6 +346,8 @@ def build(state, viewer):
                 "curv_gaussian":  curv_out["gaussian"],
                 "path_curv_xy":   path_curv,
                 "dist_branch_um": dist_branch,
+                # Not a metric column — `_export` selects by name.
+                "notes":          notes,
             }
 
         def _done(result):
@@ -299,6 +355,11 @@ def build(state, viewer):
                 print("Measure: no adhesion instances found.", flush=True)
                 return
             state["measure_result"] = result
+
+            # Report the silent degradations first — a blank column is easy to
+            # miss in a CSV and impossible to miss here.
+            for n in result.get("notes", []):
+                print(f"  {n}", flush=True)
 
             n_adh = len(result["label"])
             n_nuc = len(np.unique(result["nuc_id"][result["nuc_id"] > 0]))
@@ -468,7 +529,7 @@ def build(state, viewer):
                 "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
                 "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
                 "volume_um3", "axis_major_um", "axis_minor_um",
-                "eccentricity", "nuc_id"]
+                "eccentricity", "nuc_id", "nuc_is_fibroblast"]
         try:
             import pandas as pd
             df = pd.DataFrame({c: np.asarray(result[c])
@@ -498,6 +559,14 @@ def build(state, viewer):
                 "roi_active": bool(state.get("roi_polygons_yx_um")
                                    or state.get("roi_yx_um")),
                 "fibroblast_count": state.get("fibroblast_count"),
+                # Which nucleus segmentation nuc_id / dist_nuc_um refer to. The
+                # two are NOT comparable — the unsplit map's ids index DAPI
+                # connected components, the split map's index nuclei (P04).
+                "nucleus_map": (
+                    "nuclei_split.npz"
+                    if (state.get("dapi_state") or {}).get("nuclei") is not None
+                    else "dapi_labels.npz (unsplit fallback)"),
+                "notes": list(result.get("notes", [])),
                 "settings": state.get("run_settings") or {},
             }
             spath = str(_base.with_name(f"{_base.stem}_{_ts}_settings.json"))

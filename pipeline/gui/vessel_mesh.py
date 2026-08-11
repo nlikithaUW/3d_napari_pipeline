@@ -29,6 +29,7 @@ from ..cell_mesh import (
     tet_circumradii,
 )
 from ..centerline import vessel_path_curvature_xy
+from ..saved_check import curvature_notes
 from ..vessel_mesh import (
     alpha_fill_volume,
     close_volume,
@@ -544,12 +545,11 @@ def build(state, viewer) -> Container:
             # it was computed on. A length mismatch means this file belongs to a
             # different (or re-built) mesh: Measure silently drops every
             # curvature column to NaN in that case, so say so here instead.
-            if verts is not None and len(curv["k1"]) != len(verts):
-                print(f"  WARNING: curvature has {len(curv['k1'])} values but "
-                      f"the loaded mesh has {len(verts)} vertices — this file "
-                      f"is from a different mesh. Curvature columns will be "
-                      f"blank; recompute the curvature (or reload the matching "
-                      f"mesh).", flush=True)
+            # Delegated to saved_check so this warning and the headless one are
+            # the same string rather than two that drift apart (P12).
+            if verts is not None:
+                for n in curvature_notes(curv, len(verts)):
+                    print(f"  {n}", flush=True)
             if verts is not None and cache.get("faces") is not None:
                 _show_curvature()
                 if not visible and CURV_LAYER in viewer.layers:

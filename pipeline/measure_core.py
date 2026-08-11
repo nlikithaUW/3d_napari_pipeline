@@ -20,6 +20,10 @@ import numpy as np
 from scipy.spatial import cKDTree as KDTree
 
 from .fret import background_subtract
+from .saved_check import (
+    centerline_notes, curvature_notes, force_notes, mesh_notes, native_notes,
+    nuclei_notes, ratio_dropout_note,
+)
 
 
 def _bs_per_z(vol: np.ndarray) -> np.ndarray:
@@ -40,14 +44,29 @@ def _bs_per_z(vol: np.ndarray) -> np.ndarray:
 
 def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale,
                          clover_native, ruby_native, raw_voxel, curvature,
-                         centerline):
+                         centerline, nuc_ids=None, nuc_is_fib=None):
     """Return the per-adhesion measurement dict (or None if no adhesions).
 
     ``force_vol`` may be None when FRET is not configured; the force columns are
     then all-NaN and export blank.
+
+    ``nuc_ids`` / ``nuc_is_fib`` are the per-nucleus label ids and their
+    fibroblast classification (``nuclei_split.npz``). Given both, ``nuc_id`` can
+    be joined to cell type and the ``nuc_is_fibroblast`` column is populated;
+    given neither it comes out blank. The raw vectors are passed rather than a
+    prebuilt lookup table so both callers get the same join and the same
+    validation, instead of duplicating it (`docs/ISSUES.md` P11).
+
+    **This function never prints.** It does not know its caller's indent level
+    and is the one module a non-CLI caller could reuse, so every degradation it
+    detects is accumulated into ``result["notes"]`` for the caller to report.
+    ``notes`` is not a metric column — both writers select columns by name, so
+    it never reaches the CSV.
     """
     from skimage.measure import regionprops_table
     import scipy.ndimage as sndi
+
+    notes: list[str] = []
 
     labels = np.asarray(labels).astype(np.int32)
     unique_ids = np.unique(labels[labels > 0])
@@ -60,6 +79,7 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
                     "axis_minor_length", "centroid"],
     )
 
+    notes += force_notes(force_vol)
     if force_vol is None:
         force_mean = np.full(unique_ids.shape, np.nan, dtype=np.float64)
         force_std = np.full(unique_ids.shape, np.nan, dtype=np.float64)
@@ -73,8 +93,9 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
     # dividing keeps one dim voxel from dominating (a mean of per-voxel ratios
     # is driven by its smallest denominators), and the background subtraction
     # stops dim/deep adhesions from drifting toward a fixed offset ratio.
-    if (clover_native is not None and ruby_native is not None
-            and clover_native.shape[1:] == labels.shape[1:]):
+    ratio_bad = native_notes(clover_native, ruby_native, labels.shape)
+    notes += ratio_bad
+    if not ratio_bad:
         Zn = clover_native.shape[0]
         zf = float(raw_voxel[0]) / float(scale[0])
         iso_idx = np.clip(np.rint(np.arange(Zn) * zf).astype(np.int64),
@@ -92,6 +113,8 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         # An adhesion whose ruby is entirely at/below background has no ratio.
         ratio_by_label[r_sum <= 0] = np.nan
         ratio_mean = ratio_by_label[unique_ids].astype(np.float32)
+        notes += ratio_dropout_note(int(np.isnan(ratio_mean).sum()),
+                                    int(ratio_mean.size))
     else:
         ratio_mean = np.full(unique_ids.shape, np.nan, dtype=np.float32)
 
@@ -100,6 +123,7 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
                           adhesion_vox[:, 2]]
     adhesion_um = adhesion_vox * np.array(scale)
 
+    notes += mesh_notes(vessel_verts)
     vessel_tree = KDTree(vessel_verts)
     nuc_sub = nuc_labels_full[::3, ::3, ::3]
     nuc_vox = np.argwhere(nuc_sub > 0)
@@ -132,8 +156,25 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
     ])
     nuc_assignment = s_nuc_id[group_argmin]
 
+    # Join each adhesion's assigned nucleus to that nucleus's fibroblast class
+    # (P04). float32 + NaN rather than an int sentinel: both writers blank NaN
+    # and only NaN, so a -1 would export literally and be read as data.
+    nuc_is_fibroblast = np.full(len(first), np.nan, dtype=np.float32)
+    if nuc_ids is not None or nuc_is_fib is not None:
+        nuc_max = int(np.asarray(nuc_labels_full).max())
+        nn = nuclei_notes(nuc_ids, nuc_is_fib, nuc_max)
+        notes += nn
+        if not nn:
+            lut = np.full(nuc_max + 1, np.nan, dtype=np.float32)
+            lut[np.asarray(nuc_ids).astype(np.int64)] = np.asarray(
+                nuc_is_fib, bool).astype(np.float32)
+            nuc_is_fibroblast = lut[np.asarray(nuc_assignment).astype(np.int64)]
+    else:
+        notes += nuclei_notes(None, None, 0)
+
     # Surface curvature at nearest surface vertex.
     nverts = len(vessel_verts)
+    notes += curvature_notes(curvature, nverts)
     curv_out = {}
     k1_all = None if curvature is None else curvature.get("k1")
     k1_all = None if k1_all is None else np.asarray(k1_all)
@@ -157,6 +198,7 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
     n_ad = len(first)
     path_curv = np.full(n_ad, np.nan, dtype=np.float32)
     dist_branch = np.full(n_ad, np.nan, dtype=np.float32)
+    notes += centerline_notes(centerline)
     if centerline is not None and len(centerline.get("pts_yx_um", [])):
         adh_yx = adhesion_um[:, 1:3]
         cl_tree = KDTree(np.asarray(centerline["pts_yx_um"]))
@@ -182,6 +224,9 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         "dist_mesh_um": mesh_min,
         "dist_nuc_um": nuc_min,
         "nuc_id": nuc_assignment,
+        # Unconditional, so the CSV header is stable whether or not the join
+        # was available. 1.0 = VnTs+ fibroblast, 0.0 = other, blank = unknown.
+        "nuc_is_fibroblast": nuc_is_fibroblast,
         "ratio_clover_ruby": ratio_mean,
         # regionprops_table was given `spacing=scale`, so these are µm.
         "centroid_z_um": props["centroid-0"],
@@ -193,4 +238,6 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         "curv_gaussian": curv_out["gaussian"],
         "path_curv_xy": path_curv,
         "dist_branch_um": dist_branch,
+        # Not a metric column — callers print it, `metric_cols` filters it out.
+        "notes": notes,
     }

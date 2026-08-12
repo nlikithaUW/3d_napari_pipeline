@@ -205,7 +205,7 @@ depend on the mesh — the five images they were waiting for now exist.
 | **Opened** | 2026-08-10 (audit F1) |
 | **Last verified** | 2026-08-10 |
 | **Resolved** | 2026-08-10 (commit `af8e6c0`) |
-| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/cell_mesh.py:246` (`vertex_outward_normals`) |
+| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/cell_mesh.py:286` (`vertex_outward_normals`) |
 | **Affects** | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian`; the Vessel-mesh tab's "implied caliber" readout; the Measure tab's `Spearman(ratio, curv_*)` lines |
 | **Evidence** | `docs/audit.md` §3 F1 |
 
@@ -540,7 +540,7 @@ analysis. If it holds, correcting the intensities will not be enough on its own.
 | **Opened** | 2026-08-10 (audit F4) |
 | **Last verified** | 2026-08-11 |
 | **Resolved** | 2026-08-11 (commit `04262b8`) |
-| **Where** | `pipeline/gui/nuclei.py:211` vs `pipeline/gui/measure.py:57` |
+| **Where** | `pipeline/gui/nuclei.py:218` vs `pipeline/gui/measure.py:62` |
 | **Affects** | `nuc_id`, `dist_nuc_um`, `n_fibroblasts`, `n_nuclei_total`, and the new `nuc_is_fibroblast` |
 | **Evidence** | `docs/audit.md` §3 F4 |
 
@@ -549,7 +549,7 @@ consumer:
 
 - **Otsu + connected components** → `state["dapi_state"]["labels"]`. Not split,
   not size-filtered beyond ≥10 voxels.
-- **Watershed-split nuclei** (`nuc`, `gui/nuclei.py:211`), built from the
+- **Watershed-split nuclei** (`nuc`, `gui/nuclei.py:218`), built from the
   size-filtered binary. **Never written back to `dapi_state`.**
 
 Measure reads `dapi_state["labels"]`, so `dist_nuc_um` and `nuc_id` come from the
@@ -813,7 +813,7 @@ and [P03](#p03) both have to land first for any of those to mean anything.
 | **Opened** | 2026-08-10 (audit F5) |
 | **Last verified** | 2026-08-10 (scikit-image 0.26.0) |
 | **Resolved** | 2026-08-10 (commit `af8e6c0`) |
-| **Where** | `pipeline/gui/nuclei.py:207`, `pipeline/rf.py:606,613` |
+| **Where** | `pipeline/gui/nuclei.py:213`, `pipeline/rf.py:606,619` |
 | **Affects** | `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries (**not** `nuc_id` / `dist_nuc_um` — see History) |
 | **Evidence** | `docs/audit.md` §3 F5 |
 
@@ -822,7 +822,7 @@ and [P03](#p03) both have to land first for any of those to mean anything.
 with `min_distance=5`, a peak at index 3 is dropped and reappears only with
 `exclude_border=False`.
 
-**(a) Nucleus splitting** — `gui/nuclei.py:207` uses `min_distance ≈ 12` voxels
+**(a) Nucleus splitting** — `gui/nuclei.py:213` uses `min_distance ≈ 12` voxels
 (3.9 µm at 0.325 µm/voxel). Nuclei whose distance peak falls within 12 voxels of
 any face of the volume get **no watershed seed**, and a mask component with no
 marker is left at label 0 by `watershed(..., mask=binary)` — so those nuclei are
@@ -830,7 +830,7 @@ dropped entirely, or absorbed into a neighbour that does have a seed. On a
 324-plane stack the excluded z shell is 7.4% of the depth, and it sits exactly
 where the near-wall and far-wall adhesion populations are.
 
-**(b) Adhesion splitting** — `rf.py:612` crops each candidate to its bounding box
+**(b) Adhesion splitting** — `rf.py:611` crops each candidate to its bounding box
 with `pad = 2`, then calls `peak_local_max(dist, min_distance=5, ...)`. **The
 border exclusion zone (5 voxels) is larger than the padding (2 voxels)**, so
 seeds within 3 voxels of the component's own bounding box are suppressed. For
@@ -1049,7 +1049,7 @@ non-branched images vanish. See (d). Note this does nothing about (e).
 | **Opened** | 2026-08-06 |
 | **Last verified** | 2026-08-10 |
 | **Resolved** | — |
-| **Where** | `pipeline/measure_core.py:103`, `pipeline/gui/measure.py:187` |
+| **Where** | `pipeline/measure_core.py:132`, `pipeline/gui/measure.py:223` |
 | **Affects** | `dist_mesh_um`, and the interpretation of every `curv_*` value |
 | **Evidence** | `docs/audit.md` §3 F7 |
 
@@ -1113,7 +1113,7 @@ voxel). **Needs a number from the user.**
 | **Opened** | 2026-08-10 (audit F8) |
 | **Last verified** | 2026-08-10 |
 | **Resolved** | — |
-| **Where** | `pipeline/measure_core.py:181`, `pipeline/gui/measure.py:280` |
+| **Where** | `pipeline/measure_core.py:228`, `pipeline/gui/measure.py:335` |
 | **Affects** | `force_total_pN` |
 
 `force_total_pN = force_mean_pN × props["area"]`, and `props["area"]` is a volume
@@ -1178,7 +1178,7 @@ should not share a commit with behaviour changes. **Deliberately deferred.**
 | **Opened** | 2026-08-10 (audit F9) |
 | **Last verified** | 2026-08-11 |
 | **Resolved** | 2026-08-11 (commit `04262b8`) |
-| **Where** | `pipeline/batch_measure.py:143`, `:123`; `pipeline/gui/vessel_mesh.py:547` |
+| **Where** | `pipeline/batch_measure.py:181`, `:144`; `pipeline/gui/vessel_mesh.py:551` |
 
 Two asymmetries between the GUI and headless paths:
 
@@ -1279,7 +1279,7 @@ Also in this fix:
 | **Opened** | 2026-08-10 (audit F10) |
 | **Last verified** | 2026-08-10 |
 | **Resolved** | — |
-| **Where** | `pipeline/gui/nuclei.py:241`, `pipeline/rf.py:612` |
+| **Where** | `pipeline/gui/nuclei.py:258`, `pipeline/rf.py:619` |
 
 The project convention is that tunable parameters become magicgui sliders so they
 can be tuned live and are recorded in the settings JSON. Two thresholds that
@@ -1334,7 +1334,7 @@ Grouped because each is small and none affects the headline numbers.
       endpoint list, but the neighbour set `S` was built before the mutation, so
       paths can be traced through already-deleted pixels within one pass. It
       converges, but the pruned result depends on iteration order.
-- [ ] `measure_core.py:80` — adhesions thinner than one native z-step can fall
+- [ ] `measure_core.py:114` — adhesions thinner than one native z-step can fall
       entirely between sampled planes, giving `r_sum = 0` → NaN ratio. Correctly
       NaN'd rather than wrong, but it is a size-dependent (therefore
       depth-dependent) dropout that compounds [P03](#p03).
@@ -1419,7 +1419,7 @@ mesh rather than the size histogram is the better criterion).
 | **Opened** | 2026-08-10 |
 | **Last verified** | 2026-08-10 |
 | **Resolved** | — |
-| **Where** | `pipeline/vessel_mesh.py:47` (`voxel_subsample`), `pipeline/gui/vessel_mesh.py:90` |
+| **Where** | `pipeline/vessel_mesh.py:47` (`voxel_subsample`), `pipeline/gui/vessel_mesh.py:102` |
 | **Affects** | `dist_mesh_um`, all four `curv_*` columns, and the alpha value that is meaningful |
 
 The shipped mesh used `subsample_um = 5.0`. That step turned **1,517,396 mask
@@ -1471,7 +1471,7 @@ debris clump or a neighbouring membrane votes as strongly as real wall.
 | **Opened** | 2026-08-10 |
 | **Last verified** | 2026-08-10 (measured on one image; the taper case is predicted, not yet measured) |
 | **Resolved** | — |
-| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/gui/vessel_mesh.py:91` |
+| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/gui/vessel_mesh.py:103` |
 | **Affects** | what surface `dist_mesh_um` and `curv_*` refer to |
 
 `alpha_shape_faces` returns the boundary of a **solid** — the faces bounding
@@ -1561,7 +1561,7 @@ that varies by construction.
 | **Opened** | 2026-08-10 |
 | **Last verified** | 2026-08-10 |
 | **Resolved** | 2026-08-10 (commit `af8e6c0`) |
-| **Where** | `pipeline/gui/vessel_mesh.py:397` (`_path_z_um`, `_show_path`) |
+| **Where** | `pipeline/gui/vessel_mesh.py:398` (`_path_z_um`, `_show_path`) |
 | **Affects** | the `Vessel path curvature (X-Y)` layer only |
 
 `_show_path` places every centerline point at one z — the mean of **all** mesh
@@ -1783,7 +1783,7 @@ other curvature column).
 | **Opened** | 2026-08-11 |
 | **Last verified** | 2026-08-11 |
 | **Resolved** | 2026-08-11 (commit `da9f15e`) |
-| **Where** | `pipeline/gui/loader.py:162-176`, `pipeline/batch.py:207-211` |
+| **Where** | `pipeline/gui/loader.py:186` (the fix), `pipeline/batch.py:227` |
 | **Affects** | `n_fibroblasts`, `n_nuclei_total`, and the saved `fibroblast_count.npz` |
 
 Found while tracing [P04](#p04), not by an audit.

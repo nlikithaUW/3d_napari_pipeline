@@ -29,9 +29,14 @@ This is the fact that matters most.
 
 **Both stain with DAPI, so a nucleus alone does not tell you which cell it
 belongs to.** Separating them is **unsolved** — the current classifier is
-unvalidated and its output swings ~2× on one slider step
-(`docs/ISSUES.md` P05). Never assume a nucleus count, or anything derived from
-one, is fibroblast-only.
+unvalidated, its output swings ~2× on one slider step, and across the six images
+the fibroblast fraction spans 5.0%–14.9% (`docs/ISSUES.md` P05). Never assume a
+nucleus count, or anything derived from one, is fibroblast-only.
+
+Since 2026-08-11 that classification is joinable per adhesion via the
+`nuc_is_fibroblast` column (`docs/ISSUES.md` P04). **Joinable is not validated** —
+the column inherits every P05 problem above, now attached to every row rather
+than to two image-level scalars. Do not stratify an analysis on it yet.
 
 - Channels (see `3d_images_folder/params.json`):
   - `mClover` — donor, VnTs sensor (fibroblasts)
@@ -83,9 +88,15 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
 - `cell_mesh.py` — per-cell surfaces, vertex normals, quadric surface curvature.
 - `vessel_mesh.py` — vessel surface (alpha shape) from the cadherin mask.
 - `centerline.py` — in-plane centerline + path curvature + branch nodes.
-- `measure_core.py` — headless per-adhesion measurement.
+- `measure_core.py` — headless per-adhesion measurement. **Never prints**; it
+  returns its degradation warnings in `result["notes"]` for the caller to print.
+- `saved_check.py` — the consistency checks over `_saved` intermediates, as pure
+  functions (numpy in, `list[str]` out; no Qt, no napari, no `state`). Both the
+  GUI and the headless path call these, so a warning is one string, not two that
+  drift apart. Also `describe_saved`, behind `batch_measure --check-only`.
 - `batch.py`, `batch_measure.py`, `batch_postprocess.py` — headless runners.
   **`batch.py` writes no CSV** (stops before Measure); `batch_measure.py` does.
+  Both print a per-image summary and set an exit code.
 - `view.py` — the napari app.
 
 **GUI (`pipeline/gui/`, one module per tab):** `loader`, `display`, `nuclei`,
@@ -143,7 +154,15 @@ When a problem is found, opened, or fixed, update `ISSUES.md` — add a `History
 line with the date rather than rewriting the entry in place, so the record of what
 was believed and when survives.
 
-As of the 2026-08-10 audit the top of the queue is **P01 → P04 → P07 → P03 →
-P02**; `ISSUES.md` carries the current ordering and the reasoning. Segmentation
-quality and the vessel-surface reconstruction are in reasonable shape; the gap is
-validation, not features.
+**`ISSUES.md` carries the current ordering and the reasoning — read it there.**
+This file deliberately does not restate the queue. It used to, and the copy went
+stale within a day of the fixes landing, which is the drift this section warns
+about.
+
+Two standing facts that are not in the queue and do not change:
+
+- Segmentation quality and the vessel-surface reconstruction are in reasonable
+  shape; the gap is **validation, not features**.
+- **Line numbers in `ISSUES.md` go stale on every edit.** They are re-verified
+  against the code when entries are touched; if one looks wrong, trust the quoted
+  symbol and grep for it.

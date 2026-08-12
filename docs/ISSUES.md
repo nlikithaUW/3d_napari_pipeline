@@ -64,13 +64,13 @@ true of the code and data on that date and may not be true now.
 |---|---|---|---|
 | [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | **fixed** |
 | [P02](#p02) | `ratio_clover_ruby` tracks the ruby noise floor, not tension | S1 | open |
-| [P03](#p03) | Adhesion detection is depth-truncated | S1 | open |
+| [P03](#p03) | Adhesion detection is depth-truncated | S1 | open — **confirmed 6/6** |
 | [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | **fixed** |
 | [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open |
-| [P06](#p06) | Tension readout drifts with imaging depth | S2 | open |
+| [P06](#p06) | Tension readout drifts with imaging depth | S2 | open — **sign flips 6 images** |
 | [P07](#p07) | `peak_local_max` drops border seeds, in two places | S2 | **fixed** |
 | [P08](#p08) | `path_curv_xy` — 20 µm fit window on a ~140 µm-wide vessel; contamination; unsigned | S1 | open |
-| [P09](#p09) | `dist_mesh_um` measures to rejected geometry; no gate on curvature | S2 | open |
+| [P09](#p09) | `dist_mesh_um` measures to rejected geometry; no gate on curvature | S2 | **(a) fixed**, (b)(c) open |
 | [P10](#p10) | `force_total_pN` is not a force | S2 | open |
 | [P11](#p11) | `measure_core` duplicates the Measure worker and has diverged | S3 | open |
 | [P12](#p12) | Headless measure fails silently and overwrites saved instances | S3 | **fixed** |
@@ -90,8 +90,8 @@ true of the code and data on that date and may not be true now.
 | [P26](#p26) | Batch builds vessel meshes at widget defaults; the five new images do not match the reference | S2 | open |
 | [I01](#i01) | Progress / completion bars for long-running operations | idea | open |
 | [I02](#i02) | Fibroblast / endothelial scatter diagnostic | idea | open |
-| [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open |
-| [I04](#i04) | `batch.py` has no way to re-run one step | idea | open |
+| [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open — **instrumented** (`batch_mesh`) |
+| [I04](#i04) | `batch.py` has no way to re-run one step | idea | open — **mesh/curvature/centerline done** |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -186,10 +186,101 @@ non-geometry columns are unaffected either way, so an interim measure is
 defensible if the tension and nucleus columns are wanted sooner — just expect to
 re-export.
 
+> **Overtaken by events, 2026-08-12.** All six *have* now been exported
+> (`20260812_011*`), taking the "interim measure" option in that last sentence.
+> The trigger was [P09](#p09)(a), which needed a re-measure to land and which
+> made the tension and nucleus columns available for all six as a side effect.
+> The caution still holds for what it was about: **the geometry columns in those
+> six exports will need redoing** once [I03](#i03) settles the reconstruction.
+
 So the queue is now **P26 (+ the headless mesh rebuild it needs, [I04](#i04)) →
 P03 → P21/I03 (+ P24) → P02 → P08/P09/P10**. [P03](#p03), [P06](#p06),
 [P19](#p19) and [P23](#p23) are unblocked *today* on everything that does not
 depend on the mesh — the five images they were waiting for now exist.
+
+**Update, 2026-08-12 — [P09](#p09)(a) jumps the queue; the reference mesh is
+demoted.** Two things landed on the same day and they reorder the front of the
+list.
+
+1. **The reference mesh is not a target.** The user's correction, recorded in
+   full in [P26](#p26): it is *"somewhat hand tuned, but not extensively, since
+   tuning revealed huge parameter dependence."* Every "bring the five into line
+   with the reference" reading in this file is therefore wrong — that would buy
+   comparability across six untrustworthy reconstructions, not correctness. It
+   also means the parameter dependence [P24](#p24)(a) measured was already known
+   at the bench, which is independent support for [I03](#i03).
+2. **[P09](#p09)(a) is a real error on five of six images, and fixing it needs no
+   mesh rebuild.** Interior (face-less) vertices are 73–85% of the batched
+   meshes against 18.8% on the reference, so 39–75% of adhesions measure
+   `dist_mesh_um` to a point *inside* the wall (p90 understatement up to
+   5.5 µm). Building the KD-tree from surface vertices fixes it; only a
+   re-measure is needed, not a re-batch. It is a small signature change to
+   `compute_measurements` plus both call sites, not an edit in place — see the
+   entry.
+
+**Revised queue: [P09](#p09)(a) → [P03](#p03) → the mesh rebuild tool
+([I04](#i04)-shaped) → [P21](#p21)/[I03](#i03) (+ [P24](#p24)) → [P02](#p02) →
+[P08](#p08)/[P10](#p10).** [P26](#p26) is no longer a work item in its own right
+— with the reference demoted there is nothing to standardise *onto*, so it
+collapses into [I03](#i03): pick parameters by score, then rebuild all six. P09(a)
+goes first purely on cost-to-value; it is the only open correctness defect whose
+fix requires neither a decision nor a recompute of anything expensive.
+
+**Update, 2026-08-12 (later) — [P09](#p09)(a) is fixed and all six images are
+exported.** `batch_measure --redo-json` over the folder: **6 measured, 0 failed**,
+the only degradation being the expected FRET-not-configured warning on each.
+`dist_mesh_um` medians rise 1.4–2.3× on the five batched images; the reference's
+re-export leaves 21 of 24 columns byte-identical. Full numbers in
+[P09](#p09)'s History.
+
+> ### The current authoritative CSVs are the six `20260812_011*`
+>
+> One per image, in each `<stem>_saved/`. **These are the first exports in the
+> project's history to carry every landed fix at once** — [P01](#p01)
+> (curvature winding + orientation), [P07](#p07) (border seeds), [P04](#p04)
+> (split nuclei, `nuc_is_fibroblast`), [P25](#p25) (count clearing) and
+> [P09](#p09)(a) (surface-only distance) — and the first for five of the six
+> images at all. Every earlier CSV in the reference folder is superseded; see
+> the box in [P01](#p01) for what each one was.
+>
+> They are **not** trustworthy for the geometry question. Nothing here touches
+> [P24](#p24), [P08](#p08)(e) or [P26](#p26): `curv_*` still has no
+> scale-independent value, `path_curv_xy` still fits a 20 µm window to a ~140 µm
+> vessel, and the six meshes are still mutually incomparable. What improved is
+> `dist_mesh_um`, and the fact that all six images now have an export at all.
+
+**The queue is now [P03](#p03) → the mesh rebuild tool → [P21](#p21)/[I03](#i03)
+(+ [P24](#p24)) → [P02](#p02) → [P08](#p08)/[P10](#p10).** [P03](#p03) is
+unblocked and needs no new tooling — six CSVs and six meshes now exist, which is
+everything its "replicate across the other five images" step was waiting for.
+
+**Update, 2026-08-12 (later still) — [P03](#p03) replicated on all six; it
+holds.** Far-wall adhesion detection density is **19–77% of near-wall, in the
+same direction in every image** (6/6, both split definitions), and median
+adhesion volume does *not* fall consistently with depth (−19% to +16%, 3 up 3
+down) — so this is objects going undetected, not objects getting smaller. Full
+table in [P03](#p03)'s History. Two consequences:
+
+- **[P06](#p06)(a) is discharged, with the opposite answer.** Its fix list starts
+  "confirm it replicates across all six images". Done — and **the tension-vs-depth
+  drift does *not* replicate**: ρ runs −0.241 to +0.307 and is negative in only
+  2 of 6, while the reference reproduces its recorded −0.187 exactly. A sign that
+  flips rules out optical attenuation, which must act the same way in every
+  image, and supports the geometric reading [P06](#p06) already contains (the
+  vessel dives through the stack, so depth is partly axial position, whose
+  orientation is arbitrary per field). **[P03](#p03) and [P06](#p06) were bundled
+  into one "depth" problem and they have now come apart:** the detection
+  truncation is real and unanimous, the ratio drift is per-image and
+  inconsistent.
+- **The magnitude is not transferable.** 19%–77% is a 4× spread, so "the far
+  wall yields 37%" cannot be used as a correction coefficient — any depth
+  correction has to be fitted per image.
+
+**Queue: the mesh rebuild tool → [P21](#p21)/[I03](#i03) (+ [P24](#p24)) →
+[P02](#p02) → [P08](#p08)/[P10](#p10).** Both S1s at the front of the list are
+now measured rather than open questions: [P03](#p03) is confirmed and
+[P09](#p09)(a) is fixed. What remains ahead of the geometry work is nothing —
+the reconstruction is next.
 
 ---
 
@@ -368,6 +459,24 @@ at ≈ −1/R; K ≈ 0; face-normal coherence > 0.9. **Passed** — see below.
   recomputed, so it still carries the pre-[P07](#p07) `n_nuclei_total = 273`.
   Delete it or ignore it; do not analyse it.
 
+  > **Superseded, 2026-08-12 — there are now four, and the one to use is
+  > `20260812_011205`.** The paragraph above is left as written because the
+  > `20260811_105032` re-export is what the curvature evidence in this entry was
+  > measured on, and that provenance should not be rewritten. But it predates
+  > the [P04](#p04) nucleus fixes and [P09](#p09)(a), so it is no longer the
+  > file to analyse. Current standing of the four:
+  >
+  > | CSV | status |
+  > |---|---|
+  > | `20260806_145720` | pre-[P01](#p01) baseline — keep, do not analyse |
+  > | `20260811_104417` | superseded intermediate — ignore |
+  > | `20260811_105032` | the curvature evidence in this entry; superseded for analysis |
+  > | **`20260812_011205`** | **authoritative** — every landed fix |
+  >
+  > The four `curv_*` columns are **byte-identical** between `20260811_105032`
+  > and `20260812_011205`, so nothing in this entry's verification is affected
+  > by the move.
+
 - 2026-08-11 — **the acceptance test's radius clause is circular; the fix is
   not affected.** Found while investigating whether the X-Y projection in
   `path_curv_xy` costs anything ([P08](#p08)(e)).
@@ -483,10 +592,10 @@ least ruby.
 
 | | |
 |---|---|
-| **Status** | open |
+| **Status** | open — **confirmed on all six images 2026-08-12** |
 | **Severity** | S1 |
 | **Opened** | 2026-08-10 (audit F3) |
-| **Last verified** | 2026-08-10 |
+| **Last verified** | 2026-08-12 (all six; far wall 19–77% of near, unanimous) |
 | **Resolved** | — |
 | **Where** | `pipeline/gui/adhesion_rf.py:138` (`gate_by_clover`, default on), `:163` |
 | **Affects** | every column — the sample itself is biased |
@@ -527,6 +636,75 @@ than shrinking them.
 
 **Next:** replicate across the other five images before any depth-corrected
 analysis. If it holds, correcting the intensities will not be enough on its own.
+
+**History**
+- 2026-08-10 — opened from `audit.md` F3, measured on one image.
+- 2026-08-12 — **replicated on all six. It holds, in every image.** Same method
+  as the entry above: adhesion count per depth band ÷ vessel surface area in
+  that band, triangle areas from each saved mesh, adhesions from the
+  `20260812_011*` exports. The reference image's five band areas reproduce this
+  entry's table **exactly** (134,908 / 46,667 / 28,928 / 36,480 / 128,890 µm²),
+  which is what makes the other five comparable to it; its counts read slightly
+  higher (2,147 against 2,092) because [P07](#p07) landed in between.
+
+  Far-wall detection density as a percentage of near-wall, split two ways —
+  at an absolute 40 µm as the original did, and at each stack's own midpoint,
+  because the six stacks are 80–117 µm deep and a fixed cut is not the same
+  fraction of each:
+
+  | image | stack | far % of near (40 µm cut) | far % of near (midpoint) |
+  |---|---|---|---|
+  | `V3_..._04step_002` (reference) | 105 µm | **36%** | 43% |
+  | `V3_..._04step_003` | 98 µm | 61% | 68% |
+  | `V3_..._09step_001` | 115 µm | 62% | **77%** |
+  | `V3b_..._04step_001` | 80 µm | **19%** | **19%** |
+  | `V3b_..._04step_002` | 117 µm | 45% | 30% |
+  | `V3b_..._04step_003` | 94 µm | 32% | 36% |
+
+  **Unanimous in direction, 6 of 6, on both splits.** By this file's own
+  ceiling ([Analysis notes](#analysis-notes) — "if all agree in direction a sign
+  test floors at p = 0.031"), that is as strong as a six-image result gets. The
+  original 37% is representative rather than extreme; the median across images
+  is ~40% on both splits.
+
+  **But the magnitude is not a constant — it spans 4× (19%–77%).** "The far wall
+  yields 37%" is a fact about one image, not a coefficient to correct with. Any
+  depth correction has to be fitted per image.
+
+  **The truncation reading is strengthened, not just replicated.** This entry
+  argued that flat adhesion volume vs depth is the wrong statistic because
+  truncation removes objects rather than shrinking them. Across six images the
+  median volume shallow → deep moves **−19% to +16%, and is not even consistent
+  in sign** (3 down, 3 up) while detection density falls in all six. A mechanism
+  that shrinks adhesions cannot produce that; one that fails to detect them can.
+  The single image's −11% was within the noise of zero.
+
+  **Two things that make this conservative rather than overstated.** The
+  cadherin channel attenuates with depth as well, so the *denominator* — far-wall
+  surface area recovered by the mesh — is itself likely underestimated. That
+  inflates far-wall density and makes the truncation look milder than it is.
+  And the split is by absolute z, while [P06](#p06) established that on this
+  geometry the vessel dives through the stack, so "far wall" is partly *further
+  along the vessel*; that confound is unresolved and cuts both ways.
+
+  Densities are **not** compared between images here, only the within-image
+  ratio — the six meshes are built at different parameters ([P26](#p26)) so the
+  absolute per-1000 µm² figures are not commensurable. The alpha-shape mesh is
+  also a closed solid whose face area counts both wall sheets, so the absolute
+  area is roughly 2× a true surface; constant within an image, so the ratio
+  survives.
+
+  `09step_001` (0.9 µm z-spacing) shows the **least** truncation of the six on
+  both splits. Not interpreted — one image at that spacing, and it is the
+  direction a coarser z would push things if fewer, thicker planes recover more
+  deep signal. Recorded because it should not be pooled without checking, the
+  same caution [P05](#p05) reached from the other direction.
+
+  **What this settles.** The "confirm it replicates across all six images" step
+  that [P06](#p06)(a) is blocked on is **done**. Depth-stratified comparison on
+  this dataset contrasts a near-complete shallow sample against a systematically
+  incomplete deep one, in every image. Correcting intensities for attenuation
+  cannot fix that, because the missing adhesions were never measured.
 
 ---
 
@@ -751,12 +929,12 @@ entry that was retired).
 
 | | |
 |---|---|
-| **Status** | open |
+| **Status** | open — **does not replicate; sign flips across images (2026-08-12)** |
 | **Severity** | S2 |
 | **Opened** | 2026-08-07 |
-| **Last verified** | 2026-08-10 |
+| **Last verified** | 2026-08-12 (all six; ρ −0.241 to +0.307) |
 | **Resolved** | — |
-| **Where** | an optical confound in `ratio_clover_ruby`, not a code defect |
+| **Where** | a confound in `ratio_clover_ruby`, not a code defect — **geometric, not optical**; see the 2026-08-12 History entry |
 | **Affects** | `ratio_clover_ruby`, and any relationship drawn against a spatial variable |
 | **Evidence** | `docs/audit.md` §3 F2, §4. Reproduce with `Scripts/depth_check.py --channels` |
 
@@ -795,11 +973,65 @@ detection truncation that compounds it.
 channel, restrict to a depth band, or carry depth as a covariate — but note (b)
 and [P03](#p03) both have to land first for any of those to mean anything.
 
+> **(a) is discharged, 2026-08-12 — and it came back negative for this entry.**
+> Two different things were bundled into one step here. [P03](#p03)'s detection
+> truncation replicates unanimously (6/6). **This entry's depth drift does not.**
+> See the History entry below: the sign flips across images.
+
 **History**
 - 2026-08-07 — recorded in `TODO.md` as a −23% shallow-to-deep quartile drop.
 - 2026-08-10 — reproduced, but the quartile series is non-monotonic and ρ is
   −0.187; the "split by wall" mitigation was tested against the data and does not
   hold on this image.
+- 2026-08-12 — **measured on all six for the first time. The drift does not
+  replicate: the sign flips.** ρ(`ratio_clover_ruby`, `centroid_z_um`) per image,
+  on the `20260812_011*` exports:
+
+  | image | n | ρ |
+  |---|---|---|
+  | `V3_..._04step_002` (reference) | 2,147 | **−0.188** |
+  | `V3_..._04step_003` | 2,212 | +0.234 |
+  | `V3_..._09step_001` | 3,053 | +0.045 |
+  | `V3b_..._04step_001` | 2,019 | **−0.241** |
+  | `V3b_..._04step_002` | 4,049 | +0.297 |
+  | `V3b_..._04step_003` | 1,872 | +0.307 |
+
+  Range **−0.241 to +0.307**, median +0.140, **negative in only 2 of 6**. The
+  reference reproduces this entry's recorded −0.187 to three decimals, so the
+  method matches; the other five simply disagree with it.
+
+  **This refutes the optical-attenuation reading of this entry.** mClover
+  attenuating with depth while mRuby2 does not is a property of the *optics*, so
+  it must push the ratio the same way in every image. It does not. Whatever
+  drives the per-image correlation is not primarily attenuation.
+
+  **It confirms the reinterpretation this entry already contains.** The "Why it
+  matters" paragraph established that the vessel dives through the stack, so
+  depth is substantially *where along the vessel you are* (ρ(z,
+  `dist_branch_um`) = −0.461 on the reference). Axial position relative to the
+  field of view is arbitrary per image — the vessel can descend or ascend
+  through the stack — so a confound of that shape predicts exactly the sign
+  inconsistency observed. The six-image result is therefore evidence *for* the
+  geometric reading and *against* the optical one.
+
+  **What this changes.** The entry's title overstates the case and is left in
+  place for the record; read it as "the tension readout correlates with depth,
+  per image, with inconsistent sign". Consequences:
+
+  - **Do not apply a depth correction with a fixed sign or magnitude.** There is
+    no common coefficient to fit; the reference image's −0.187 is not the
+    dataset's behaviour.
+  - **Pooling the six images across depth would cancel much of this to nothing**
+    — which would look reassuring and would mean nothing.
+  - The per-image pooled p-values are all tiny (1e-2 to 1e-83) and should be
+    ignored: [Analysis notes](#analysis-notes) already states that a pooled
+    p-value over thousands of adhesions reports adhesion count. Six ρ values
+    with inconsistent sign is the informative summary, not any of the p's.
+  - **[P03](#p03) is now the better-evidenced depth problem of the two.** It
+    replicates 6/6 where this does not, and it is a plausible generator of a
+    per-image ratio-vs-depth correlation of arbitrary sign, since which
+    adhesions survive detection varies with where the bright wall sits in each
+    field.
 
 ---
 
@@ -1044,12 +1276,12 @@ non-branched images vanish. See (d). Note this does nothing about (e).
 
 | | |
 |---|---|
-| **Status** | open |
+| **Status** | open — **(a) fixed 2026-08-12**; (b) and (c) open |
 | **Severity** | S2 |
 | **Opened** | 2026-08-06 |
-| **Last verified** | 2026-08-10 |
-| **Resolved** | — |
-| **Where** | `pipeline/measure_core.py:132`, `pipeline/gui/measure.py:223` |
+| **Last verified** | 2026-08-12 (all six images) |
+| **Resolved** | (a) 2026-08-12; (b), (c) — |
+| **Where** | `pipeline/saved_check.py::surface_verts_for_distance` (the fix), `pipeline/measure_core.py:132`, `pipeline/gui/measure.py:223` |
 | **Affects** | `dist_mesh_um`, and the interpretation of every `curv_*` value |
 | **Evidence** | `docs/audit.md` §3 F7 |
 
@@ -1100,6 +1332,103 @@ voxel). **Needs a number from the user.**
 - 2026-08-10 (later) — `audit.md` F7's `subsample_um = 1.0` attribution corrected
   to 5.0 from the shipped settings JSON; the (c) threshold must be read against
   that. Cross-linked to [P20](#p20).
+- 2026-08-12 — **(a) is much larger on the other five images; "small numerical
+  effect" was a property of the reference mesh, not of the defect.** All six
+  measured the same way (adhesion centroids from `adhesion_instances.npz`
+  against a KD-tree of all verts vs one of surface verts only). The reference
+  row reproduces this entry's original figures — 15.1% and p90 0.36 µm against
+  the recorded 0.37 — so the rows below are comparable to it:
+
+  | image | interior verts | adhesions whose nearest vertex is interior | `dist_mesh_um` understated: median / p90 / max |
+  |---|---|---|---|
+  | `V3_..._04step_002` (reference) | 18.8% | **15.1%** | 0.00 / **0.36** / 5.26 µm |
+  | `V3_..._04step_003` | 82.2% | 60.3% | 0.18 / 1.61 / 4.07 µm |
+  | `V3_..._09step_001` | 84.9% | 61.3% | 0.25 / 1.98 / 5.34 µm |
+  | `V3b_..._04step_001` | 85.3% | **75.4%** | 0.57 / 1.88 / 23.25 µm |
+  | `V3b_..._04step_002` | 72.9% | 39.1% | 0.00 / **5.48** / 52.87 µm |
+  | `V3b_..._04step_003` | 79.8% | 39.3% | 0.00 / 2.01 / **127.87** µm |
+
+  The mechanism is [P26](#p26)/[P20](#p20): at `subsample_um = 1.0` the point
+  cloud is dense enough that the alpha shape buries **73–85%** of its vertices
+  inside the solid, against 18.8% on the reference's 5 µm cloud. `dist_mesh_um`
+  queries all of them, so on five of six images the majority of adhesions
+  measure their distance to a point **inside** the wall rather than on it.
+
+  This changes the entry's severity in practice while leaving the mechanism as
+  described. It is no longer fair to call (a) "a semantics defect, not a large
+  error" — that sentence is true of the reference image only, and is left in
+  place above with this note against it.
+
+  **The fix needs no re-batch, but it is not one line.** Build the distance tree
+  from `verts[np.unique(faces)]` instead of `verts`, at `measure_core.py:132`
+  and `gui/measure.py:223` — twice, per [P11](#p11). The obstacle is that
+  `compute_measurements` **is never given the faces** (signature at
+  `measure_core.py:45`: it takes `vessel_verts`, not the mesh), so this is a
+  signature change to the shared core plus both call sites, not an edit in
+  place.
+
+  **Do not reuse the existing `surf_mask`** at `measure_core.py:189` /
+  `gui/measure.py:292`, which is tempting because it is right there. It is
+  defined as `np.isfinite(k1_all)` — vertices where *curvature* was computable —
+  so it is gated on `surf_ok` and silently absent whenever the curvature file is
+  missing or stale, which is one of the degradations [P12](#p12) exists to
+  report. Faces come with the mesh and are always present, and
+  `np.unique(faces)` is the same definition `mesh_curvature` itself uses
+  (`cell_mesh.py:404`). Keep the two sets derived from the same source.
+
+  Backward compatibility: default the new parameter to `None` and fall back to
+  all vertices with a note, so a caller that has verts but no faces degrades
+  loudly rather than changing answers silently. Expect `dist_mesh_um` to *rise*
+  on most rows, by the medians in the table.
+
+- 2026-08-12 — **(a) fixed, and all six images re-measured.** New pure function
+  `saved_check.py::surface_verts_for_distance(verts, faces)` returns the
+  face-referenced vertex subset plus notes; `compute_measurements` takes a new
+  `vessel_faces=None` and builds the distance tree from it. It lives in
+  `saved_check.py` rather than in either worker for the reason that module
+  exists ([P12](#p12)): the GUI and the batch emit the same string or they
+  drift. Both call sites updated — `measure_core.py` and `gui/measure.py`
+  ([P11](#p11)'s two-edit tax, paid again) — plus `batch_measure.py`, which
+  loads `faces` from the mesh npz guarded by `"faces" in _vm`.
+
+  **Safe because `mesh_nn_idx` is dead.** Both workers unpack
+  `mesh_dist_all, mesh_nn_idx = f_mesh.result()` and never use the index, so
+  restricting the tree changes distances only. Nothing is looked up by vertex
+  index, which is what would otherwise have made this a silent reindexing bug.
+
+  **Measured on every image.** The recomputation below reproduces each exported
+  `dist_mesh_um` to **3.6e-15 µm**, so the "before" column is the exact
+  counterfactual, not an estimate:
+
+  | image | interior verts | adhesions moved | `dist_mesh_um` median before → after | Δ p90 | Δ max |
+  |---|---|---|---|---|---|
+  | `V3_..._04step_002` (reference) | 18.8% | 14.7% | 2.106 → **2.298** | 0.30 | 5.01 |
+  | `V3_..._04step_003` | 82.2% | 50.5% | 1.028 → **1.489** | 0.98 | 2.92 |
+  | `V3_..._09step_001` | 84.9% | 52.2% | 0.727 → **1.379** | 1.22 | 4.71 |
+  | `V3b_..._04step_001` | 85.3% | **62.5%** | 0.563 → **1.300** | 1.17 | 21.85 |
+  | `V3b_..._04step_002` | 72.9% | 34.5% | 4.275 → **4.550** | 5.71 | 51.92 |
+  | `V3b_..._04step_003` | 79.8% | 34.7% | 2.620 → **2.925** | 1.22 | 127.96 |
+
+  On the five batched images the median **rises 1.4–2.3×** — the old column was
+  not slightly short, it was reporting the distance to whatever interior point
+  of the solid happened to be nearest, and on a dense point cloud that is
+  always close. The reference moves least (14.7%) because its 5 µm subsample
+  leaves the fewest interior points, which is exactly why the defect looked
+  minor when it was only ever measured there.
+
+  Worth noting for [P26](#p26): the fix also *narrows* the between-image spread
+  it describes. Pre-fix medians ran 0.56–4.28 µm (7.6×); post-fix they run
+  1.30–4.55 µm (3.5×). Part of what looked like a reconstruction mismatch was
+  this defect tracking point density. The rest is real and [P26](#p26) stands.
+
+  **Verified against the one controlled before/after available.** The reference
+  is the only image with a pre-fix post-[P01](#p01) CSV. Re-measuring it
+  (`20260811_105032` → `20260812_011205`, 2,147 rows both) leaves **21 of 24
+  columns byte-identical**, including all four `curv_*` — the check that the
+  curvature path, which keeps its own `surf_mask`, was not disturbed. The other
+  two movers are not this fix: `dist_nuc_um` (4.237 → 4.875, 310 rows) and a
+  renumbered `nuc_id` reproduce [P04](#p04)'s recorded figures exactly, because
+  that CSV predated the nucleus fixes.
 
 ---
 
@@ -1407,6 +1736,35 @@ exposure is the assumption being made silently.
 **Related:** [P13](#p13) (other hard-coded tunables), [I03](#i03) (scoring the
 mesh rather than the size histogram is the better criterion).
 
+**History**
+- 2026-08-10 — opened.
+- 2026-08-12 — **the cut is now recorded and overridable, and the "never
+  checked" note above is half answered.** `pipeline.batch_mesh` takes
+  `--min-size <int>|auto|auto-raw` (`auto` = `max(otsu, 12)`, exactly what
+  `gui/cadherin.py` applies; `auto-raw` = the Otsu cut with no floor — the
+  experiment this entry asks for) and writes the resolved value, the raw Otsu
+  value and how it was chosen into `vessel_recon.json`. So the size cut is no
+  longer absent from the record.
+
+  Running it across all six saved masks, `auto_min_size_otsu` returns:
+
+  | image | Otsu cut | components ≥ 12 | mask voxels at 12 |
+  |---|---|---|---|
+  | `V3_..._04step_002` | **3** | 3,764 / 226,093 | 1,517,396 |
+  | `V3_..._04step_003` | **2** | 3,330 / 329,511 | 2,056,144 |
+  | `V3_..._09step_001` | **2** | 5,841 / 265,173 | 2,715,578 |
+  | `V3b_..._04step_001` | **2** | 3,473 / 356,494 | 1,746,715 |
+  | `V3b_..._04step_002` | **4** | 2,396 / 69,482 | 423,197 |
+  | `V3b_..._04step_003` | **2** | 2,512 / 251,045 | 435,300 |
+
+  The auto value is **2–4 on every image**, so the floor of 12 is 3–6× it
+  everywhere and the operative parameter is the constant in all six cases, not
+  just the one measured in 2026-08-10. The entry's claim generalises.
+
+  **Still open**, and nothing here changes it: the criterion is still Otsu on a
+  distribution that is not bimodal. Recording a number is not choosing a better
+  one. `auto-raw` now makes the counterfactual runnable — nobody has run it yet.
+
 ---
 
 <a id="p20"></a>
@@ -1458,6 +1816,26 @@ circumradius create surface). It would not help against *correlated* error: a
 debris clump or a neighbouring membrane votes as strongly as real wall.
 
 **Related:** [P09](#p09)(b), [P21](#p21), [I03](#i03).
+
+**History**
+- 2026-08-10 — opened.
+- 2026-08-12 — **`subsample_um` is no longer silent, and its effect is now
+  measured in isolation.** Every mesh built by `pipeline.batch_mesh` writes a
+  `vessel_recon.json` recording `subsample_um` next to the vertex counts it
+  produced, and `describe_saved` warns for any mesh that has no such file. On one
+  image with the mask held fixed, moving it 5.0 → 1.0 µm takes the mesh from
+  7,282 to 33,537 **surface** vertices and κ2's median from −0.0701 to −0.1632
+  1/µm — full table in [P26](#p26)'s History.
+
+  The coupling this entry describes is also enforced now rather than only
+  documented: `batch_mesh` warns when `alpha3d_um < 3 × subsample_um`, which is
+  the commonest route to "N verts, 0 faces". Verified — at `subsample_um = 1.0`
+  with `alpha3d_um = 0.4` it warns, and the build then fails with exactly that.
+
+  **Unchanged:** the vote-count idea in the table above is still not implemented.
+  `voxel_subsample` still keeps one representative per occupied cell and discards
+  the occupancy, and [P09](#p09)(b)'s resolution limit is still set by this knob
+  rather than by the image.
 
 ---
 
@@ -1669,6 +2047,22 @@ than absolute.
 
 **Related:** [P08](#p08)(c) (border flare, same function), [P13](#p13).
 
+**History**
+- 2026-08-10 — opened.
+- 2026-08-12 — **all four parameters are now reachable, so this is measurable
+  for the first time.** `pipeline.batch_mesh` exposes `--path-open-um`,
+  `--path-prune-um`, `--path-close-um` and `--path-target-px-um` alongside the
+  one knob that had a slider (`--path-smooth-um`), records all five in
+  `vessel_recon.json`, and `--steps path` recomputes only the centerline. The
+  premise of the entry — that these are "function defaults with no slider" —
+  no longer holds headlessly; it still holds in the GUI, where only `smooth_um`
+  is exposed.
+
+  All six images now have saved intermediates, so the "no taper image has saved
+  intermediates" blocker is gone too. **The measurement itself has not been
+  made** — sweeping `open_um` and `prune_um` on a taper image and watching where
+  the centerline ends is the next step, and it is now one command per setting.
+
 ---
 
 <a id="p24"></a>
@@ -1770,6 +2164,29 @@ other curvature column).
   projection costs anything ([P08](#p08)(e)); the caliber measurements taken to
   check a suspect cross-section are what exposed [P01](#p01)'s circular radius
   target, and the `radius_um` sweep followed from that.
+- 2026-08-12 — **the sweep in (a) is now one command, and it reproduces
+  exactly.** Curvature needs only the mesh file, so
+  `pipeline.batch_mesh --steps curvature` reads neither the image nor the mask:
+
+  ```
+  python -m pipeline.batch_mesh --dir 3d_images_folder/images/WT \
+      --steps curvature --curv-radius-um 5,10,15,20,30,40 --tag r{radius}
+  ```
+
+  Re-run on `V3_..._04step_002` it returns κ2 medians −0.0703, −0.0606, −0.0277,
+  −0.0171, −0.0097, −0.0074 — **every value in the table above, to four
+  decimals**, from a completely separate code path. The 2026-08-11 measurement is
+  reproducible and the entry's evidence stands unchanged.
+
+  Each run writes `vessel_curvature__r<radius>.npz` beside the canonical file
+  plus a `vessel_recon__r<radius>.json` recording the radius, the smoothing, the
+  mesh it was computed on and that mesh's own parameters — so the plateau test
+  this entry names as "a sharper, cheaper test than the topology and coverage
+  scores [I03](#i03) proposes" is now routine across all six images rather than a
+  bespoke script.
+
+  **This does not advance the entry.** The tool measures the plateau; it does not
+  produce a reconstruction that has one. What it removes is the cost of asking.
 
 ---
 
@@ -1853,13 +2270,22 @@ default to** — it never sets a mesh parameter. The shipped reference mesh for
 `V3_..._04step_002` was hand-tuned, and its settings JSON records values that are
 mostly *not* the defaults:
 
-| parameter | reference (`20260806` settings JSON) | widget default = what the batch used |
-|---|---|---|
-| `subsample_um` | **5.0** | **1.0** |
-| `alpha3d_um` | **15.0** | **10.0** |
-| `close_um` | **5.0** | **1.0** |
-| `min_component_um` | **253.03** | **50.0** |
-| `r_smooth_bins` | 12 | 3 |
+| parameter | reference (`20260806` settings JSON) | widget default = what the batch used | read by `alpha 3D (points)`? |
+|---|---|---|---|
+| `subsample_um` | **5.0** | **1.0** | yes |
+| `alpha3d_um` | **15.0** | **10.0** | yes |
+| `min_component_um` | **253.03** | **50.0** | yes |
+| `close_um` | 5.0 | 1.0 | **no — inert** |
+| `r_smooth_bins` | 12 | 3 | **no — inert** |
+
+> **The last column was added 2026-08-12 and it removes two rows from the
+> argument.** Both meshes were built with `alpha 3D (points)`, whose dispatch
+> reads only `subsample_um`, `alpha3d_um` and `min_component_um`
+> (`vessel_mesh.py::LIVE_PARAMS`, derived from `build_mesh`). `close_um` and
+> `r_smooth_bins` belong to the two per-slice methods and did nothing here. The
+> settings JSON records every widget regardless, so it *looks* like five
+> hand-tuned values; **three of them were.** This is the same class of error the
+> entry is about — a recorded number that shaped nothing — one level up.
 
 The effect is exactly what [P20](#p20) predicts, since `subsample_um` sets the
 point lattice:
@@ -1895,7 +2321,30 @@ that the reference mesh was hand-tuned; the values survive only in one settings
 JSON, and the two later re-exports of that image
 (`20260811_104417`, `20260811_105032`) record **only** `adhesion_postprocess`,
 because `batch_measure` does not know the mesh parameters. So the provenance of
-the one trustworthy mesh in the project is a single 2026-08-06 file.
+the best-available mesh in the project is a single 2026-08-06 file.
+
+> **Correction, 2026-08-12 (user).** This entry, and several others, lean on the
+> reference mesh as though it were a known-good target the other five should be
+> brought into line with. **It is not.** In the user's words: it is *"somewhat
+> hand tuned, but not extensively, since tuning revealed huge parameter
+> dependence — keep it since it's better than default widget slider values, but
+> don't put too much credence to it."*
+>
+> Two consequences, and they point in opposite directions from the reading above:
+>
+> - **"Standardise the five onto the reference" is not the fix.** It was never a
+>   validated setting, only a better-than-default one. Re-running the five at the
+>   reference's parameters would make the six *comparable* without making any of
+>   them *right* — and comparability across six equally-untrustworthy
+>   reconstructions is worth less than this entry implied.
+> - **The parameter dependence was observed directly at the bench, not just
+>   inferred from [P24](#p24)(a)'s sweep.** That is independent, first-hand
+>   support for [I03](#i03)'s premise, and it predates the measurements in this
+>   file. It is the strongest argument on record that these knobs need to be
+>   *scored*, not chosen.
+>
+> Keep the file — it is still the best reconstruction available and re-running
+> the batch is expensive. Stop treating it as the baseline.
 
 **Deliberately not fixed yet (user decision, 2026-08-11).** There is no known-good
 parameter set to standardise on: `min_component_um = 253.030303` is visibly tuned
@@ -1908,6 +2357,15 @@ curvature therefore needs an image load plus that file — **not** the RF predic
 which is the expensive step. There is no headless script for it today (see
 [I04](#i04)); that is the piece of work this entry implies.
 
+> **2026-08-12 — that script exists now: `pipeline/batch_mesh.py`.** It needs no
+> image load either, only the OME *header* (see [I04](#i04)'s History for what it
+> does and does not settle). It does **not** close this entry: it records
+> parameters, it does not choose them, and the five batched meshes are still
+> unattributable until they are rebuilt through it. What it changes is that an
+> unattributable mesh is now visible — `describe_saved` emits a `WARN` for any
+> `vessel_mesh.npz` with no `vessel_recon.json` beside it, so this defect cannot
+> recur silently.
+
 **Until then:** do not compare `dist_mesh_um` or any `curv_*` *between* images,
 and treat the reference image as being on a different reconstruction from the
 other five. Within-image rank remains what [P24](#p24) already allows, and no
@@ -1915,6 +2373,77 @@ more.
 
 **Related:** [P19](#p19), [P20](#p20), [P21](#p21), [P24](#p24), [I03](#i03),
 [I04](#i04).
+
+**History**
+- 2026-08-11 — opened when the five-image batch produced its first mesh.
+- 2026-08-12 — **the reference mesh is demoted from baseline to
+  best-available** on the user's correction (see the box above). The vertex-count
+  table stands; what it means changes — it is a mismatch between six untuned
+  reconstructions, not a drift away from a good one.
+- 2026-08-12 — **the vertex-count table above overstates the mismatch, and hides
+  a second one.** It quotes *total* vertices. Curvature is fitted on **surface**
+  vertices only (`cell_mesh.py:404`, `np.unique(faces)`), and `dist_mesh_um`
+  queries a KD-tree over **all** of them ([P09](#p09)(a)):
+
+  | image | total verts | surface verts | **interior** |
+  |---|---|---|---|
+  | `V3_..._04step_002` (reference) | 8,966 | 7,282 | **18.8%** |
+  | `V3_..._04step_003` | 205,961 | 36,642 | **82.2%** |
+  | `V3_..._09step_001` | 270,599 | 40,972 | **84.9%** |
+  | `V3b_..._04step_001` | 179,468 | 26,298 | **85.4%** |
+  | `V3b_..._04step_002` | 53,220 | 14,400 | **72.9%** |
+  | `V3b_..._04step_003` | 57,379 | 11,588 | **79.8%** |
+
+  So the curvature mismatch is **5×** (7,282 → 40,972 surface verts), not the
+  23–30× this entry claimed — still large, but a third of the headline. The
+  claim is corrected downward.
+
+  The `dist_mesh_um` half moves the other way and is the more serious of the
+  two. [P09](#p09)(a) measured the rejected-geometry effect as "small — median
+  understatement 0.00 µm, p90 0.37 µm", but that was measured on the **one mesh
+  where interior points are 18.8%**. On the five batched meshes they are
+  **73–85%** of the tree `dist_mesh_um` queries. Measured the same day: the
+  share of adhesions whose nearest vertex is an interior point rises 15.1% →
+  **39–75%**, and the p90 understatement 0.36 µm → **1.6–5.5 µm**. P09(a)'s
+  reassuring numbers describe the reference mesh only. Full table and the fix in
+  [P09](#p09)'s 2026-08-12 History entry — that fix needs no mesh rebuild and is
+  therefore independent of this entry.
+- 2026-08-12 (later) — **[P09](#p09)(a) landed, and it absorbed part of what
+  this entry was measuring.** With `dist_mesh_um` now taken to the mesh surface,
+  the between-image spread of its median falls from **7.6×** (0.56–4.28 µm) to
+  **3.5×** (1.30–4.55 µm). Some of the "not comparable between images" effect
+  was the interior-vertex defect tracking point density rather than the
+  reconstruction differing. The remaining 3.5× is this entry, and it stands —
+  as does everything said here about `curv_*`, which P09(a) does not touch.
+- 2026-08-12 (later still) — **the parameter effect is now measured *within one
+  image*, which the entry could not do before.** `pipeline.batch_mesh` rebuilt
+  `V3_..._04step_002` from its own saved `cadherin_labels.npz` twice — identical
+  mask (1,517,396 voxels at `min_size = 12`), identical image, only the mesh
+  knobs moved:
+
+  | | reference set (`subsample_um` 5.0, `alpha3d_um` 15.0, `min_component_um` 253.03) | widget defaults (1.0 / 10.0 / 50.0) |
+  |---|---|---|
+  | total verts | 8,966 | **166,721** |
+  | surface verts | 7,282 | **33,537** |
+  | faces | 15,786 | 70,176 |
+  | `dist_mesh_um` median | 2.298 µm | **1.625 µm** |
+  | `curv_k2` median | −0.0701 1/µm | **−0.1632 1/µm** |
+  | `path_curv_xy` median | 0.0041 1/µm | 0.0041 1/µm (unchanged) |
+
+  Both CSVs were produced by `batch_measure` over the same adhesions (n = 2,147),
+  so this isolates the reconstruction from every other source of variation —
+  where the six-image table above confounds the parameter change with a 5×
+  spread in mask size. **The surface-vertex ratio is 4.6× and κ2 more than
+  doubles**, which is the entry's claim reproduced under control.
+
+  `path_curv_xy` is identical to the last digit, and that is the useful negative:
+  the centerline is derived from the cadherin mask, not from the mesh, so it is
+  the one geometry column a mesh rebuild cannot move. Its problems are
+  [P08](#p08)'s and [P23](#p23)'s alone.
+
+  The reference-set rebuild is **byte-identical** to the `vessel_mesh.npz` the
+  GUI itself wrote on 2026-08-11, so none of this is an artifact of the new
+  headless path.
 
 ---
 
@@ -2106,6 +2635,28 @@ objective rather than something validated afterwards. This and [P21](#p21) are o
 piece of work — a reconstruction method and its calibration — and should not share
 a commit with [P01](#p01).
 
+**History**
+- 2026-08-10 — opened.
+- 2026-08-12 — **the instrument is built; the calibration is not.**
+  `pipeline/batch_mesh.py` makes all four knobs this entry names explicit,
+  recorded and cheap to vary — `--min-size` (the hidden constant,
+  [P19](#p19)), `--subsample-um`, `--alpha3d-um`, `--min-component-um` — with no
+  upper bounds, since two of the reference image's values (`subsample_um` 5.0,
+  `close_um` 5.0) sit exactly at their slider ceilings and may have been
+  truncated by the widget rather than converged. `--suggest-alpha` gives the
+  per-image alpha seed headlessly for the first time, and `--dry-run` prints what
+  actually resolved.
+
+  Cost, measured on `V3_..._04step_002`: **9.5 s** for mesh + curvature +
+  centerline end to end (0.4 s header, 5.0 s mask load, 2.1 s mesh, 1.2 s
+  curvature, 0.6 s centerline) at the reference parameters. This entry budgeted
+  "10–25 s per point" for an alpha sweep and called minutes acceptable; a coarse
+  three-parameter grid is now well inside that.
+
+  **What is still entirely missing is the objective.** Nothing computes genus,
+  coverage, parsimony or stability, and nothing scores anything. The tool makes a
+  sweep cheap; choosing from it is this entry.
+
 ---
 
 <a id="i04"></a>
@@ -2137,6 +2688,38 @@ that and could be reused.
 **Until then:** `--skip-existing` is the only safety mechanism, and it keys on
 `adhesion_instances.npz` — the *last* artifact written — so it is all-or-nothing
 per image too.
+
+**History**
+- 2026-08-11 — opened.
+- 2026-08-12 — **the vessel-geometry third of it is done, by a separate runner
+  rather than a `--steps` flag on `batch.py`.** `pipeline/batch_mesh.py` re-runs
+  the mesh, the surface curvature and the in-plane centerline for any image, in
+  any combination, from the saved `cadherin_labels.npz`.
+
+  It sidesteps the dependency problem this entry flags ("re-running one step
+  alone means loading the prerequisite artifacts first, which is `load_*`-shaped
+  work") by not going through `state` at all. Three things made that possible,
+  and all three were checked rather than assumed:
+
+  - the isotropic **scale** is `min(voxel_zyx_um)` from the OME header
+    (`io.to_isotropic`), so no pixels are decoded — ~0.3 s per image;
+  - `round(Z · pz / target)` reproduces the saved mask's Z **exactly on all six
+    images**, including the 0.9 µm `09step` file, so the same header read
+    doubles as a check that the mask belongs to the image;
+  - `cell_mesh.mesh_curvature` needs only the mesh, so a curvature-only run
+    touches neither the header nor the mask.
+
+  Drift between the GUI and the headless path is prevented structurally rather
+  than by discipline: the three closing strategies were moved into
+  `vessel_mesh.build_mesh`, and `gui/vessel_mesh.py`'s worker is now a single
+  call to it — the same arrangement `saved_check.py` was created under. Verified
+  end to end: rebuilding the reference image at its recorded parameters produces
+  an npz **byte-identical** to the one the GUI wrote, and a headless smoke test
+  of the real napari tab confirms its mesh equals a direct `build_mesh` call.
+
+  **Still open:** DAPI, the split nuclei, the cadherin mask itself and the RF
+  probability map remain all-or-nothing under `pipeline.batch`. Those are the
+  steps that need the image pixels, which is exactly why they are the ones left.
 
 ---
 

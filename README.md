@@ -281,11 +281,13 @@ bad file cannot stall the batch.
 > `<stem>_saved/` folder (proba, instances, mesh, curvature, DAPI labels, split
 > nuclei, cadherin mask, fibroblast count).
 
-> **It also runs all steps or none** — there is no `--steps` flag, and only
-> instances and measurement can be redone headlessly afterwards
-> ([I04](docs/ISSUES.md#i04)). Use `--skip-existing` if the folder already holds
-> results you want to keep: without it, images that have already been processed
-> are processed again and their `_saved` folder overwritten.
+> **It also runs all steps or none** — there is no `--steps` flag, so the DAPI,
+> cadherin and RF stages can only be redone by re-running the whole image
+> ([I04](docs/ISSUES.md#i04)). The vessel geometry is the exception: see
+> [Rebuilding the vessel geometry](#rebuilding-the-vessel-geometry-no-image-needed)
+> below. Use `--skip-existing` if the folder already holds results you want to
+> keep: without it, images that have already been processed are processed again
+> and their `_saved` folder overwritten.
 
 To get CSVs, either:
 
@@ -322,9 +324,68 @@ and saved labelling is reported and the file left alone
 | `--strict` | Exit 2 if any CSV was written with a silently blank column |
 
 Exit codes: `0` all measured, `1` at least one image failed, `2` (with
-`--strict`) something was degraded. Both batch runners print a per-image summary
-and set an exit code, so an unattended run can be checked without reading the
+`--strict`) something was degraded. Every batch runner prints a per-image summary
+and sets an exit code, so an unattended run can be checked without reading the
 log.
+
+### Rebuilding the vessel geometry (no image needed)
+
+The vessel mesh, the surface curvature and the in-plane centerline are built from
+the **saved cadherin mask**, not from the raw pixels, so they can be rebuilt
+without repeating the expensive RF predict — or, as it turns out, without
+decoding any pixels at all. The voxel size comes from the OME *header*, which
+also gives the volume shape the mask must have, so a mask from the wrong image is
+caught before anything is built.
+
+```bash
+# print what would run, resolved, and exit
+python -m pipeline.batch_mesh --dir "3d_images_folder/images/WT" --dry-run
+
+# rebuild in place at explicit parameters
+python -m pipeline.batch_mesh --dir "3d_images_folder/images/WT" \
+    --subsample-um 5.0 --alpha3d-um 15.0 --min-component-um 253.03
+
+# try a variant without touching the canonical files
+python -m pipeline.batch_mesh --dir "..." --only 04step_002 --tag experiment
+
+# P24's plateau test, across every image, in one command
+python -m pipeline.batch_mesh --dir "3d_images_folder/images/WT" \
+    --steps curvature --curv-radius-um 5,10,15,20,30,40 --tag r{radius}
+```
+
+Every knob is a flag with **no upper bound** — the sliders' ceilings are not
+physical limits, and two of the hand-tuned reference values sit exactly at
+theirs. `--from-settings <a settings or recon JSON>` replays a recorded set
+without retyping it; explicit flags still override.
+
+| Flag | Effect |
+|---|---|
+| `--steps mesh,curvature,path` | Any subset. `--steps curvature` reads only the mesh file — no image, no mask |
+| `--tag NAME` | Write `vessel_mesh__NAME.npz` siblings instead of overwriting. `{radius}` / `{smooth}` are substituted per curvature run |
+| `--min-size N\|auto\|auto-raw` | The cadherin despeckle cut. `auto` = `max(otsu, 12)`, what the GUI applies; `auto-raw` drops the floor ([P19](docs/ISSUES.md#p19)) |
+| `--curv-radius-um 5,10,15` | Comma-separated = a sweep, one output per value |
+| `--from-settings PATH` | Seed every parameter from a settings or recon JSON |
+| `--suggest-alpha` | One Delaunay per image; prints a suggested `alpha3d_um`, writes nothing |
+| `--dry-run` / `--check-only` | Resolve parameters and exit / describe the folders and exit |
+
+Each run writes a **`vessel_recon.json`** beside its outputs recording the git
+SHA, the scale and where it came from, the input mask's size and mtime, the
+resolved `min_size`, the mesh parameters the chosen method actually *read* (the
+ones it ignores are listed separately), the curvature and centerline parameters,
+and per-output counts — vertices, **surface** vertices, faces, finite κ1, median
+κ2, centerline points, branch nodes. `--check-only` prints a summary line per
+recon file, and **warns for any `vessel_mesh.npz` that has none**, since that
+mesh cannot say what produced it ([P26](docs/ISSUES.md#p26)).
+
+Two rules it enforces, both from [P12](docs/ISSUES.md#p12): everything is
+computed in memory and written only on success, so a mesh and a curvature file
+from different runs cannot coexist; and rebuilding a mesh without its curvature
+**deletes** the now-wrong-length curvature file and says so, rather than leaving
+`measure_core` to blank all four `curv_*` columns silently.
+
+This makes the parameters explicit and recorded. It does **not** make them
+right — see [P20](docs/ISSUES.md#p20), [P21](docs/ISSUES.md#p21),
+[P24](docs/ISSUES.md#p24) and [I03](docs/ISSUES.md#i03), all still open.
 
 ## Output columns
 
@@ -361,28 +422,33 @@ Summary only. **[`docs/ISSUES.md`](docs/ISSUES.md) is the authoritative list**,
 with measurements, mechanisms, and what fixing each involves.
 [`docs/audit.md`](docs/audit.md) is the frozen evidence behind them.
 
-**These describe the CSVs as exported.** Several of the defects below are now
-fixed in the code, and one image has been re-exported against the curvature and
-border-seed fixes (`V3_..._04step_002`,
-`..._adhesion_measures_20260811_105032.csv`). **Every CSV on disk predates the
-2026-08-11 nucleus fixes**, including that one. Those rows say which is which; a
-fix in the code does not retroactively fix a file already on disk. Re-export an
-image to pick a fix up.
+**These describe the CSVs as exported.** As of **2026-08-12** all six images have
+been re-exported (`..._adhesion_measures_20260812_011*.csv`, one per
+`<stem>_saved/`), and those six carry every fix that has landed so far — the
+curvature winding and orientation fix, the border-seed fix, the split-nucleus
+map and `nuc_is_fibroblast`, the fibroblast-count clearing, and the
+surface-only mesh distance. **Use those; earlier CSVs are superseded.** A fix in
+the code does not retroactively fix a file already on disk, so re-export an image
+to pick up anything landing after that date.
+
+The rows below still apply to those exports unless marked otherwise — in
+particular **both curvature measures and the mesh comparability problem are
+untouched by that re-export.**
 
 | Column(s) | Problem | ID |
 |---|---|---|
 | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **Do not use any CSV exported before 2026-08-11.** A destroyed triangle winding, plus an away-from-centroid normal flip that overrode the winding on 44% of surface vertices, made the curvature fitting frame near-random; correlation between the old column and the corrected one is ρ = +0.069 (54.8% sign agreement — a coin flip). **Fixed 2026-08-10**: the columns are now self-consistent (κ2 99.5% consistent sign on the re-export, face-normal coherence 0.21 → 0.97). Re-export any other image before using these columns. **But see the row below — self-consistent is not the same as measuring the vessel** | [P01](docs/ISSUES.md#p01) |
 | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **The value depends on the scale you fit it at, with no plateau.** Sweeping the curvature fit radius on the shipped mesh moves the implied vessel radius 14.2 → 134.7 µm as `radius_um` goes 5 → 40, tracking the fit window at ~3×. A real tube gives the same κ at any window well below its radius. Independently, the vessel measures ~86 µm deep and ~140 µm wide, so its radius is of order 40 µm and the shipped κ2 (R = 14.2 µm) is 3–5× too curved to be its circumferential curvature. These columns currently describe the reconstruction's roughness at the chosen scale, not the vessel. Not fixable by tuning the slider | [P24](docs/ISSUES.md#p24) |
 | `ratio_clover_ruby` | Driven by the ruby channel's noise floor, not by tension — ρ(ratio, ruby) = −0.773 vs ρ(ratio, clover) = +0.068. Spread exceeds what the sensor can physically produce. Treat as a rank at best | [P02](docs/ISSUES.md#p02) |
-| *every column* | Adhesion detection is depth-truncated: the far vessel wall yields 37% of the near wall's detection density per unit surface area | [P03](docs/ISSUES.md#p03) |
+| *every column* | Adhesion detection is depth-truncated — **confirmed in all six images (2026-08-12)**: the far vessel wall yields **19–77%** of the near wall's detection density per unit surface area, in the same direction every time. Median adhesion volume does *not* fall with depth, so these are adhesions going undetected, not shrinking. The magnitude varies 4× between images, so it is not correctable with a single coefficient | [P03](docs/ISSUES.md#p03) |
 | `nuc_id`, `dist_nuc_um` | **Two different nucleus segmentations, so `nuc_id` means different things before and after 2026-08-11.** Older CSVs' `nuc_id` indexes *unsplit DAPI connected components* — 362 of them, median 81.7 µm³, i.e. mostly sub-nuclear debris — and could not be joined to the fibroblast count at all. **Fixed 2026-08-11**: it now indexes the 276 watershed-split nuclei and carries `nuc_is_fibroblast`. `dist_nuc_um` rose (median 4.24 → 4.88 µm) because the debris is gone. **Do not pool or diff `nuc_id` across that boundary**; the `nucleus_map` key in each settings JSON says which map a CSV used | [P04](docs/ISSUES.md#p04) |
 | `n_fibroblasts`, `nuc_is_fibroblast` | The fibroblast/endothelial classifier is unvalidated; the reported fraction swings ~2× across one slider step. Since 2026-08-11 that call is attached to **every row**, not just two image-level scalars — it is now joinable, which is not the same as correct | [P05](docs/ISSUES.md#p05) |
 | `n_fibroblasts`, `n_nuclei_total` | **Only in CSVs exported before 2026-08-11.** The count was never cleared between images, so an image whose nuclei step failed silently inherited the previous image's counts. Only single-image runs are safe from this; a batch run is not. **Fixed 2026-08-11** | [P25](docs/ISSUES.md#p25) |
-| `ratio_clover_ruby` | Drifts with imaging depth (ρ = −0.187); on this geometry depth is confounded with position along the vessel | [P06](docs/ISSUES.md#p06) |
+| `ratio_clover_ruby` | Correlates with imaging depth, but **the sign flips between images** (ρ −0.241 to +0.307 across the six, negative in only 2). That rules out simple optical attenuation, which would push the same way every time, and points instead at the geometry: the vessel dives through the stack, so depth is partly position along the vessel, and which way is arbitrary per field. Do not apply a depth correction with a fixed sign | [P06](docs/ISSUES.md#p06) |
 | `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries | `peak_local_max` discarded watershed seeds near the volume edge, so nuclei touching the stack boundary were dropped and elongated adhesions failed to split. **Fixed 2026-08-10**; on the re-exported image the counts move 273 → 276 nuclei and 2,092 → 2,147 adhesions (`n_fibroblasts` happened not to change — all three recovered nuclei were non-fibroblast, which is one image, not a general result). Re-export any other image to pick this up | [P07](docs/ISSUES.md#p07) |
 | `path_curv_xy` | **Fitted over a 20 µm window on a vessel ~140 µm wide**, so it largely measures wobble in the extracted centerline rather than bending of the vessel — the skeleton is only ~4.5 vessel-widths long in a field ~2.4 widths across. On top of that: contaminated within `smooth_um` of a branch (filter on `dist_branch_um`, but guard for NaN or non-branched images lose every row); ~10× inflated within 5 µm of the xy field boundary, where 42% of the highest-κ points sit; and unsigned, so inside and outside of a bend are indistinguishable | [P08](docs/ISSUES.md#p08) |
-| `dist_mesh_um`, `curv_*` | Measured to a ~2 µm-spaced point cloud including geometry the mesh rejected; curvature is assigned with no distance limit. The point cloud's resolution is set by `subsample_um` (5.0 in the shipped run — a 169:1 reduction), not by the image | [P09](docs/ISSUES.md#p09), [P20](docs/ISSUES.md#p20) |
-| `dist_mesh_um`, `curv_*` | **Not comparable *between* images.** The headless batch builds every mesh at the widget defaults, but the one hand-tuned reference image used `subsample_um = 5.0` against the default 1.0 — giving it 8,966 mesh vertices where the batched images have 53k–271k. Vertex count also varies 5× between images at *identical* settings, tracking cadherin mask size. Within-image rank only | [P26](docs/ISSUES.md#p26) |
+| `dist_mesh_um`, `curv_*` | **Partly fixed 2026-08-12.** `dist_mesh_um` used to measure to *every* mesh vertex, including the many that sit strictly inside the alpha-shape solid and belong to no face — 73–85% of them on five of the six images, so 35–63% of adhesions were measuring their distance to a point buried in the wall. It now measures to the surface only, and the median rose 1.4–2.3× on those five. Still open: the vertices are a ~2 µm-spaced point cloud whose resolution is set by `subsample_um`, not by the image, and curvature is still assigned with no maximum distance | [P09](docs/ISSUES.md#p09), [P20](docs/ISSUES.md#p20) |
+| `dist_mesh_um`, `curv_*` | **Not comparable *between* images.** The headless batch builds every mesh at the widget defaults, while one image was built at hand-tuned values (`subsample_um = 5.0` against the default 1.0) — 7,282 surface vertices against 11k–41k. Vertex count also varies 5× between images at *identical* settings, tracking cadherin mask size. Rebuilding **one image** both ways, with its mask held fixed, moves the surface-vertex count 4.6× (7,282 → 33,537), `dist_mesh_um`'s median 2.30 → 1.63 µm and κ2's −0.070 → −0.163 1/µm — the parameters alone, nothing else changed. Note the hand-tuned image is **not** a known-good target — it was tuned lightly and the exercise mainly revealed how strongly these outputs depend on the parameters, which is the problem itself. Within-image rank only | [P26](docs/ISSUES.md#p26) |
 | `force_*_pN` | Blank by design without a FRET calibration. If you configure one, the numbers are only as good as your calibration | [P18](docs/ISSUES.md#p18) |
 
 ### Before drawing any conclusion from this CSV

@@ -86,17 +86,26 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
 - `denoise.py` — Otsu / Niblack / Sauvola / Bernsen thresholding, size filtering.
 - `rf.py` — random-forest voxel classifier + instance labeling.
 - `cell_mesh.py` — per-cell surfaces, vertex normals, quadric surface curvature.
-- `vessel_mesh.py` — vessel surface (alpha shape) from the cadherin mask.
+- `vessel_mesh.py` — vessel surface from the cadherin mask (polar / 2D alpha /
+  3D alpha). **`build_mesh` is the single dispatch point** and both the napari
+  tab and `batch_mesh` call it, so the interactive and headless paths cannot
+  drift — the same doctrine as `saved_check.py`. `LIVE_PARAMS` says which knobs
+  each method actually reads; the rest are inert and must be recorded as such.
 - `centerline.py` — in-plane centerline + path curvature + branch nodes.
 - `measure_core.py` — headless per-adhesion measurement. **Never prints**; it
   returns its degradation warnings in `result["notes"]` for the caller to print.
 - `saved_check.py` — the consistency checks over `_saved` intermediates, as pure
   functions (numpy in, `list[str]` out; no Qt, no napari, no `state`). Both the
   GUI and the headless path call these, so a warning is one string, not two that
-  drift apart. Also `describe_saved`, behind `batch_measure --check-only`.
-- `batch.py`, `batch_measure.py`, `batch_postprocess.py` — headless runners.
-  **`batch.py` writes no CSV** (stops before Measure); `batch_measure.py` does.
-  Both print a per-image summary and set an exit code.
+  drift apart. Also `describe_saved`, behind `batch_measure --check-only` and
+  `batch_mesh --check-only`.
+- `batch.py`, `batch_measure.py`, `batch_mesh.py`, `batch_postprocess.py` —
+  headless runners. **`batch.py` writes no CSV** (stops before Measure);
+  `batch_measure.py` does. `batch_mesh.py` rebuilds only the vessel geometry
+  (mesh / surface curvature / centerline) from the saved cadherin mask plus the
+  OME *header* — no pixels decoded, no napari — and writes a `vessel_recon.json`
+  recording what produced each mesh. All print a per-image summary and set an
+  exit code.
 - `view.py` — the napari app.
 
 **GUI (`pipeline/gui/`, one module per tab):** `loader`, `display`, `nuclei`,
@@ -128,6 +137,12 @@ Two machines, two separate environments that happen to share a name:
   task, propose the plan, ask clarifying questions, wait for approval.
 - Tunable parameters → **magicgui sliders in napari** for live tuning,
   not hard-coded defaults. The user wants to see and adjust.
+- **The GUI and the headless path must both work and must not drift.** When both
+  need the same computation, extract it into the core package and have both call
+  it (`saved_check.py`, `vessel_mesh.build_mesh`). Never write the second copy.
+  Headless equivalents of a slider are argparse flags with **no upper bound** —
+  a slider ceiling is a widget limit, not a physical one, and hand-tuned values
+  sitting exactly at one may have been truncated rather than converged.
 - Keep the pipeline narrow. Resist adding abstractions for hypothetical
   future data types — that's exactly what sank the previous version.
 - FRET math is load-bearing and copied from the old pipeline; treat it

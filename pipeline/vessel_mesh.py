@@ -16,8 +16,12 @@ Three closing strategies (compared in the GUI tab):
   3. 3D alpha on the cadherin point cloud — reuses `cell_mesh.alpha_shape_faces`;
      bridges gaps in 3D and handles branch + curvature natively.
 
-For the two per-slice methods, the GUI runs the fill on xz and yz slicing
-independently and combines (AND = conservative, OR = complete).
+For the two per-slice methods, the fill runs on xz and yz slicing independently
+and combines (AND = conservative, OR = complete).
+
+`build_mesh` at the bottom is the single entry point that dispatches the three:
+the napari tab and the headless `batch_mesh` runner both call it, so the two
+paths cannot drift.
 
 Everything here is isotropic: the loader already runs `to_isotropic`, so the
 incoming `scale` is uniform µm/voxel, marching-cubes spacing is uniform, and
@@ -34,6 +38,7 @@ from scipy import ndimage as ndi
 from scipy.spatial import Delaunay
 
 from . import gpu
+from .cell_mesh import alpha_shape_faces, filter_faces_by_extent
 
 
 # --- point cloud -------------------------------------------------------------
@@ -269,3 +274,105 @@ def mesh_from_volume(filled3d, scale):
         return empty
     values = np.linalg.norm(verts - verts.mean(0), axis=1)
     return verts, faces, values
+
+
+# --- the one build entry point -----------------------------------------------
+#
+# `build_mesh` below is the *only* place the three strategies are dispatched.
+# The GUI tab (`gui/vessel_mesh.py`) and the headless runner
+# (`batch_mesh.py`) both call it, so the interactive and unattended paths
+# cannot drift into building different meshes from the same parameters — the
+# same doctrine `saved_check.py` was written under, one implementation and two
+# callers. The GUI re-exports the constants below for its ComboBox choices.
+
+METHOD_POLAR = "polar (per-slice)"
+METHOD_ALPHA2D = "alpha 2D (per-slice)"
+METHOD_ALPHA3D = "alpha 3D (points)"
+METHODS = [METHOD_POLAR, METHOD_ALPHA2D, METHOD_ALPHA3D]
+ORIENTATIONS = ["xz", "yz", "both (AND)", "both (OR)"]
+
+# Which parameters each method actually reads. Derived from the dispatch in
+# `build_mesh` and kept beside it so the two cannot disagree: a caller that
+# records every knob it was handed would otherwise record values that did
+# nothing (`docs/ISSUES.md` P26 — `close_um` and `r_smooth_bins` were both
+# recorded as "hand-tuned" for a mesh built with alpha 3D, which reads neither).
+LIVE_PARAMS = {
+    METHOD_POLAR: ("orientation", "n_bins", "r_smooth_bins", "close_um",
+                   "min_component_um"),
+    METHOD_ALPHA2D: ("orientation", "alpha2d_um", "fill_lumen", "close_um",
+                     "min_component_um"),
+    METHOD_ALPHA3D: ("subsample_um", "alpha3d_um", "min_component_um"),
+}
+
+ALL_PARAMS = ("method", "orientation", "n_bins", "r_smooth_bins", "alpha2d_um",
+              "subsample_um", "alpha3d_um", "fill_lumen", "close_um",
+              "min_component_um")
+
+
+def live_params(method: str) -> tuple[str, ...]:
+    """The parameters `method` reads. Unknown method → every parameter."""
+    return LIVE_PARAMS.get(method, tuple(p for p in ALL_PARAMS if p != "method"))
+
+
+def _per_slice(fill_fn, mask, orientation) -> np.ndarray:
+    """Run a per-slice fill over the requested orientation(s) and combine."""
+    if orientation in ("xz", "yz"):
+        return fill_fn(mask, orientation)
+    a = fill_fn(mask, "xz")
+    b = fill_fn(mask, "yz")
+    mode = "and" if "AND" in orientation else "or"
+    return combine(a, b, mode)
+
+
+def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
+               alpha2d_um, subsample_um, alpha3d_um, fill_lumen, close_um,
+               min_component_um):
+    """Build the vessel surface from a cadherin mask. Pure: no Qt, no viewer.
+
+    `mask` is any array whose non-zero voxels are wall (the filtered cadherin
+    mask); `scale` is the isotropic µm/voxel triple. Returns
+    ``(kind, verts, faces, values)`` where `kind` is:
+
+      - ``"empty"``  — the mask has no foreground; the other three are None.
+      - ``"mesh"``   — marching cubes on a filled volume (polar / alpha 2D).
+      - ``"points"`` — the alpha shape over the subsampled point cloud, so
+        `verts` are the cadherin points themselves, most of which end up
+        interior to the solid (`docs/ISSUES.md` P09(a), P21).
+
+    Callers must still check for 0 vertices and 0 faces: both are ordinary
+    outcomes of parameters that are too tight, not errors.
+
+    Not every argument is read — see `LIVE_PARAMS`. Alpha 3D ignores
+    `orientation`, `n_bins`, `r_smooth_bins`, `alpha2d_um`, `fill_lumen` and
+    `close_um` entirely.
+    """
+    mask = np.asarray(mask) > 0
+    if not mask.any():
+        return ("empty", None, None, None)
+    if method == METHOD_POLAR:
+        filled = _per_slice(
+            lambda m, ax: polar_fill_volume(
+                m, ax, scale, int(n_bins), int(r_smooth_bins)),
+            mask, orientation,
+        )
+        filled = close_volume(filled, scale[0], float(close_um))
+        verts, faces, vals = mesh_from_volume(filled, scale)
+        faces = filter_faces_by_extent(verts, faces, float(min_component_um))
+        return ("mesh", verts, faces, vals)
+    if method == METHOD_ALPHA2D:
+        filled = _per_slice(
+            lambda m, ax: alpha_fill_volume(
+                m, ax, scale, float(alpha2d_um), fill_lumen=fill_lumen),
+            mask, orientation,
+        )
+        filled = close_volume(filled, scale[0], float(close_um))
+        verts, faces, vals = mesh_from_volume(filled, scale)
+        faces = filter_faces_by_extent(verts, faces, float(min_component_um))
+        return ("mesh", verts, faces, vals)
+    # 3D alpha on the subsampled cadherin point cloud.
+    pts = voxel_subsample(mask_to_points_um(mask, scale), float(subsample_um))
+    faces = alpha_shape_faces(pts, float(alpha3d_um))
+    faces = filter_faces_by_extent(pts, faces, float(min_component_um))
+    vals = (np.linalg.norm(pts - pts.mean(0), axis=1)
+            if len(pts) else np.zeros((0,)))
+    return ("points", pts, faces, vals)

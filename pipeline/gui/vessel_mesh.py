@@ -21,31 +21,24 @@ from magicgui.widgets import (
 )
 from napari.qt.threading import thread_worker
 
-from ..cell_mesh import (
-    alpha_shape_faces,
-    filter_faces_by_extent,
-    mesh_curvature,
-    suggest_alpha_um,
-    tet_circumradii,
-)
+from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
 from ..centerline import vessel_path_curvature_xy
 from ..saved_check import curvature_notes
-from ..vessel_mesh import (
-    alpha_fill_volume,
-    close_volume,
-    combine,
+# The method constants and the build itself live in the core module so the
+# headless `pipeline.batch_mesh` runner builds the *same* mesh from the same
+# parameters. Re-exported here (the ComboBox choices below read them, and other
+# modules import them from this one).
+from ..vessel_mesh import (  # noqa: F401  (re-export)
+    METHOD_ALPHA2D,
+    METHOD_ALPHA3D,
+    METHOD_POLAR,
+    METHODS,
+    ORIENTATIONS,
+    build_mesh,
     mask_to_points_um,
-    mesh_from_volume,
-    polar_fill_volume,
     voxel_subsample,
 )
 from .widgets import Histogram, call_all, finite_surface, with_after
-
-METHOD_POLAR = "polar (per-slice)"
-METHOD_ALPHA2D = "alpha 2D (per-slice)"
-METHOD_ALPHA3D = "alpha 3D (points)"
-METHODS = [METHOD_POLAR, METHOD_ALPHA2D, METHOD_ALPHA3D]
-ORIENTATIONS = ["xz", "yz", "both (AND)", "both (OR)"]
 
 LAYER_NAME = "Vessel mesh"
 
@@ -64,16 +57,6 @@ def _cadh_mask_array(state):
     # coarsest level. Use the public `.multiscale` flag to grab full-res.
     data = layer.data
     return data[0] if layer.multiscale else data
-
-
-def _per_slice(fill_fn, mask, orientation) -> np.ndarray:
-    """Run a per-slice fill over the requested orientation(s) and combine."""
-    if orientation in ("xz", "yz"):
-        return fill_fn(mask, orientation)
-    a = fill_fn(mask, "xz")
-    b = fill_fn(mask, "yz")
-    mode = "and" if "AND" in orientation else "or"
-    return combine(a, b, mode)
 
 
 def build(state, viewer) -> Container:
@@ -136,36 +119,14 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            mask = np.asarray(arr) > 0
-            if not mask.any():
-                return ("empty", None, None, None)
-            if method == METHOD_POLAR:
-                filled = _per_slice(
-                    lambda m, ax: polar_fill_volume(
-                        m, ax, scale, int(n_bins), int(r_smooth_bins)),
-                    mask, orientation,
-                )
-                filled = close_volume(filled, scale[0], float(close_um))
-                verts, faces, vals = mesh_from_volume(filled, scale)
-                faces = filter_faces_by_extent(verts, faces, float(min_component_um))
-                return ("mesh", verts, faces, vals)
-            if method == METHOD_ALPHA2D:
-                filled = _per_slice(
-                    lambda m, ax: alpha_fill_volume(
-                        m, ax, scale, float(alpha2d_um), fill_lumen=fill_lumen),
-                    mask, orientation,
-                )
-                filled = close_volume(filled, scale[0], float(close_um))
-                verts, faces, vals = mesh_from_volume(filled, scale)
-                faces = filter_faces_by_extent(verts, faces, float(min_component_um))
-                return ("mesh", verts, faces, vals)
-            # 3D alpha on the subsampled cadherin point cloud.
-            pts = voxel_subsample(mask_to_points_um(mask, scale), float(subsample_um))
-            faces = alpha_shape_faces(pts, float(alpha3d_um))
-            faces = filter_faces_by_extent(pts, faces, float(min_component_um))
-            vals = (np.linalg.norm(pts - pts.mean(0), axis=1)
-                    if len(pts) else np.zeros((0,)))
-            return ("points", pts, faces, vals)
+            # One call into the core module — the identical build the headless
+            # `pipeline.batch_mesh` runs, so the two paths cannot diverge.
+            return build_mesh(
+                arr, scale, method=method, orientation=orientation,
+                n_bins=n_bins, r_smooth_bins=r_smooth_bins,
+                alpha2d_um=alpha2d_um, subsample_um=subsample_um,
+                alpha3d_um=alpha3d_um, fill_lumen=fill_lumen,
+                close_um=close_um, min_component_um=min_component_um)
 
         def _done(result):
             kind, verts, faces, vals = result

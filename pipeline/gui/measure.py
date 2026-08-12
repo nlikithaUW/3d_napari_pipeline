@@ -15,7 +15,8 @@ from scipy.spatial import KDTree
 from ..fret import background_subtract
 from ..saved_check import (
     centerline_notes, curvature_notes, force_notes, mesh_notes, native_notes,
-    nuclei_notes, ratio_dropout_note, volume_shape_notes,
+    nuclei_notes, ratio_dropout_note, surface_verts_for_distance,
+    volume_shape_notes,
 )
 from .widgets import call_all, with_after
 
@@ -72,6 +73,9 @@ def build(state, viewer):
 
         force_vol = state.get("force_vol")
         vessel_verts = state["vessel_mesh_cache"]["verts"]
+        # Faces restrict dist_mesh_um to surface vertices (P09a). Captured with
+        # the verts so the two always come from the same mesh.
+        vessel_faces = (state.get("vessel_mesh_cache") or {}).get("faces")
         # The watershed-split nuclei when available, else the unsplit DAPI
         # components (P04). Captured into locals here, before the worker, so
         # they are closed over rather than re-read off `state` on another
@@ -220,7 +224,13 @@ def build(state, viewer):
                                         np.shape(nuc_labels_full),
                                         "the adhesion label volume",
                                         labels.shape)
-            vessel_tree = KDTree(vessel_verts)
+            # Measure to the mesh surface, not to interior points of the
+            # alpha-shape solid (P09a). `mesh_nn_idx` below is unused, so this
+            # changes distances only — nothing is looked up by vertex index.
+            dist_verts, dist_notes = surface_verts_for_distance(vessel_verts,
+                                                                vessel_faces)
+            notes += dist_notes
+            vessel_tree = KDTree(dist_verts)
 
             # Step 6 — nucleus KD-tree (subsampled every 3rd voxel)
             nuc_sub = nuc_labels_full[::3, ::3, ::3]

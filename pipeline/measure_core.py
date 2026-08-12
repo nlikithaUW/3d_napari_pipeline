@@ -22,7 +22,8 @@ from scipy.spatial import cKDTree as KDTree
 from .fret import background_subtract
 from .saved_check import (
     centerline_notes, curvature_notes, force_notes, mesh_notes, native_notes,
-    nuclei_notes, ratio_dropout_note, volume_shape_notes,
+    nuclei_notes, ratio_dropout_note, surface_verts_for_distance,
+    volume_shape_notes,
 )
 
 
@@ -44,11 +45,19 @@ def _bs_per_z(vol: np.ndarray) -> np.ndarray:
 
 def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale,
                          clover_native, ruby_native, raw_voxel, curvature,
-                         centerline, nuc_ids=None, nuc_is_fib=None):
+                         centerline, nuc_ids=None, nuc_is_fib=None,
+                         vessel_faces=None):
     """Return the per-adhesion measurement dict (or None if no adhesions).
 
     ``force_vol`` may be None when FRET is not configured; the force columns are
     then all-NaN and export blank.
+
+    ``vessel_faces`` are the mesh faces. Given them, ``dist_mesh_um`` is
+    measured to the mesh *surface* (vertices carrying at least one face);
+    without them it falls back to every vertex, which on an alpha-shape solid
+    includes points buried inside the wall and reads short (`docs/ISSUES.md`
+    P09(a)). The fallback is the pre-2026-08-12 behaviour and warns, so an old
+    caller degrades loudly rather than changing answers in silence.
 
     ``nuc_ids`` / ``nuc_is_fib`` are the per-nucleus label ids and their
     fibroblast classification (``nuclei_split.npz``). Given both, ``nuc_id`` can
@@ -129,7 +138,13 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
     notes += volume_shape_notes("the nucleus label volume",
                                 np.shape(nuc_labels_full),
                                 "the adhesion label volume", labels.shape)
-    vessel_tree = KDTree(vessel_verts)
+    # dist_mesh_um measures to the mesh surface, not to interior points of the
+    # alpha-shape solid (P09a). `mesh_nn_idx` below is unused, so restricting
+    # the tree changes distances only — nothing is looked up by vertex index.
+    dist_verts, dist_notes = surface_verts_for_distance(vessel_verts,
+                                                        vessel_faces)
+    notes += dist_notes
+    vessel_tree = KDTree(dist_verts)
     nuc_sub = nuc_labels_full[::3, ::3, ::3]
     nuc_vox = np.argwhere(nuc_sub > 0)
     nuc_ids_sub = nuc_sub[nuc_vox[:, 0], nuc_vox[:, 1], nuc_vox[:, 2]]

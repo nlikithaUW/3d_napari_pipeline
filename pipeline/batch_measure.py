@@ -178,7 +178,12 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
         labels = np.load(saved / "adhesion_instances.npz")["instances"]
     else:
         labels = _standard_instances(saved, rewrite=rewrite_instances)
-    vessel_verts = np.load(saved / "vessel_mesh.npz")["verts"]
+    with np.load(saved / "vessel_mesh.npz") as _vm:
+        vessel_verts = _vm["verts"]
+        # Faces are what restrict dist_mesh_um to the mesh surface (P09a). A
+        # folder whose npz predates them still measures, to every vertex, and
+        # warns rather than silently reading short.
+        vessel_faces = _vm["faces"] if "faces" in _vm else None
 
     # Nucleus map: the watershed-split nuclei when they exist, else the unsplit
     # DAPI components (P04). The fallback is the backward-compatible path for a
@@ -233,7 +238,8 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     result = compute_measurements(labels, force_vol, vessel_verts, dapi_labels,
                                   scale, clover_native, ruby_native, raw_voxel,
                                   curvature, centerline, nuc_ids=nuc_ids,
-                                  nuc_is_fib=nuc_is_fib)
+                                  nuc_is_fib=nuc_is_fib,
+                                  vessel_faces=vessel_faces)
     if result is None:
         print("    no adhesions; nothing written.", flush=True)
         return "empty", []
@@ -282,7 +288,8 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
         json.dump(meta, fh, indent=2, default=str)
     print(f"    -> {n} adhesions; {csv_path.name} + settings JSON written.",
           flush=True)
-    del force_vol, clover_native, ruby_native, labels, vessel_verts, dapi_labels
+    del force_vol, clover_native, ruby_native, labels, vessel_verts
+    del vessel_faces, dapi_labels
     gc.collect()
     return ("degraded" if notes else "ok"), notes
 

@@ -173,6 +173,47 @@ def mesh_notes(vessel_verts) -> list[str]:
     return []
 
 
+def surface_verts_for_distance(vessel_verts, vessel_faces):
+    """The vertex set ``dist_mesh_um`` should measure to, plus any notes.
+
+    Returns ``(verts, notes)``. ``verts`` is the subset of ``vessel_verts``
+    referenced by at least one face — the mesh *surface* — or all of them when
+    the faces are unavailable or unusable.
+
+    **Why this is not just ``vessel_verts``** (`docs/ISSUES.md` P09(a)). The
+    default alpha-3D method returns the boundary of a *solid*, so many vertices
+    lie strictly inside it and belong to no face. Measuring an adhesion's
+    distance to the nearest such vertex measures to a point buried in the wall,
+    not to the wall. Measured 2026-08-12 across all six images, interior
+    vertices are 18.8% of the hand-tuned reference mesh but **73–85%** of the
+    batched ones, where they capture 39–75% of all nearest-vertex lookups.
+
+    This deliberately uses ``np.unique(faces)`` rather than the ``surf_mask``
+    the curvature block derives from ``np.isfinite(k1)``. That mask means
+    "curvature was computable here" and is absent whenever the curvature file is
+    missing or stale — a degradation P12 reports — so reusing it would silently
+    couple ``dist_mesh_um`` to a file it has nothing to do with. Faces ship with
+    the mesh and are always present.
+    """
+    v = np.asarray(vessel_verts)
+    if vessel_faces is None:
+        return v, ["WARN: no mesh faces available, so dist_mesh_um is measured "
+                   "to every mesh vertex including interior ones "
+                   "(docs/ISSUES.md P09a) — it will read short."]
+    f = np.asarray(vessel_faces)
+    if f.size == 0 or f.ndim != 2 or f.shape[1] != 3:
+        return v, [f"WARN: mesh faces have shape {f.shape}, expected (M, 3) — "
+                   f"dist_mesh_um falls back to every vertex, including "
+                   f"interior ones (docs/ISSUES.md P09a)."]
+    surf = np.unique(f)
+    if surf.size == 0 or int(surf.max()) >= v.shape[0]:
+        return v, [f"WARN: mesh faces index up to vertex {int(surf.max())} but "
+                   f"there are {v.shape[0]} vertices — faces and verts are not "
+                   f"from the same mesh; dist_mesh_um falls back to every "
+                   f"vertex."]
+    return v[surf], []
+
+
 def volume_shape_notes(name: str, shape, ref_name: str, ref_shape) -> list[str]:
     """Generic 'these two volumes should be the same image' check."""
     a, b = tuple(shape), tuple(ref_shape)

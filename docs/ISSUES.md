@@ -87,6 +87,7 @@ true of the code and data on that date and may not be true now.
 | [P23](#p23) | Centerline preprocessing amputates tapering vessels | S2 | open |
 | [P24](#p24) | `curv_*` has no scale-independent value — `radius_um` sets the answer | S1 | open |
 | [P25](#p25) | `fibroblast_count` never cleared — a failed image inherits the previous one's counts | S1 | **fixed** |
+| [P26](#p26) | Batch builds vessel meshes at widget defaults; the five new images do not match the reference | S2 | open |
 | [I01](#i01) | Progress / completion bars for long-running operations | idea | open |
 | [I02](#i02) | Fibroblast / endothelial scatter diagnostic | idea | open |
 | [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open |
@@ -157,6 +158,38 @@ six-image design in [Analysis notes](#analysis-notes).
 > Run `python -m pipeline.batch_measure --dir <dir> --check-only` after the batch
 > and before measuring: it reports which columns would come out blank in about a
 > second per folder.
+
+**Update, 2026-08-11 (later) — the batch has run. All six images now have
+`_saved` intermediates.** 5 of 5 processed, 0 skipped, no step failures;
+`--check-only` reports **0 warnings across all six folders**. `nuclei_split.npz`
+was regenerated for the reference image afterwards, as planned, so the P04 join
+is available for every image.
+
+Two things came out of it, and they pull in opposite directions:
+
+- **[P05](#p05) now has cross-image evidence for the first time** — the
+  fibroblast fraction spans 5.0%–14.9% (3.0×) across six images of one
+  condition, the same order as the within-image slider swing. The two cannot
+  currently be separated.
+- **[P26](#p26) — new.** The batch built every mesh at *widget defaults*, but the
+  reference image's mesh was hand-tuned (`subsample_um` 5.0 vs the default 1.0,
+  and three more). The five new meshes carry 23–30× more vertices, so
+  `dist_mesh_um` and `curv_*` are **not comparable between the reference and the
+  rest**. Deliberately left open: there is no known-good parameter set to
+  standardise on, which is [I03](#i03)'s entire premise.
+
+**No CSVs have been exported yet, on purpose.** Measuring now would bake the
+default-mesh geometry into six exports that would then need redoing, and this
+project already has three CSVs in one folder causing exactly that confusion
+(see [P01](#p01)'s note). Run `batch_measure` once [P26](#p26) is decided. The
+non-geometry columns are unaffected either way, so an interim measure is
+defensible if the tension and nucleus columns are wanted sooner — just expect to
+re-export.
+
+So the queue is now **P26 (+ the headless mesh rebuild it needs, [I04](#i04)) →
+P03 → P21/I03 (+ P24) → P02 → P08/P09/P10**. [P03](#p03), [P06](#p06),
+[P19](#p19) and [P23](#p23) are unblocked *today* on everything that does not
+depend on the mesh — the five images they were waiting for now exist.
 
 ---
 
@@ -674,6 +707,33 @@ entry that was retired).
 - 2026-08-10 — the "over-splitting inflates `n_nuclei_total`" bullet split out
   and closed as [P16](#p16) (invalid); the shell-shape and border-seed mechanisms
   added from the audit.
+- 2026-08-11 — **first cross-image measurement.** Until the five-image batch ran,
+  the classifier had only ever been applied to one image, so every statement in
+  this entry rested on within-image slider behaviour. All six now:
+
+  | image | VnTs+ / nuclei | fraction |
+  |---|---|---|
+  | `V3_..._04step_002` | 27 / 276 | 9.8% |
+  | `V3_..._04step_003` | 13 / 259 | **5.0%** |
+  | `V3_..._09step_001` | 47 / 315 | **14.9%** |
+  | `V3b_..._04step_001` | 18 / 230 | 7.8% |
+  | `V3b_..._04step_002` | 29 / 290 | 10.0% |
+  | `V3b_..._04step_003` | 17 / 174 | 9.8% |
+
+  **A 3.0× spread across six images of one condition** (median 9.8%). This is
+  *not* by itself evidence that the classifier is wrong — the real fibroblast
+  fraction may genuinely vary between fields, and the threshold is
+  background-relative so it adapts per image. It is recorded because it sets the
+  scale of the problem: the between-image spread is the same order as the ~2×
+  within-image swing across one slider step, so **the two cannot currently be
+  told apart**. Any per-image analysis that conditions on cell type inherits
+  that.
+
+  The highest fraction is `09step_001`, the 0.9 µm z-spacing file. With one
+  image at that spacing it is not separable from field-to-field variation, but
+  it is the direction a coarser z would push a perinuclear-shell measurement,
+  and it should not be pooled without checking.
+
 - 2026-08-11 — **this entry got wider, not narrower, when [P04](#p04) was
   fixed.** The classification now reaches the CSV per adhesion as
   `nuc_is_fibroblast`, so an unvalidated call that previously affected only two
@@ -1770,6 +1830,91 @@ develop this failure mode.
 **Related:** [P04](#p04) (found while tracing it), [P07](#p07) (the `27/276`
 figures above), [P12](#p12) (the same "unattended run, silent wrong number"
 class).
+
+---
+
+<a id="p26"></a>
+## P26 — The batch builds vessel meshes at widget defaults, so the five new images do not match the reference
+
+| | |
+|---|---|
+| **Status** | open (decision deferred deliberately — see below) |
+| **Severity** | S2 |
+| **Opened** | 2026-08-11 |
+| **Last verified** | 2026-08-11 |
+| **Resolved** | — |
+| **Where** | `pipeline/gui/vessel_mesh.py:96-106` (the `controls` defaults), `pipeline/batch.py::_RUN_STEPS` |
+| **Affects** | `dist_mesh_um` and all four `curv_*`, **across images** |
+
+Found when the five-image batch produced its first mesh.
+
+`pipeline.batch` drives the GUI's `run_*` steps with **whatever the widgets
+default to** — it never sets a mesh parameter. The shipped reference mesh for
+`V3_..._04step_002` was hand-tuned, and its settings JSON records values that are
+mostly *not* the defaults:
+
+| parameter | reference (`20260806` settings JSON) | widget default = what the batch used |
+|---|---|---|
+| `subsample_um` | **5.0** | **1.0** |
+| `alpha3d_um` | **15.0** | **10.0** |
+| `close_um` | **5.0** | **1.0** |
+| `min_component_um` | **253.03** | **50.0** |
+| `r_smooth_bins` | 12 | 3 |
+
+The effect is exactly what [P20](#p20) predicts, since `subsample_um` sets the
+point lattice:
+
+| image | mesh verts | faces | settings |
+|---|---|---|---|
+| `V3_..._04step_002` (reference) | **8,966** | 15,786 | hand-tuned |
+| `V3_..._04step_003` | 205,961 | 77,968 | defaults |
+| `V3_..._09step_001` | 270,599 | 90,866 | defaults |
+| `V3b_..._04step_001` | 179,468 | 54,922 | defaults |
+| `V3b_..._04step_002` | 53,220 | 30,112 | defaults |
+| `V3b_..._04step_003` | 57,379 | 24,142 | defaults |
+
+**23–30× more vertices.** [P20](#p20) and [P24](#p24) both establish that
+`dist_mesh_um` and `curv_*` are set by the point spacing and the fit radius
+rather than by the vessel — so **the geometry columns of the five new images are
+not comparable with the reference's**, which is the six-image comparison the
+batch exists to enable. `curv_*` is the worse of the two: [P24](#p24)(a) measured
+the implied radius tracking `radius_um` at ~3× with no plateau, and `radius_um`
+is fixed at 5.0 while the point spacing underneath it moved 5× — so the same
+number now means something different per image.
+
+**A second finding, independent of the mismatch:** vertex count varies **5×
+between images at identical settings** (53,220 → 270,599), tracking the cadherin
+mask size (3.1 → 8.8 MB). A fixed parameter set does not produce a fixed
+reconstruction quality across these images, which is direct evidence for
+[I03](#i03)'s premise that these knobs need to be *scored* per image rather than
+set once. [P19](#p19)'s note that `MIN_SIZE_FLOOR = 12` had never been checked on
+the other five images is the same point one stage upstream.
+
+**Not a defect in the batch so much as an unstated assumption.** Nothing records
+that the reference mesh was hand-tuned; the values survive only in one settings
+JSON, and the two later re-exports of that image
+(`20260811_104417`, `20260811_105032`) record **only** `adhesion_postprocess`,
+because `batch_measure` does not know the mesh parameters. So the provenance of
+the one trustworthy mesh in the project is a single 2026-08-06 file.
+
+**Deliberately not fixed yet (user decision, 2026-08-11).** There is no known-good
+parameter set to standardise on: `min_component_um = 253.030303` is visibly tuned
+to one image, and [P21](#p21) argues a single global alpha cannot suit vessels
+that taper differently. Choosing one blindly could be worse than the defaults.
+
+**What makes this cheap to fix later:** the mesh is built from the cadherin mask,
+and `cadherin_labels.npz` is saved for every image. Rebuilding meshes and
+curvature therefore needs an image load plus that file — **not** the RF predict,
+which is the expensive step. There is no headless script for it today (see
+[I04](#i04)); that is the piece of work this entry implies.
+
+**Until then:** do not compare `dist_mesh_um` or any `curv_*` *between* images,
+and treat the reference image as being on a different reconstruction from the
+other five. Within-image rank remains what [P24](#p24) already allows, and no
+more.
+
+**Related:** [P19](#p19), [P20](#p20), [P21](#p21), [P24](#p24), [I03](#i03),
+[I04](#i04).
 
 ---
 

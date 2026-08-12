@@ -19,6 +19,7 @@ warnings, not errors: a legitimately FRET-less dataset must not fail a run.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -214,6 +215,67 @@ def surface_verts_for_distance(vessel_verts, vessel_faces):
     return v[surf], []
 
 
+def provenance_notes(has_mesh: bool, has_recon: bool) -> list[str]:
+    """Note for a vessel mesh with no recorded reconstruction parameters.
+
+    This is the regression guard for `docs/ISSUES.md` [P26]: `pipeline.batch`
+    drives the GUI's mesh step at whatever the widgets default to and records
+    nothing, so the five batched meshes are unattributable and the reference
+    mesh's parameters survive only in one 2026-08-06 settings JSON. A mesh
+    written by `pipeline.batch_mesh` carries a `vessel_recon.json`; one without
+    it cannot say what produced it, and that should not pass unnoticed.
+    """
+    if has_mesh and not has_recon:
+        return ["WARN: vessel_mesh.npz has no vessel_recon.json beside it — it "
+                "was built by `pipeline.batch` at the widget defaults or by "
+                "hand, and its parameters are unknown (docs/ISSUES.md P26). "
+                "Rebuild it with `python -m pipeline.batch_mesh` to record "
+                "them."]
+    return []
+
+
+def recon_summary(doc: dict) -> list[str]:
+    """A `vessel_recon.json` as two report lines. Pure: dict in, strings out.
+
+    Only the parameters the method actually read are shown on the mesh line —
+    the ones it ignored live under `mesh_inert` and are named as such, because
+    listing them as though they shaped the mesh is what made two of [P26]'s five
+    "hand-tuned vs default" rows meaningless.
+    """
+    mesh = doc.get("mesh") or {}
+    method = mesh.get("method", "?")
+    knobs = " ".join(f"{k}={v}" for k, v in mesh.items() if k != "method")
+    ms = doc.get("min_size") or {}
+    min_size = ms.get("resolved", "?")
+    mode = ms.get("mode")
+    min_str = f"min_size={min_size}" + (f" ({mode})" if mode not in (None, str(min_size)) else "")
+    first = f"mesh {method} {knobs} | {min_str}".rstrip()
+
+    curv = doc.get("surface_curvature") or {}
+    curv_str = (" ".join(f"{k}={v}" for k, v in curv.items()) if curv
+                else "none recorded")
+    counts = ""
+    for name, stats in (doc.get("outputs") or {}).items():
+        if "n_verts" in stats:
+            counts = (f" | {stats['n_verts']:,} verts "
+                      f"({stats.get('n_surface_verts', '?'):,} surface), "
+                      f"{stats.get('n_faces', 0):,} faces")
+            break
+    inert = doc.get("mesh_inert") or {}
+    inert_str = f" | {len(inert)} inert knob(s) not shown" if inert else ""
+    tail = f" | {doc.get('written', '?')} {doc.get('git_sha') or ''}".rstrip()
+    second = f"curv {curv_str}{counts}{inert_str}{tail}"
+
+    out = [first, second]
+    carried = doc.get("carried_over") or {}
+    if carried.get("blocks"):
+        out.append(f"carried over from an earlier run: "
+                   f"{', '.join(carried['blocks'])}")
+    if doc.get("status") and doc["status"] != "ok":
+        out.append(f"status: {doc['status']}")
+    return out
+
+
 def volume_shape_notes(name: str, shape, ref_name: str, ref_shape) -> list[str]:
     """Generic 'these two volumes should be the same image' check."""
     a, b = tuple(shape), tuple(ref_shape)
@@ -347,6 +409,34 @@ def describe_saved(path) -> list[str]:
         for n in centerline_notes({"pts_yx_um": d.get("pts_yx_um", []),
                                    "branch_yx_um": d.get("branch_yx_um", [])}):
             lines.append(f"  {n}")
+
+    # --- where the mesh came from (P26) --------------------------------------
+    tagged = sorted(n for n in present
+                    if n.startswith("vessel_mesh__") and n.endswith(".npz"))
+    if tagged:
+        bits = []
+        for name in tagged:
+            shapes = _member_shapes(present[name])
+            vs = shapes.get("verts")
+            tag = name[len("vessel_mesh__"):-len(".npz")]
+            bits.append(f"{tag} ({vs[0][0]:,} verts)" if vs else tag)
+        lines.append(f"  {'tagged mesh variants':<26} {', '.join(bits)}")
+
+    for name in sorted(n for n in present
+                       if n == "vessel_recon.json"
+                       or (n.startswith("vessel_recon__")
+                           and n.endswith(".json"))):
+        try:
+            doc = json.loads(present[name].read_text())
+        except Exception as exc:
+            lines.append(f"  {name:<26} unreadable ({exc})")
+            continue
+        summary = recon_summary(doc)
+        lines.append(f"  {name:<26} {summary[0]}")
+        lines.extend(f"  {'':<26} {extra}" for extra in summary[1:])
+    for n in provenance_notes("vessel_mesh.npz" in present,
+                              "vessel_recon.json" in present):
+        lines.append(f"  {n}")
 
     # --- nuclei: the P04 join -----------------------------------------------
     np_ = present.get("nuclei_split.npz")

@@ -10,6 +10,11 @@ slicing (ignored by 3D alpha):
   - alpha 2D (per-slice): one `alpha2d_um` knob; branch → two loops.
   - alpha 3D (points): reuses the tested `cell_mesh` alpha shape on the
     subsampled cadherin point cloud, with a Suggest button + histogram.
+  - poisson (oriented points): fits a smooth implicit function to the cadherin
+    sheet instead of interpolating it, so noise averages out rather than
+    becoming surface (`pipeline/vessel_poisson.py`, `docs/ISSUES.md` I06). Three
+    knobs, and the surface it returns is **open at the x/y edges of the volume
+    by design** — that is the Neumann boundary, not a hole.
 """
 
 from __future__ import annotations
@@ -31,6 +36,7 @@ from ..saved_check import curvature_notes
 from ..vessel_mesh import (  # noqa: F401  (re-export)
     METHOD_ALPHA2D,
     METHOD_ALPHA3D,
+    METHOD_POISSON,
     METHOD_POLAR,
     METHODS,
     ORIENTATIONS,
@@ -75,6 +81,9 @@ def build(state, viewer) -> Container:
         alpha3d_um={"widget_type": "FloatSlider", "min": 1.0, "max": 80.0, "step": 0.5},
         close_um={"widget_type": "FloatSlider", "min": 0.0, "max": 5.0, "step": 0.25},
         min_component_um={"widget_type": "FloatSlider", "min": 0.0, "max": 500.0, "step": 5.0},
+        poisson_grid_um={"widget_type": "FloatSlider", "min": 0.65, "max": 6.0, "step": 0.325},
+        poisson_smooth_um={"widget_type": "FloatSlider", "min": 1.0, "max": 15.0, "step": 0.5},
+        poisson_iso_pct={"widget_type": "FloatSlider", "min": 5.0, "max": 95.0, "step": 1.0},
     )
     def controls(
         method: str = METHOD_ALPHA3D,
@@ -87,6 +96,9 @@ def build(state, viewer) -> Container:
         fill_lumen: bool = True,
         close_um: float = 1.0,
         min_component_um: float = 50.0,
+        poisson_grid_um: float = 2.0,
+        poisson_smooth_um: float = 5.0,
+        poisson_iso_pct: float = 50.0,
     ):
         _run_build()
 
@@ -110,26 +122,40 @@ def build(state, viewer) -> Container:
         fill_lumen = bool(controls["fill_lumen"].value)
         close_um = float(controls["close_um"].value)
         min_component_um = float(controls["min_component_um"].value)
+        poisson_grid_um = float(controls["poisson_grid_um"].value)
+        poisson_smooth_um = float(controls["poisson_smooth_um"].value)
+        poisson_iso_pct = float(controls["poisson_iso_pct"].value)
         state.setdefault("run_settings", {})["vessel_mesh"] = {
             "method": method, "orientation": orientation, "alpha3d_um": alpha3d_um,
             "alpha2d_um": alpha2d_um, "subsample_um": subsample_um,
             "close_um": close_um, "min_component_um": min_component_um,
             "fill_lumen": fill_lumen, "n_bins": n_bins,
-            "r_smooth_bins": r_smooth_bins}
+            "r_smooth_bins": r_smooth_bins,
+            "poisson_grid_um": poisson_grid_um,
+            "poisson_smooth_um": poisson_smooth_um,
+            "poisson_iso_pct": poisson_iso_pct}
 
         @thread_worker
         def _run():
             # One call into the core module — the identical build the headless
             # `pipeline.batch_mesh` runs, so the two paths cannot diverge.
-            return build_mesh(
+            extras = {}
+            out = build_mesh(
                 arr, scale, method=method, orientation=orientation,
                 n_bins=n_bins, r_smooth_bins=r_smooth_bins,
                 alpha2d_um=alpha2d_um, subsample_um=subsample_um,
                 alpha3d_um=alpha3d_um, fill_lumen=fill_lumen,
-                close_um=close_um, min_component_um=min_component_um)
+                close_um=close_um, min_component_um=min_component_um,
+                poisson_grid_um=poisson_grid_um,
+                poisson_smooth_um=poisson_smooth_um,
+                poisson_iso_pct=poisson_iso_pct, extras=extras)
+            return out, extras
 
         def _done(result):
-            kind, verts, faces, vals = result
+            (kind, verts, faces, vals), extras = result
+            normals = extras.get("normals")
+            for n in (extras.get("info") or {}).get("notes", []):
+                print(f"  {n}", flush=True)
             if LAYER_NAME in viewer.layers:
                 viewer.layers.remove(LAYER_NAME)
             if kind == "empty":
@@ -142,8 +168,12 @@ def build(state, viewer) -> Container:
                 state["vessel_mesh_cache"] = {"verts": None, "faces": None}
                 return
             if faces is None or len(faces) == 0:
-                hint = ("increase alpha3d_um" if method == METHOD_ALPHA3D
-                        else "loosen the fill / orientation")
+                if method == METHOD_ALPHA3D:
+                    hint = "increase alpha3d_um"
+                elif method == METHOD_POISSON:
+                    hint = "lower poisson_iso_pct or raise poisson_smooth_um"
+                else:
+                    hint = "loosen the fill / orientation"
                 print(f"{len(verts)} vertices but 0 faces — {hint}.", flush=True)
                 state["vessel_mesh_cache"] = {"verts": verts, "faces": None}
                 return
@@ -151,7 +181,8 @@ def build(state, viewer) -> Container:
                 finite_surface(verts, faces, vals), name=LAYER_NAME,
                 colormap="viridis", blending="translucent", opacity=0.6,
             )
-            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces}
+            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
+                                          "normals": normals}
             print(f"Vessel mesh ({method}, orientation={orientation}): "
                   f"{len(verts)} verts, {len(faces)} faces.", flush=True)
 
@@ -224,7 +255,15 @@ def build(state, viewer) -> Container:
             print("No vessel mesh to save — build it first.", flush=True)
             return
         path = str(mesh_path_w.value)
-        np.savez(path, verts=np.asarray(verts), faces=np.asarray(faces))
+        arrays = {"verts": np.asarray(verts), "faces": np.asarray(faces)}
+        # An extra key only, the same additive pattern `z_um` uses in
+        # `vessel_path_curvature.npz`: an older reader that names verts/faces is
+        # unaffected, and a Poisson mesh keeps the normals it cannot re-derive
+        # (it is open at the volume edges, so `vertex_outward_normals` has no
+        # enclosed volume to read the global sign from).
+        if cache.get("normals") is not None:
+            arrays["normals"] = np.asarray(cache["normals"])
+        np.savez(path, **arrays)
         print(f"Saved vessel mesh -> {path} "
               f"({len(verts)} verts, {len(faces)} faces).", flush=True)
 
@@ -234,6 +273,7 @@ def build(state, viewer) -> Container:
             d = np.load(path)
             verts = d["verts"]
             faces = d["faces"]
+            normals = d["normals"] if "normals" in d.files else None
             if len(verts) == 0 or len(faces) == 0:
                 print("Loaded vessel mesh is empty.", flush=True)
                 return
@@ -246,7 +286,8 @@ def build(state, viewer) -> Container:
                 colormap="viridis", blending="translucent", opacity=0.6,
             )
             lyr.visible = visible
-            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces}
+            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
+                                          "normals": normals}
             print(f"Loaded vessel mesh <- {path} "
                   f"({len(verts)} verts, {len(faces)} faces).", flush=True)
         except Exception as exc:
@@ -306,6 +347,10 @@ def build(state, viewer) -> Container:
                   flush=True)
             call_all(after)
             return
+        # Carried through to `mesh_curvature`: on the Poisson surface the sign
+        # of kappa2 is not recoverable from the mesh itself, so these are not
+        # optional there (P01(B)).
+        normals = cache.get("normals")
         radius = float(curv_radius_w.value)
         smooth_iter = int(curv_smooth_w.value)
         state.setdefault("run_settings", {})["surface_curvature"] = {
@@ -313,7 +358,8 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            return mesh_curvature(verts, faces, radius, smooth_iter=smooth_iter)
+            return mesh_curvature(verts, faces, radius,
+                                  smooth_iter=smooth_iter, normals=normals)
 
         def _done(curv):
             state["vessel_mesh_cache"]["curvature"] = curv
@@ -507,7 +553,8 @@ def build(state, viewer) -> Container:
             d = np.load(path)
             curv = {k: d[k] for k in ("mean", "k1", "k2", "gaussian")}
             cache = state.get("vessel_mesh_cache") or {"verts": None,
-                                                       "faces": None}
+                                                       "faces": None,
+                                                       "normals": None}
             cache["curvature"] = curv
             state["vessel_mesh_cache"] = cache
             verts = cache.get("verts")

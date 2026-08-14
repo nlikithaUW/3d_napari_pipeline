@@ -187,26 +187,23 @@ def alpha_shape_faces(points_um: np.ndarray, alpha_um: float) -> np.ndarray:
     return bf
 
 
-def filter_faces_by_extent(
-    verts: np.ndarray,
-    faces: np.ndarray,
-    min_extent_um: float,
-) -> np.ndarray:
-    """Keep only faces in connected mesh components of sufficient spatial size.
+def face_components(faces: np.ndarray) -> tuple[int, np.ndarray]:
+    """``(n_components, component_of_each_face)`` for the face-adjacency graph.
 
-    Components are the connected components of the face-adjacency graph (two
-    faces adjacent iff they share an edge). A component's size is the diagonal
-    of its vertex bounding box (µm). Faces in components whose diagonal is below
-    `min_extent_um` are dropped — this removes the small disconnected islands
-    that both the 3D-alpha point mesh and the 2D-alpha marching-cubes mesh leave
-    floating around the main vessel wall.
+    Two faces are adjacent iff they share an undirected edge. Returns the
+    component count and a per-face label array of length ``len(faces)``, exactly
+    as `scipy.sparse.csgraph.connected_components` does.
 
-    `min_extent_um <= 0` or empty `faces` → returns `faces` unchanged.
+    Extracted from `filter_faces_by_extent`, which drops small components, so
+    that `mesh_score.topology` can count and characterise them without a second
+    copy of the labelling — a mesh's component structure is read by both "is this
+    debris?" and "is this shaped like a vessel wall?", and the two must agree on
+    what a component is.
     """
-    if min_extent_um <= 0 or len(faces) == 0:
-        return faces
     faces = np.asarray(faces)
     nf = len(faces)
+    if nf == 0:
+        return 0, np.zeros(0, dtype=np.int64)
 
     # The 3 undirected edges of every face, endpoints sorted so shared edges
     # compare equal regardless of winding (same edge-hashing style as
@@ -233,7 +230,29 @@ def filter_faces_by_extent(
     graph = coo_matrix(
         (np.ones(len(rows), dtype=np.int8), (rows, cols)), shape=(nf, nf),
     )
-    n_comp, face_comp = connected_components(graph, directed=False)
+    return connected_components(graph, directed=False)
+
+
+def filter_faces_by_extent(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    min_extent_um: float,
+) -> np.ndarray:
+    """Keep only faces in connected mesh components of sufficient spatial size.
+
+    Components are the connected components of the face-adjacency graph (two
+    faces adjacent iff they share an edge — `face_components`). A component's
+    size is the diagonal of its vertex bounding box (µm). Faces in components
+    whose diagonal is below `min_extent_um` are dropped — this removes the small
+    disconnected islands that both the 3D-alpha point mesh and the 2D-alpha
+    marching-cubes mesh leave floating around the main vessel wall.
+
+    `min_extent_um <= 0` or empty `faces` → returns `faces` unchanged.
+    """
+    if min_extent_um <= 0 or len(faces) == 0:
+        return faces
+    faces = np.asarray(faces)
+    n_comp, face_comp = face_components(faces)
 
     # Per-component vertex bbox via scatter-min/max over each face's 3 vertices.
     comp_min = np.full((n_comp, 3), np.inf)
@@ -358,7 +377,7 @@ def _taubin_smooth(verts: np.ndarray, faces: np.ndarray, iterations: int,
 
 
 def mesh_curvature(verts: np.ndarray, faces: np.ndarray, radius_um: float,
-                   smooth_iter: int = 0) -> dict:
+                   smooth_iter: int = 0, normals: np.ndarray | None = None) -> dict:
     """Per-vertex curvature by fitting a local quadric at scale ``radius_um``.
 
     For each vertex, the neighbours within ``radius_um`` are expressed in a local
@@ -377,6 +396,19 @@ def mesh_curvature(verts: np.ndarray, faces: np.ndarray, radius_um: float,
     (those referenced by ``faces``); interior/rank-deficient vertices are left
     NaN so callers can exclude them. ``smooth_iter`` optionally Taubin-smooths
     the surface first.
+
+    ``normals`` (optional, one per *input* vertex) supplies the outward normal
+    field instead of deriving it with `vertex_outward_normals`. **A surface that
+    is open by construction needs this.** The Poisson surface
+    (`vessel_poisson`) is open only where the vessel leaves through the x/y
+    domain faces, so its `closed_edge_fraction` is ≈ 0.998 and clears the 0.90
+    gate in `vertex_outward_normals` — the enclosed-volume branch then runs, but
+    ``Σ p0·(p1×p2)/6`` is **not** origin-independent on an open surface, so it
+    would put a coin-flip global sign on κ2, which is exactly the quantity
+    [P24]'s plateau test reads. The supplied normals are read at the surface
+    vertices and renormalised; with ``smooth_iter > 0`` they refer to the
+    unsmoothed positions, which is fine for a sign and is why they are not
+    re-derived.
 
     Returns a dict of length-``len(verts)`` float32 arrays: ``mean`` = H =
     (κ1+κ2)/2, ``k1`` = κmax, ``k2`` = κmin, ``gaussian`` = K = κ1·κ2.
@@ -403,7 +435,12 @@ def mesh_curvature(verts: np.ndarray, faces: np.ndarray, radius_um: float,
     if smooth_iter and smooth_iter > 0:
         sv = _taubin_smooth(sv, sf, int(smooth_iter))
 
-    normals = vertex_outward_normals(sv, sf)
+    if normals is None:
+        normals = vertex_outward_normals(sv, sf)
+    else:
+        normals = np.asarray(normals, dtype=np.float64)[surf]
+        normals = normals / (np.linalg.norm(normals, axis=1, keepdims=True)
+                             + 1e-12)
     tree = cKDTree(sv)
     r = float(radius_um)
     m = len(sv)

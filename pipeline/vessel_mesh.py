@@ -8,13 +8,20 @@ so a cross-section is an xz or yz slice), the wall reads as a noisy ring;
 samples, bridging gaps up to a tunable length scale. Stack the closed slices and
 mesh them.
 
-Three closing strategies (compared in the GUI tab):
+Four closing strategies (compared in the GUI tab). The first three
+**interpolate** — the surface is forced through the data, so noise becomes
+surface; the fourth **approximates**, fitting a smooth implicit function to the
+same points (`vessel_poisson`, `docs/ISSUES.md` I06):
   1. Per-slice polar fill — cheap, noise-robust, assumes one star-shaped lumen
      per slice (breaks at the Y-branch).
   2. Per-slice 2D alpha fill — handles the branch (two lumens → two loops); one
      `alpha_um` knob = max gap bridged.
   3. 3D alpha on the cadherin point cloud — reuses `cell_mesh.alpha_shape_faces`;
      bridges gaps in 3D and handles branch + curvature natively.
+  4. Poisson on oriented points (`vessel_poisson`) — sheet normals from the
+     structure tensor, oriented into the lumen volume, then a Neumann DCT solve
+     for a smooth indicator function whose level set is the surface. Gaps are
+     spanned by a harmonic solution rather than a fabricated triangle.
 
 For the two per-slice methods, the fill runs on xz and yz slicing independently
 and combines (AND = conservative, OR = complete).
@@ -37,7 +44,7 @@ import numpy as np
 from scipy import ndimage as ndi
 from scipy.spatial import Delaunay
 
-from . import gpu
+from . import gpu, vessel_poisson
 from .cell_mesh import alpha_shape_faces, filter_faces_by_extent
 
 
@@ -288,7 +295,8 @@ def mesh_from_volume(filled3d, scale):
 METHOD_POLAR = "polar (per-slice)"
 METHOD_ALPHA2D = "alpha 2D (per-slice)"
 METHOD_ALPHA3D = "alpha 3D (points)"
-METHODS = [METHOD_POLAR, METHOD_ALPHA2D, METHOD_ALPHA3D]
+METHOD_POISSON = "poisson (oriented points)"
+METHODS = [METHOD_POLAR, METHOD_ALPHA2D, METHOD_ALPHA3D, METHOD_POISSON]
 ORIENTATIONS = ["xz", "yz", "both (AND)", "both (OR)"]
 
 # Which parameters each method actually reads. Derived from the dispatch in
@@ -302,11 +310,14 @@ LIVE_PARAMS = {
     METHOD_ALPHA2D: ("orientation", "alpha2d_um", "fill_lumen", "close_um",
                      "min_component_um"),
     METHOD_ALPHA3D: ("subsample_um", "alpha3d_um", "min_component_um"),
+    METHOD_POISSON: ("poisson_grid_um", "poisson_smooth_um", "poisson_iso_pct",
+                     "min_component_um"),
 }
 
 ALL_PARAMS = ("method", "orientation", "n_bins", "r_smooth_bins", "alpha2d_um",
               "subsample_um", "alpha3d_um", "fill_lumen", "close_um",
-              "min_component_um")
+              "min_component_um", "poisson_grid_um", "poisson_smooth_um",
+              "poisson_iso_pct")
 
 
 def live_params(method: str) -> tuple[str, ...]:
@@ -326,7 +337,11 @@ def _per_slice(fill_fn, mask, orientation) -> np.ndarray:
 
 def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
                alpha2d_um, subsample_um, alpha3d_um, fill_lumen, close_um,
-               min_component_um):
+               min_component_um,
+               poisson_grid_um=vessel_poisson.DEFAULT_GRID_UM,
+               poisson_smooth_um=vessel_poisson.DEFAULT_SMOOTH_UM,
+               poisson_iso_pct=vessel_poisson.DEFAULT_ISO_PCT,
+               extras=None):
     """Build the vessel surface from a cadherin mask. Pure: no Qt, no viewer.
 
     `mask` is any array whose non-zero voxels are wall (the filtered cadherin
@@ -339,12 +354,31 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
         `verts` are the cadherin points themselves, most of which end up
         interior to the solid (`docs/ISSUES.md` P09(a), P21).
 
+    The Poisson method also returns ``"mesh"``: it is marching cubes on the
+    fitted implicit function, so every vertex is on the surface. **That surface
+    is open at the x/y domain faces by design** — the solve is Neumann because
+    the vessel genuinely leaves through them, and a Dirichlet box would cap it
+    there.
+
+    ``extras``, when a dict is passed, is *filled in* with whatever the chosen
+    method produces beyond the four-tuple — for Poisson, ``"normals"`` (the
+    per-vertex outward normals read from ∇χ) and ``"info"`` (the diagnostic
+    record, including ``notes``). The return stays a 4-tuple because
+    `saved_check`, `batch_mesh` and the GUI all destructure it. An out-dict
+    rather than `vessel_poisson.diagnose`: the normals are needed for
+    *correctness*, not decoration — `cell_mesh.mesh_curvature` cannot recover
+    the global sign on a surface this open — and asking for them separately
+    would mean building the whole reconstruction twice, which a parameter sweep
+    cannot afford. `diagnose` remains for callers that want the record without
+    a mesh.
+
     Callers must still check for 0 vertices and 0 faces: both are ordinary
     outcomes of parameters that are too tight, not errors.
 
     Not every argument is read — see `LIVE_PARAMS`. Alpha 3D ignores
     `orientation`, `n_bins`, `r_smooth_bins`, `alpha2d_um`, `fill_lumen` and
-    `close_um` entirely.
+    `close_um` entirely; Poisson ignores everything but its own three knobs and
+    `min_component_um`.
     """
     mask = np.asarray(mask) > 0
     if not mask.any():
@@ -369,7 +403,20 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
         verts, faces, vals = mesh_from_volume(filled, scale)
         faces = filter_faces_by_extent(verts, faces, float(min_component_um))
         return ("mesh", verts, faces, vals)
-    # 3D alpha on the subsampled cadherin point cloud.
+    if method == METHOD_POISSON:
+        verts, faces, vals, normals, info = vessel_poisson.reconstruct(
+            mask, scale, grid_um=float(poisson_grid_um),
+            smooth_um=float(poisson_smooth_um),
+            iso_pct=float(poisson_iso_pct),
+            min_component_um=float(min_component_um))
+        if extras is not None:
+            extras["normals"] = normals
+            extras["info"] = info
+        return ("mesh", verts, faces, vals)
+    # 3D alpha on the subsampled cadherin point cloud. **This is also the
+    # fall-through for an unknown method string** — a latent defect recorded as
+    # its own entry rather than papered over here, since fixing it would change
+    # what an existing caller silently gets.
     pts = voxel_subsample(mask_to_points_um(mask, scale), float(subsample_um))
     faces = alpha_shape_faces(pts, float(alpha3d_um))
     faces = filter_faces_by_extent(pts, faces, float(min_component_um))

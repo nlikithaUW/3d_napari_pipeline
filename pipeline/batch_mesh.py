@@ -1,4 +1,4 @@
-"""Headless vessel-mesh rebuild (no napari) — mesh, surface curvature, centerline.
+"""Headless vessel-mesh rebuild (no napari) — mesh, curvature, centerline, scores.
 
 **This is an instrument, not a result.** It makes the reconstruction parameters
 explicit, recorded and cheap to vary; it does not tell you which ones are right.
@@ -38,6 +38,19 @@ Usage (image_analysis env, from the 3d_napari_pipeline folder):
     python -m pipeline.batch_mesh --dir "...\\images\\WT" --steps curvature \\
         --curv-radius-um 5,10,15,20,30,40 --tag r{radius}
 
+    # score the mesh already on disk — builds nothing, writes only the scores
+    python -m pipeline.batch_mesh --dir "...\\images\\WT" --steps score
+
+`--steps score` is the fourth step and the one that makes the other three
+answerable: it reports scale stability, topology and coverage for a mesh
+(`pipeline/mesh_score.py`) into the `scores` block of its `vessel_recon.json`.
+It lives here rather than in a standalone script because coverage needs the
+cadherin mask, and this is the only headless place that loads it — a separate
+script would have to duplicate the mask loading and the OME shape check.
+**Three numbers, deliberately never combined into one:** weighting them needs
+weights, and an invented weight is the hidden constant this project has already
+paid for twice. A selection rule belongs to whoever runs a sweep.
+
 Exit codes: 0 all ok, 1 at least one image FAILED, 2 (with --strict) something
 came out degraded.
 
@@ -70,6 +83,7 @@ from .cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
 from .centerline import vessel_path_curvature_xy
 from .denoise import auto_min_size_otsu, filter_by_size
 from .io import _parse_ome_voxel_zyx
+from .mesh_score import DEFAULT_RADII_UM, format_scores, score_mesh
 from .saved_check import (
     _member_shapes,
     centerline_notes,
@@ -77,9 +91,11 @@ from .saved_check import (
     describe_saved,
     mesh_notes,
 )
+from . import vessel_poisson
 from .vessel_mesh import (
     ALL_PARAMS,
     METHOD_ALPHA3D,
+    METHOD_POISSON,
     METHODS,
     ORIENTATIONS,
     build_mesh,
@@ -90,7 +106,12 @@ from .vessel_mesh import (
 
 ROOT = Path(__file__).resolve().parent.parent
 
-STEPS = ("mesh", "curvature", "path")
+STEPS = ("mesh", "curvature", "path", "score")
+# `score` is opt-in. It builds nothing, and its scale-stability sweep costs more
+# than the whole rebuild does (6.6 s against 2.1 s on the reference mesh, and it
+# grows with vertex count times fit radius), so defaulting it on would silently
+# multiply the cost of every existing rebuild.
+DEFAULT_STEPS = ("mesh", "curvature", "path")
 
 # Defaults are the **current widget defaults**, not the reference image's
 # settings JSON. P26's 2026-08-12 correction demotes that mesh from baseline to
@@ -108,8 +129,15 @@ MESH_DEFAULTS = {
     "fill_lumen": True,
     "close_um": 1.0,
     "min_component_um": 50.0,
+    "poisson_grid_um": vessel_poisson.DEFAULT_GRID_UM,
+    "poisson_smooth_um": vessel_poisson.DEFAULT_SMOOTH_UM,
+    "poisson_iso_pct": vessel_poisson.DEFAULT_ISO_PCT,
 }
 CURV_DEFAULTS = {"radius_um": 5.0, "smooth_iter": 10}
+# The radii P24's plateau table was measured at, so a `--steps score` run is
+# directly comparable to the evidence already on record.
+SCORE_DEFAULTS = {"radii_um": ",".join(f"{r:g}" for r in DEFAULT_RADII_UM),
+                  "max_verts": None, "max_query": None}
 # `smooth_um` is the only one of these with a slider today; the other four are
 # bare function defaults in `centerline.vessel_path_curvature_xy` (P23 names
 # `open_um` and `prune_um` as amputating a tapering vessel and has never been
@@ -136,6 +164,25 @@ def _git_sha() -> str | None:
         return out.stdout.strip() or None
     except Exception:
         return None
+
+
+def _jsonable(obj):
+    """Numpy scalars/arrays -> plain Python, recursively, for the recon JSON.
+
+    ``json.dumps(default=str)`` would otherwise turn a `numpy.float64` into the
+    *string* ``'0.123'``, which reads fine and compares wrong — a recon file is
+    meant to be diffable against the next run. ``notes`` is dropped: it is
+    already carried in the report's own notes list, and two copies drift.
+    """
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items() if k != "notes"}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return _jsonable(obj.tolist())
+    if isinstance(obj, np.generic):
+        return obj.item()
+    return obj
 
 
 def _mtime(p: Path) -> str:
@@ -237,6 +284,9 @@ def resolve_params(args) -> dict:
         "alpha2d_um": args.alpha2d_um, "subsample_um": args.subsample_um,
         "alpha3d_um": args.alpha3d_um, "fill_lumen": args.fill_lumen,
         "close_um": args.close_um, "min_component_um": args.min_component_um,
+        "poisson_grid_um": args.poisson_grid_um,
+        "poisson_smooth_um": args.poisson_smooth_um,
+        "poisson_iso_pct": args.poisson_iso_pct,
     }
     for key in ALL_PARAMS:
         mesh[key], source[f"mesh.{key}"] = _pick(
@@ -253,6 +303,20 @@ def resolve_params(args) -> dict:
     smooths = _ints(curv["smooth_iter"], "curv-smooth-iter") \
         if isinstance(curv["smooth_iter"], str) else [int(curv["smooth_iter"])]
     combos = [(r, s) for r in radii for s in smooths]
+
+    score = {}
+    score["radii_um"], source["score.radii_um"] = _pick(
+        args.score_radii, {}, SCORE_DEFAULTS["radii_um"], "radii_um")
+    score["radii_um"] = _floats(score["radii_um"], "score-radii") \
+        if isinstance(score["radii_um"], str) else [float(score["radii_um"])]
+    score["max_verts"], source["score.max_verts"] = _pick(
+        args.score_max_verts, {}, SCORE_DEFAULTS["max_verts"], "max_verts")
+    score["max_query"], source["score.max_query"] = _pick(
+        args.score_max_query, {}, SCORE_DEFAULTS["max_query"], "max_query")
+    # The scores fit curvature with the same smoothing the curvature step uses,
+    # so a score and a `vessel_curvature.npz` from the same run describe the same
+    # surface. One knob, not two that can disagree.
+    score["smooth_iter"] = smooths[0]
 
     pathp = {}
     explicit_path = {"smooth_um": args.path_smooth_um,
@@ -287,8 +351,8 @@ def resolve_params(args) -> dict:
     live_mesh = {k: v for k, v in mesh.items() if k == "method" or k in live}
 
     return {"mesh": live_mesh, "mesh_inert": inert, "mesh_all": mesh,
-            "curv_combos": combos, "path": pathp, "min_size": min_size,
-            "source": source}
+            "curv_combos": combos, "path": pathp, "score": score,
+            "min_size": min_size, "source": source}
 
 
 def parameter_warnings(params: dict) -> list[str]:
@@ -341,6 +405,16 @@ def format_params(params: dict) -> list[str]:
     out.append("path curvature:")
     for k, v in params["path"].items():
         out.append(f"    {k:<18} {v}   [{src.get(f'path.{k}', 'default')}]")
+    out.append("mesh scores:")
+    sc = params["score"]
+    out.append(f"    {'radii_um':<18} "
+               f"{', '.join(f'{r:g}' for r in sc['radii_um'])}   "
+               f"[{src.get('score.radii_um', 'default')}]")
+    for k in ("max_verts", "max_query"):
+        out.append(f"    {k:<18} {sc[k] if sc[k] is not None else 'all'}   "
+                   f"[{src.get(f'score.{k}', 'default')}]")
+    out.append(f"    {'smooth_iter':<18} {sc['smooth_iter']}   "
+               f"[follows curv.smooth_iter]")
     out.append(f"min_size             {params['min_size']}   "
                f"[{src.get('min_size', 'default')}]")
     return out
@@ -412,7 +486,13 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     t0 = time.perf_counter()
     timings: dict[str, float] = {}
     recon: dict = {}
-    need_mask = ("mesh" in steps) or ("path" in steps) or suggest_alpha
+    # `score` needs the mask too: coverage is measured from every retained
+    # cadherin voxel to the surface, and this is the only headless place the
+    # mask is loaded. A standalone scoring script would have to duplicate the
+    # mask-loading and the OME shape check, which is the second copy the
+    # project rule forbids.
+    need_mask = ("mesh" in steps) or ("path" in steps) or ("score" in steps) \
+        or suggest_alpha
     combos = params["curv_combos"]
     single_tag = (tag_template.format(radius=combos[0][0], smooth=combos[0][1])
                   if tag_template else None)
@@ -490,18 +570,35 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
 
     # ---- mesh ---------------------------------------------------------------
     verts = faces = None
+    # Per-vertex normals, when the method produces them (Poisson does). They are
+    # not decoration: `mesh_curvature` reads the global orientation off the mesh
+    # otherwise, and cannot on a surface that is open by construction, so the
+    # sign of every kappa2 would be a coin flip (P01(B)).
+    normals = None
     if "mesh" in steps:
         t = time.perf_counter()
-        kind, verts, faces, _vals = build_mesh(mask, scale, **params["mesh_all"])
+        extras: dict = {}
+        kind, verts, faces, _vals = build_mesh(mask, scale, extras=extras,
+                                               **params["mesh_all"])
+        normals = extras.get("normals")
         timings["mesh_s"] = time.perf_counter() - t
+        if extras.get("info"):
+            recon["mesh_diagnostics"] = _jsonable(extras["info"])
+            for n in extras["info"].get("notes", []):
+                notes.append(n)
         if kind == "empty" or verts is None or len(verts) == 0:
             return "failed", [f"the mesh has no vertices. "
                               f"{_existing_mesh_note(mesh_out)}."]
         if faces is None or len(faces) == 0:
-            hint = ("raise alpha3d_um (P20: it must exceed ~3x subsample_um)"
-                    if params["mesh_all"]["method"] == METHOD_ALPHA3D
-                    else "loosen the fill / orientation, or lower "
-                         "min_component_um")
+            m = params["mesh_all"]["method"]
+            if m == METHOD_ALPHA3D:
+                hint = "raise alpha3d_um (P20: it must exceed ~3x subsample_um)"
+            elif m == METHOD_POISSON:
+                hint = ("lower poisson_iso_pct or raise poisson_smooth_um, or "
+                        "lower min_component_um")
+            else:
+                hint = ("loosen the fill / orientation, or lower "
+                        "min_component_um")
             return "failed", [f"{len(verts):,} vertices but 0 faces — {hint}. "
                               f"{_existing_mesh_note(mesh_out)}."]
         n_surf = int(np.unique(faces).size)
@@ -513,20 +610,28 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                               f"all-NaN. {_existing_mesh_note(mesh_out)}."]
         for n in mesh_notes(verts):
             notes.append(n)
-    elif "curvature" in steps:
-        # Curvature needs a mesh but not the header or the mask. Prefer the
-        # tagged sibling when one exists, else the canonical file — which is
-        # what makes `--steps curvature --tag r{radius}` a sweep over the mesh
-        # that is actually in place.
+    elif "curvature" in steps or "score" in steps:
+        # Curvature needs a mesh but not the header or the mask; scoring needs
+        # both but still builds nothing. Prefer the tagged sibling when one
+        # exists, else the canonical file — which is what makes
+        # `--steps curvature --tag r{radius}` a sweep over the mesh that is
+        # actually in place, and `--steps score --tag defaults` a score of the
+        # variant on disk rather than of a fresh rebuild.
         src = mesh_out if mesh_out.exists() else saved / "vessel_mesh.npz"
+        what = "curvature" if "curvature" in steps else "score"
         if not src.exists():
-            return "failed", [f"no {src.name} to compute curvature from — run "
+            return "failed", [f"no {src.name} to compute {what} from — run "
                               f"--steps mesh first."]
         with np.load(src) as d:
             verts = d["verts"]
             faces = d["faces"] if "faces" in d else np.zeros((0, 3), np.int64)
+            # An additive key, so a mesh written before this method existed
+            # still loads (the same pattern `z_um` uses in the path-curvature
+            # npz). Absent means "derive the normals", which is right for every
+            # closed-ish method.
+            normals = d["normals"] if "normals" in d.files else None
         recon["mesh_input"] = src.name
-        _p(f"curvature source: {src.name} ({len(verts):,} verts, "
+        _p(f"{what} source: {src.name} ({len(verts):,} verts, "
            f"{len(faces):,} faces)")
 
     # ---- surface curvature (possibly a sweep) -------------------------------
@@ -535,7 +640,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
         for radius, smooth in combos:
             t = time.perf_counter()
             curv = mesh_curvature(verts, faces, float(radius),
-                                  smooth_iter=int(smooth))
+                                  smooth_iter=int(smooth), normals=normals)
             timings.setdefault("curvature_s", 0.0)
             timings["curvature_s"] += time.perf_counter() - t
             k1 = np.asarray(curv["k1"])
@@ -568,6 +673,35 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
         for n in centerline_notes(cl):
             notes.append(n)
 
+    # ---- mesh quality scores ------------------------------------------------
+    # Three numbers, never one — see `mesh_score`. This step writes no npz: the
+    # scores describe a mesh that already exists, so they belong in that mesh's
+    # provenance file and nowhere else.
+    scores = None
+    findings: list[str] = []
+    if "score" in steps:
+        t = time.perf_counter()
+        sc = params["score"]
+        scores = score_mesh(verts, faces, mask_to_points_um(mask > 0, scale),
+                            normals=normals,
+                            radii_um=sc["radii_um"],
+                            smooth_iter=int(sc["smooth_iter"]),
+                            max_verts=sc["max_verts"],
+                            max_query=sc["max_query"])
+        timings["score_s"] = time.perf_counter() - t
+        for line in format_scores(scores):
+            _p(line)
+        # A score's warnings are findings about the **mesh**, not degradations
+        # of this run, so they are reported and recorded but kept out of
+        # `status`. The mesh being a genus-125 sponge is the scorer working, not
+        # the run failing — and since every candidate in a sweep will produce
+        # findings like these, folding them into `degraded` would make --strict
+        # fire on all of them and so tell you nothing.
+        findings.extend(n for n in scores["notes"] if n.startswith("WARN:"))
+        for n in scores["notes"]:
+            if not n.startswith("WARN:"):
+                _p(n)
+
     # ---- write, now that every requested step has produced something --------
     # Outputs are grouped by the tag they were written under, so a curvature
     # sweep gets one self-describing recon JSON per tag rather than one that
@@ -575,10 +709,19 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     groups: dict[str | None, dict] = {}
 
     def _group(tg):
-        return groups.setdefault(tg, {"outputs": {}, "curv": None})
+        return groups.setdefault(tg, {"outputs": {}, "curv": None,
+                                      "scores": None})
+
+    if "score" in steps:
+        # Scoring produces no file, so it would otherwise leave `groups` empty
+        # and write no recon JSON at all on a `--steps score` run.
+        _group(single_tag)["scores"] = scores
 
     if "mesh" in steps:
-        np.savez(mesh_out, verts=np.asarray(verts), faces=np.asarray(faces))
+        arrays = {"verts": np.asarray(verts), "faces": np.asarray(faces)}
+        if normals is not None:
+            arrays["normals"] = np.asarray(normals)
+        np.savez(mesh_out, **arrays)
         _group(single_tag)["outputs"][mesh_out.name] = {
             "n_verts": int(len(verts)),
             # Both figures, always. P26's own correction turned on this
@@ -632,20 +775,23 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
             _p(notes[-1])
 
     # ---- provenance ---------------------------------------------------------
+    # `status` reads only `notes` — the degradations of this run's own outputs.
+    # `findings` are reported and recorded alongside them but do not degrade it.
     status = "degraded" if notes else "ok"
+    reported = notes + findings
     timings["total_s"] = time.perf_counter() - t0
     for tg, g in groups.items():
         _write_recon(saved, tg, tif, params, steps, recon, g["outputs"],
-                     g["curv"], timings, status, notes)
-    del mask, verts, faces, curv_runs, cl, groups
+                     g["curv"], g["scores"], timings, status, reported)
+    del mask, verts, faces, curv_runs, cl, groups, scores
     gc.collect()
-    return status, notes
+    return status, reported
 
 
 def _write_recon(saved: Path, tag: str | None, tif: Path, params: dict,
                  steps: tuple, recon: dict, outputs: dict,
-                 curv_block: dict | None, timings: dict, status: str,
-                 notes: list[str]) -> None:
+                 curv_block: dict | None, scores: dict | None, timings: dict,
+                 status: str, notes: list[str]) -> None:
     """Write `vessel_recon.json` beside the outputs.
 
     **The name must not end in `_settings.json`**: `batch_measure.py:351`,
@@ -676,7 +822,28 @@ def _write_recon(saved: Path, tag: str | None, tif: Path, params: dict,
             doc = {}
     carried = [k for k in ("mesh", "mesh_inert", "min_size", "cadherin_labels",
                            "scale_um_zyx", "scale_source", "surface_curvature",
-                           "path_curvature") if k in doc]
+                           "path_curvature", "scores") if k in doc]
+
+    # `outputs` is keyed by filename, and a run only knows about the files it
+    # wrote — so it must be **merged**, not replaced. Replacing it means a
+    # `--steps curvature` run in place erases the mesh's recorded vertex counts,
+    # and a `--steps score` run (which writes no file at all) erases every
+    # entry, leaving a recon JSON that describes a mesh it no longer records the
+    # size of. Entries whose file has since gone are dropped, so the block
+    # self-heals rather than accumulating ghosts.
+    #
+    # **Only from this tag's own previous file.** The inheritance branch above
+    # seeds a new tagged doc from `vessel_recon.json` so it is self-contained
+    # about the *parameters* — but that file's `outputs` describe the canonical
+    # mesh, which is a different mesh. Merging those in made a tagged recon
+    # claim the canonical file's vertex counts, and `recon_summary` then
+    # reported the wrong mesh's size (seen: a 166,721-vertex sub1.0 mesh
+    # summarised as 8,966 verts).
+    if carried_from == path.name:
+        merged = {k: v for k, v in (doc.get("outputs") or {}).items()
+                  if (saved / k).exists()}
+        merged.update(outputs)
+        outputs = merged
 
     doc.update({
         "tool": "pipeline.batch_mesh",
@@ -707,6 +874,16 @@ def _write_recon(saved: Path, tag: str | None, tif: Path, params: dict,
     if "path" in steps:
         doc["path_curvature"] = params["path"]
         carried = [c for c in carried if c != "path_curvature"]
+    if scores is not None:
+        doc["scores"] = scores
+        carried = [c for c in carried if c != "scores"]
+    elif "mesh" in steps:
+        # Same reasoning as the curvature block above: the mesh moved, so any
+        # recorded scores describe the surface this run just replaced. A stale
+        # score is worse than no score — it is the one number a later sweep
+        # would rank on.
+        doc.pop("scores", None)
+        carried = [c for c in carried if c != "scores"]
     if carried:
         doc["carried_over"] = {"blocks": carried, "from": carried_from}
     else:
@@ -738,10 +915,13 @@ def main() -> None:
     ap.add_argument("--only", default=None,
                     help="only process _saved folders whose name contains this "
                          "substring")
-    ap.add_argument("--steps", default=",".join(STEPS),
+    ap.add_argument("--steps", default=",".join(DEFAULT_STEPS),
                     help=f"comma-separated subset of {','.join(STEPS)} "
-                         f"(default: all three). --steps curvature needs "
-                         f"neither the image header nor the mask.")
+                         f"(default: {','.join(DEFAULT_STEPS)}). --steps "
+                         f"curvature needs neither the image header nor the "
+                         f"mask; --steps score builds nothing and writes only "
+                         f"the 'scores' block of vessel_recon.json — it is "
+                         f"opt-in because it costs more than the rebuild.")
     ap.add_argument("--tag", default=None,
                     help="write vessel_mesh__TAG.npz siblings instead of "
                          "overwriting in place. '{radius}' and '{smooth}' are "
@@ -772,10 +952,33 @@ def main() -> None:
     g.add_argument("--no-fill-lumen", dest="fill_lumen", action="store_false")
     g.add_argument("--close-um", type=float, default=None)
     g.add_argument("--min-component-um", type=float, default=None)
+    # No upper bound on any of these: a slider ceiling is a widget limit, not a
+    # physical one (CLAUDE.md, "headless equivalents of a slider").
+    g.add_argument("--poisson-grid-um", type=float, default=None)
+    g.add_argument("--poisson-smooth-um", type=float, default=None)
+    g.add_argument("--poisson-iso-pct", type=float, default=None)
 
     g = ap.add_argument_group("surface curvature (comma-separated = a sweep)")
     g.add_argument("--curv-radius-um", default=None)
     g.add_argument("--curv-smooth-iter", default=None)
+
+    g = ap.add_argument_group(
+        "mesh scores (--steps score; three numbers reported as a vector and "
+        "never combined into one — docs/ISSUES.md I03)")
+    g.add_argument("--score-radii", default=None,
+                   help=f"comma-separated radius_um values for the scale-"
+                        f"stability sweep. Default "
+                        f"{SCORE_DEFAULTS['radii_um']} — the radii P24's "
+                        f"plateau table was measured at.")
+    g.add_argument("--score-max-verts", type=int, default=None,
+                   help="cap the surface vertices the curvature sweep is "
+                        "fitted over. Off by default: it is a cost control, "
+                        "not a free approximation, and a decimated score is "
+                        "comparable only to another at the same cap and seed.")
+    g.add_argument("--score-max-query", type=int, default=None,
+                   help="cap the cadherin voxels coverage is queried with. Off "
+                        "by default; the quantiles are robust and converge "
+                        "well before the full mask.")
 
     g = ap.add_argument_group(
         "in-plane path curvature (the last four are bare function defaults in "
@@ -832,11 +1035,13 @@ def main() -> None:
     combos = params["curv_combos"]
     tag = args.tag
     if len(combos) > 1:
-        if "mesh" in steps or "path" in steps:
+        if "mesh" in steps or "path" in steps or "score" in steps:
             raise SystemExit(
                 "a curvature sweep varies only the curvature: run "
                 "'--steps mesh,path' once, then sweep with '--steps curvature "
-                "--curv-radius-um ... --tag r{radius}'.")
+                "--curv-radius-um ... --tag r{radius}'. (Scoring already "
+                "sweeps radius internally — see --score-radii — so it would "
+                "recompute the same scores once per tag.)")
         if not tag or not ("{radius}" in tag or "{smooth}" in tag):
             raise SystemExit(
                 f"{len(combos)} curvature runs need a --tag containing "
@@ -854,9 +1059,17 @@ def main() -> None:
     for w in warn:
         print(f"  {w}", flush=True)
     print(f"  steps                {','.join(steps)}", flush=True)
-    print(f"  output               "
-          f"{'in place (overwrites vessel_*.npz)' if not tag else f'siblings tagged {tag!r}'}",
-          flush=True)
+    if steps == ("score",):
+        # Scoring writes no array file at all, so "overwrites vessel_*.npz"
+        # would be a false warning about the one run that cannot lose data.
+        where = ("vessel_recon.json" if not tag
+                 else f"vessel_recon__{tag}.json")
+        print(f"  output               scores only, into {where} "
+              f"(no mesh is built and no .npz is written)", flush=True)
+    else:
+        print(f"  output               "
+              f"{'in place (overwrites vessel_*.npz)' if not tag else f'siblings tagged {tag!r}'}",
+              flush=True)
     if "mesh" in steps and "curvature" not in steps and not args.dry_run:
         print("  NOTE: rebuilding the mesh without its curvature — any "
               "existing vessel_curvature.npz for that mesh will be DELETED "

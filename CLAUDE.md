@@ -87,11 +87,48 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
 - `rf.py` — random-forest voxel classifier + instance labeling.
 - `cell_mesh.py` — per-cell surfaces, vertex normals, quadric surface curvature.
 - `vessel_mesh.py` — vessel surface from the cadherin mask (polar / 2D alpha /
-  3D alpha). **`build_mesh` is the single dispatch point** and both the napari
-  tab and `batch_mesh` call it, so the interactive and headless paths cannot
-  drift — the same doctrine as `saved_check.py`. `LIVE_PARAMS` says which knobs
-  each method actually reads; the rest are inert and must be recorded as such.
-- `centerline.py` — in-plane centerline + path curvature + branch nodes.
+  3D alpha / poisson — see `vessel_poisson.py`). **`build_mesh` is the single
+  dispatch point** and both the napari tab and `batch_mesh` call it, so the
+  interactive and headless paths cannot drift — the same doctrine as
+  `saved_check.py`. `LIVE_PARAMS` says which knobs each method actually reads;
+  the rest are inert and must be recorded as such. It returns a 4-tuple and must
+  keep doing so (`saved_check`, `batch_mesh` and the GUI all destructure it);
+  anything extra a method produces goes into the optional `extras=` out-dict.
+  **Adding a method means editing four places in one change** — `METHODS` +
+  `LIVE_PARAMS` + `ALL_PARAMS` here, and `MESH_DEFAULTS` + the `explicit` dict +
+  an argparse flag in `batch_mesh` — because `resolve_params` indexes both by
+  `ALL_PARAMS` and raises `KeyError` otherwise.
+- `centerline.py` — in-plane centerline + path curvature + branch nodes, and
+  `lumen_center_z` (the lumen-centre Z under each point, from a 3D
+  distance-from-wall field, plus the **inscribed lumen radius** — the only direct
+  caliber measurement in the pipeline). The footprint is replicate-padded before
+  `skeletonize` so the field-of-view border does not fork the medial axis.
+  **The points it returns are a point set in raster order, not a traced path**
+  (`docs/ISSUES.md` P27) — there is no arc length, and κ survives only because it
+  is fitted over KD-tree neighbourhoods.
+- `vessel_poisson.py` — the fourth reconstruction method, and the only one that
+  **approximates** rather than interpolates: sheet normals from the structure
+  tensor, oriented into the lumen *volume* (no centerline, no fill-holes, no
+  skeletonize), then a Neumann DCT Poisson solve for a smooth indicator function
+  whose level set is the surface. Pure functions, and deliberately **no `gpu.*`**
+  — cupy and scipy differ in the last bits and that would break `batch_mesh`'s
+  byte-identical rebuild. **The surface it returns is open at the x/y domain
+  faces by design** (that is the Neumann boundary; the vessel really does leave
+  through them), so it carries its own per-vertex normals and
+  `cell_mesh.mesh_curvature` must be handed them — the enclosed-volume sign rule
+  cannot work on an open surface. It is the first reconstruction in the project
+  to pass `docs/ISSUES.md` P24's plateau test (`slope_loglog` +0.009 against
+  alpha 3D's −1.428 on the same mask); it does **not** beat alpha 3D on coverage,
+  and I06 records the whole four-vector rather than a verdict.
+- `mesh_score.py` — how good is a vessel reconstruction: scale stability,
+  topology, coverage, support. Pure functions, same doctrine as `saved_check.py`.
+  **Four numbers, reported as a vector and never combined into one** — a
+  weighting is a hidden constant, and the selection rule belongs to whoever runs
+  a sweep. Scoring is not choosing; nothing here picks parameters.
+  `coverage` (is the surface everywhere the data is?) and `support` (is it
+  anywhere the data is *not*?) are duals and must be read together: each alone
+  is gamed by the other's failure mode. Validated against known surfaces, not
+  just against this repo's own recorded numbers — see `docs/ISSUES.md` I03.
 - `measure_core.py` — headless per-adhesion measurement. **Never prints**; it
   returns its degradation warnings in `result["notes"]` for the caller to print.
 - `saved_check.py` — the consistency checks over `_saved` intermediates, as pure
@@ -104,8 +141,10 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
   `batch_measure.py` does. `batch_mesh.py` rebuilds only the vessel geometry
   (mesh / surface curvature / centerline) from the saved cadherin mask plus the
   OME *header* — no pixels decoded, no napari — and writes a `vessel_recon.json`
-  recording what produced each mesh. All print a per-image summary and set an
-  exit code.
+  recording what produced each mesh. Its fourth step, `--steps score`, builds
+  nothing and only records `mesh_score`'s four numbers into that JSON; it is
+  opt-in because it costs more than the rebuild does. All print a per-image
+  summary and set an exit code.
 - `view.py` — the napari app.
 
 **GUI (`pipeline/gui/`, one module per tab):** `loader`, `display`, `nuclei`,

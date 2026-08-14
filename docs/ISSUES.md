@@ -62,14 +62,14 @@ true of the code and data on that date and may not be true now.
 
 | ID | title | sev | status |
 |---|---|---|---|
-| [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | **fixed** |
+| [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | **fixed** — part B has a principled replacement for [I06](#i06) |
 | [P02](#p02) | `ratio_clover_ruby` tracks the ruby noise floor, not tension | S1 | open |
 | [P03](#p03) | Adhesion detection is depth-truncated | S1 | open — **confirmed 6/6** |
 | [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | **fixed** |
 | [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open |
 | [P06](#p06) | Tension readout drifts with imaging depth | S2 | open — **sign flips 6 images** |
 | [P07](#p07) | `peak_local_max` drops border seeds, in two places | S2 | **fixed** |
-| [P08](#p08) | `path_curv_xy` — 20 µm fit window on a ~140 µm-wide vessel; contamination; unsigned | S1 | open |
+| [P08](#p08) | `path_curv_xy` — 20 µm fit window on a ~140 µm-wide vessel; contamination; unsigned | S1 | open — **(c) fix landed, not re-measured** |
 | [P09](#p09) | `dist_mesh_um` measures to rejected geometry; no gate on curvature | S2 | **(a) fixed**, (b)(c) open |
 | [P10](#p10) | `force_total_pN` is not a force | S2 | open |
 | [P11](#p11) | `measure_core` duplicates the Measure worker and has diverged | S3 | open |
@@ -82,16 +82,22 @@ true of the code and data on that date and may not be true now.
 | [P18](#p18) | FRET constants set but not calibrated | — | **fixed** |
 | [P19](#p19) | `auto_min_size_otsu` is defeated by a hard-coded floor | S3 | open |
 | [P20](#p20) | `subsample_um` silently sets the vessel mesh's resolution | S2 | open |
-| [P21](#p21) | One global alpha cannot be correct on a tapering vessel | S2 | open |
-| [P22](#p22) | Centerline overlay is drawn at a single wrong z | S3 | **fixed** |
+| [P21](#p21) | One global alpha cannot be correct on a tapering vessel | S2 | open — **does not apply to [I06](#i06)'s method** |
+| [P22](#p22) | Centerline overlay is drawn at a single wrong z | S3 | **fixed** — Z rule replaced 2026-08-13 |
 | [P23](#p23) | Centerline preprocessing amputates tapering vessels | S2 | open |
-| [P24](#p24) | `curv_*` has no scale-independent value — `radius_um` sets the answer | S1 | open |
+| [P24](#p24) | `curv_*` has no scale-independent value — `radius_um` sets the answer | S1 | open — **plateau reached 2026-08-13**, CSVs not rebuilt |
 | [P25](#p25) | `fibroblast_count` never cleared — a failed image inherits the previous one's counts | S1 | **fixed** |
 | [P26](#p26) | Batch builds vessel meshes at widget defaults; the five new images do not match the reference | S2 | open |
+| [P27](#p27) | The centerline is a point set in raster order, not a traced path | S3 | open |
+| [P28](#p28) | The cadherin threshold discards real wall — the gaps have signal in them | S2 | open — **measured 2026-08-13** |
+| [P29](#p29) | A field-of-view notch fabricates a branch node; `dist_branch_um` is wrong for 18% of rows | S2 | open |
+| [P30](#p30) | `build_mesh` silently treats an unknown method string as alpha 3D | S3 | open |
 | [I01](#i01) | Progress / completion bars for long-running operations | idea | open |
 | [I02](#i02) | Fibroblast / endothelial scatter diagnostic | idea | open |
-| [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open — **instrumented** (`batch_mesh`) |
+| [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open — **scorer landed** (`mesh_score`); choosing still open |
 | [I04](#i04) | `batch.py` has no way to re-run one step | idea | open — **mesh/curvature/centerline done** |
+| [I05](#i05) | Is the alpha shape the right reconstruction method at all? | idea | open |
+| [I06](#i06) | Oriented-point implicit reconstruction — the plan of record | idea | **in progress — built and accepted on the plateau test** |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -282,6 +288,129 @@ now measured rather than open questions: [P03](#p03) is confirmed and
 [P09](#p09)(a) is fixed. What remains ahead of the geometry work is nothing —
 the reconstruction is next.
 
+**Update, 2026-08-12 (later still) — the mesh rebuild tool and the scorer both
+exist; [I03](#i03) is now down to its last third.** `pipeline/batch_mesh.py`
+rebuilds mesh / curvature / centerline headlessly ([I04](#i04)), and
+`pipeline/mesh_score.py` scores the result on four axes — `scale_stability`,
+`topology`, `coverage`, `support` — validated against a sphere and a torus
+rather than only against this file's own recorded numbers ([I03](#i03) History).
+Three consequences for entries that were previously arguments rather than
+measurements:
+
+- **[P24](#p24)'s plateau test is now a calibrated number.** `slope_loglog` = 0
+  means κ2 is a property of the surface, −1 that it is a readout of the fit
+  window. A sphere returns +0.02; the reference vessel mesh returns **−1.19**,
+  and *no* reconstruction tried so far reaches a plateau.
+- **[P21](#p21)'s alpha knob is now mechanistically understood.** Max fabricated
+  spur ≈ 0.95 × `alpha3d_um`, max edge ≈ 2 × `alpha3d_um`, independent of
+  `subsample_um`. `alpha3d_um` **is** "the longest spur out of the wall I
+  permit".
+- **[P19](#p19) is weaker than it looked and [P20](#p20) is not a knife-edge.**
+  The `min_size` floor sits mid-plateau over an 8× range, and `subsample_um`
+  1 → 5 moves `slope_loglog` by only 0.185.
+
+**[I05](#i05) is opened by this work, not closed by it.** With comparison finally
+possible, the alpha shape was compared — against the other two in-repo methods
+(neither completes in an hour) and against a prototype density-field surface
+(always manifold, spur-free, but it cannot yet be smooth and covering at the same
+time). Verdict: alpha 3D stays the default on the evidence, and is not settled.
+
+**Queue: [I03](#i03)'s selection rule → the six-image rebuild it implies (+
+[P24](#p24), [P21](#p21), [I05](#i05)) → [P02](#p02) → [P08](#p08)/[P10](#p10).**
+What is left in [I03](#i03) is **choosing**: nothing weights the four scores, and
+deliberately so — on the reference/defaults pair they rank the two meshes
+*oppositely*, so any weighting would be the thing deciding the answer. Until a
+rule exists there is no way to say which of two candidate surfaces is better,
+which is the trap this whole line of work was opened to escape.
+
+**Update, 2026-08-13 — centerline work landed off-queue.** Three changes to
+`pipeline/centerline.py` and the vessel-mesh tab, none of them from the queue
+above, all recorded in their entries today: the skeleton is now padded against
+the field-of-view border ([P08](#p08)(c)), the overlay's Z comes from a 3D
+distance-from-wall field rather than a column mean ([P22](#p22)), and the same
+computation yields an **inscribed lumen radius** — the pipeline's only direct
+caliber measurement, which independently confirms [P24](#p24)(b). One new defect
+came out of it: [P27](#p27), the centerline is a point *set*, not a traced path.
+
+**Update, 2026-08-13 (later) — the direction changes, and the reason is
+[P28](#p28).** A session spent asking what the centerline is actually *for*
+ended somewhere else. Three findings, in the order they landed:
+
+1. **[P29](#p29) — the centerline forks at a field-of-view corner**, because a
+   notch in the mask that opens onto the image border cannot be closed by
+   `binary_fill_holes` and the medial axis runs around both sides of it. The
+   border-padding fix does **not** address this, and the false branch node is in
+   the saved file, so `dist_branch_um` is wrong for **18.4%** of rows.
+2. **The cross-section is not circular and not clipped.** Measured directly
+   from the enclosed lumen on the left arm: 151–180 µm wide in plane, 83–92 µm
+   deep, **aspect 1.64–2.15**, with only 0.01% of the mask in the first z slice
+   and none in the last. Recorded in [P24](#p24)(b), which had been reading two
+   measurements of the *minor* axis and one of the *major* axis as three
+   estimates of one radius.
+3. **[P28](#p28) — the cadherin threshold is throwing away real wall.** The
+   gaps the reconstruction has to bridge mostly are not holes: ray-casting the
+   raw channel finds signal at **the same radius** as the detected wall, ~40% as
+   bright, at 5–6× the lumen noise. The raw ring is continuous; the mask is a
+   dashed copy of it.
+
+**What that does to the plan.** The reconstruction work had been heading toward
+a centerline-frame sweep, which needs the centerline to be ordered
+([P27](#p27)), accurate, branch-aware and clean at the edges — i.e. it needs
+every open centerline defect fixed first. It is superseded by [I06](#i06),
+which needs the centerline only to say **which side of the wall the lumen is
+on**, a job robust to every one of those defects. The corner fork, the notch and
+the ordering all stop being blockers to the surface. They remain real defects;
+they are no longer on the critical path.
+
+**Scope, decided 2026-08-13:** the deliverable is the **geometry pipeline**, built
+in anticipation of a FRET calibration that does not exist yet. The force columns
+stay blank and are not a blocker — which is workable precisely because
+[I06](#i06)'s acceptance test ([P24](#p24)'s plateau) needs no force at all. One
+consequence: anything that would be *silently wrong the moment force is
+populated* should be fixed while it is still blank. That is [P10](#p10), and
+only [P10](#p10).
+
+**Queue: [I06](#i06) (+ [P28](#p28) as its input) → [P29](#p29) → re-export the
+six → [P02](#p02)/[P03](#p03) when the force data exists.** [I03](#i03)'s
+selection rule is still unwritten, but [I06](#i06) can proceed ahead of it: a
+weighting is only needed to break a trade, and if the new surface dominates
+alpha 3D on all four scores no weighting is required to prefer it.
+
+**Update, 2026-08-13 (later still) — [I06](#i06) is built and the plateau is
+reached; it does *not* dominate, so the selection rule is now load-bearing.**
+`pipeline/vessel_poisson.py` returns `slope_loglog` = **+0.009** on the reference
+image against alpha 3D's **−1.428** on the same mask, with 0 non-manifold faces
+against 18.7% and χ = −4 against +2,870. **This is the first reconstruction in
+the project's history to plateau**, and [P24](#p24)'s pass/fail is met.
+
+But the hoped-for clean sweep did not happen: **alpha 3D still wins both
+coverage columns** (77.0% vs 61.6% at 2 µm, 99.9% vs 87.9% at 5 µm) **and
+support max reach** (9.87 µm vs 26.70 µm). Full table in [I06](#i06)'s History.
+So the paragraph above has been tested and its escape clause did not apply — the
+four scores rank the two methods oppositely again, exactly as they did on the
+reference/defaults pair, and **[I03](#i03)'s missing selection rule is now what
+stands between "the plateau is reachable" and "this is the reconstruction we
+use".**
+
+That said, the trade is not symmetric and the next step is not the rule. The
+coverage gap is a statement about *how many mask voxels lie near the surface*,
+and [P28](#p28) has already measured that a large share of what the mask calls
+"gap" has real signal in it while a share of what it calls "wall" is noise. Which
+way the coverage comparison should come out therefore depends on a question
+[P28](#p28) answers and this comparison assumes. **Run [P28](#p28) first, with
+the method held fixed** — that is the controlled experiment [I06](#i06) was
+sequenced around, and it is cheaper than writing a weighting nobody can justify.
+
+Two things also came out of the build and are recorded in their entries:
+[P30](#p30) (`build_mesh` silently treats an unknown method string as alpha 3D)
+and, in [P01](#p01)'s History, a sign check that compared a median against a p99
+and thereby inverted a correct curvature field on the real image — caught only
+because the plateau came out at −0.447 instead of +0.009.
+
+**Queue: [P28](#p28) (method held fixed) → [I03](#i03)'s selection rule →
+[P29](#p29) → re-export the six → [P02](#p02)/[P03](#p03) when the force data
+exists.**
+
 ---
 
 # Open defects
@@ -296,7 +425,7 @@ the reconstruction is next.
 | **Opened** | 2026-08-10 (audit F1) |
 | **Last verified** | 2026-08-10 |
 | **Resolved** | 2026-08-10 (commit `af8e6c0`) |
-| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/cell_mesh.py:286` (`vertex_outward_normals`) |
+| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/cell_mesh.py:305` (`vertex_outward_normals`) |
 | **Affects** | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian`; the Vessel-mesh tab's "implied caliber" readout; the Measure tab's `Spearman(ratio, curv_*)` lines |
 | **Evidence** | `docs/audit.md` §3 F1 |
 
@@ -346,7 +475,7 @@ evidence that the corrected version is the right one.
 
 **Only the default mesh method is affected.** `mesh_from_volume` (marching cubes,
 used by the polar and alpha-2D methods) returns consistently-wound faces. The
-GUI default is `alpha 3D (points)` (`pipeline/gui/vessel_mesh.py:96`), which is
+GUI default is `alpha 3D (points)` (`pipeline/gui/vessel_mesh.py:80`), which is
 what produced every mesh saved so far.
 
 **Not affected:** `prune_by_normal` compares `|dot|` and is sign-agnostic.
@@ -506,6 +635,35 @@ at ≈ −1/R; K ≈ 0; face-normal coherence > 0.9. **Passed** — see below.
   noise before and really are self-consistent now. What is withdrawn is only the
   claim that they are *validated against the vessel* — they are not, and
   [P24](#p24) is why.
+
+- 2026-08-13 — **part B now has a principled replacement, for one method.**
+  `vessel_poisson` reads the winding of every face from the sign of
+  `face_normal · ∇χ` at the face's own centroid, where χ is the fitted indicator
+  function. That needs neither a closed surface (the Poisson surface is open at
+  the x/y domain faces by construction, so the enclosed-volume branch is
+  unavailable to it) nor the star-shaped-about-the-centroid assumption this
+  entry measured wrong on **44.4%** of the reference mesh's vertices. On the
+  synthetic elliptic cylinder **100.0%** of the resulting vertex normals agree
+  in sign with the analytic outward normal, and κ2 sign consistency is 100.0%
+  (81.6–94.5% on the real image, where the surface is not an ideal tube).
+
+  This is a per-method fix, not a fix to `vertex_outward_normals`: the
+  centroid fallback is still what the three alpha/polar methods get, and it is
+  still wrong on 44.4% of vertices there. What changed is that
+  `cell_mesh.mesh_curvature` now takes a `normals=` argument, so a method that
+  knows its own orientation can supply it instead of having one inferred.
+
+  **A near miss worth recording.** The first version of `vessel_poisson`'s
+  global-sign guard compared the *median* χ over the lumen core against the
+  *99th percentile* over the exterior. The exterior is ~9× the core's volume and
+  includes every cell just outside the wall, so its p99 sits inside the wall's
+  own transition: measured on the reference image, core median +0.0762,
+  exterior median −0.0037, exterior p99 +0.0985. The guard therefore negated a
+  perfectly correct field and inverted every curvature sign downstream — the
+  exact failure it existed to catch, and invisible in every score
+  (`slope_loglog` read −0.447 rather than +0.009, which looks like a mediocre
+  result rather than a sign error). It now compares median to median. The
+  lesson generalises: **a sign check must compare like with like.**
 
 
 ---
@@ -1136,9 +1294,9 @@ crop padding above `min_distance`.
 | **Status** | open |
 | **Severity** | S1 (raised from S2 on 2026-08-11 — see (e)) |
 | **Opened** | 2026-08-06 |
-| **Last verified** | 2026-08-11 |
-| **Resolved** | — |
-| **Where** | `pipeline/centerline.py:128` (radius), `:139` (unsigned) |
+| **Last verified** | 2026-08-13 ((c)'s fix landed; the κ table below is **pre-fix** and has not been re-measured) |
+| **Resolved** | — ((c) has a landed fix, unverified) |
+| **Where** | `pipeline/centerline.py:166` (radius), `:177` (unsigned), `:146-153` (the border pad) |
 | **Affects** | `path_curv_xy` |
 | **Evidence** | `docs/audit.md` §3 F6 |
 
@@ -1191,6 +1349,17 @@ consequence of framing.
 **The fix:** drop centerline points within `smooth_um` of the xy boundary, or
 discard skeleton branches that touch the border before fitting κ. Costs ~10% of
 centerline points.
+
+> **Superseded by what landed, 2026-08-13 — a third option, and it discards
+> nothing.** Neither of the two above was implemented. Instead the footprint is
+> **replicate-padded** before `skeletonize` and the pad cropped away afterwards
+> (`centerline.py:146-153`), so every arm extends straight past the edge and the
+> medial axis carries on instead of forking toward the corners of the cut. The
+> pad depth is read off the footprint's own distance transform (p95 of the
+> half-width, 81.7 µm on the reference image) rather than chosen, because the
+> region over which the border can bend the axis *is* the footprint half-width.
+> **The κ table above is pre-fix and has not been re-measured** — see the
+> History entry.
 
 **(d) The interim workaround silently empties a non-branched image.** Some
 vessels in this dataset are a single tunnel or a cone rather than a Y. With no
@@ -1268,6 +1437,44 @@ non-branched images vanish. See (d). Note this does nothing about (e).
   through them [P24](#p24). Ordering note: (c) border flare is still worth fixing
   on its own — it is cheap and it removes a known artefact — but with (e) on the
   record it should no longer be described as making the column trustworthy.
+
+- 2026-08-13 — **(c) has a landed fix, by border padding rather than by
+  discarding points.** `vessel_path_curvature_xy` gained a `border_pad_um`
+  argument (default: auto, from the footprint's own distance transform) which
+  replicate-pads the footprint before `skeletonize` and crops the pad after. The
+  effect recorded at the bench, on the reference image: the lower arm had run
+  straight down and then kinked hard toward the bottom-right corner, and the
+  upper-left arm had forked into two short branches at the top edge; both are
+  gone, and 80 µm of pad is where the lower arm measured straight.
+
+  **This is not yet verified as a fix to the defect this entry states.** What was
+  observed is the skeleton's *shape*; what (c) measures is the **κ distribution
+  by distance-to-edge** (10× the interior curvature in the outer 5 µm, 42% of
+  top-decile κ within 30 µm of an edge). That table has not been recomputed, and
+  it is the acceptance test. Until it is, treat (c) as *fix landed, unverified* —
+  re-running it is one `batch_mesh --steps path` per image plus the same
+  banding as the table above.
+
+  **(a), (b), (d) and (e) are untouched.** In particular (e) still stands and
+  still dominates: a border-clean medial axis fitted over a 20 µm window on a
+  ~140 µm-wide vessel is still measuring medial-axis wobble. Removing a known
+  artefact does not make the column trustworthy, exactly as the ordering note
+  above says.
+
+  Also landed alongside, and **not** a fix to anything in this entry: the
+  centerline overlay now carries a Z ([P22](#p22)) and an inscribed lumen radius
+  ([P24](#p24)(b)). Neither enters κ, which is still computed purely in xy.
+  A new limitation was recorded while doing it — [P27](#p27).
+
+  > **Correction, 2026-08-13 (same day) — the padding fix is directional, and it
+  > fails at corners.** The entry above says the fix removes the border forks.
+  > Measured: it removes the one on the *lower* arm, which meets the bottom edge
+  > close to square. It does **not** remove the fork where an arm exits near a
+  > **corner** — there the footprint touches two edges, and replicate-padding
+  > extends each one *perpendicular to itself*, producing one arm in +x and one
+  > in +y instead of a single arm running into the corner. Fork present with and
+  > without the pad, at identical coordinates. Full measurement and the real
+  > cause (a border-connected notch in the mask) in [P29](#p29).
 
 ---
 
@@ -1430,6 +1637,19 @@ voxel). **Needs a number from the user.**
   renumbered `nuc_id` reproduce [P04](#p04)'s recorded figures exactly, because
   that CSV predated the nucleus fixes.
 
+- 2026-08-13 — **(a) cannot arise on the [I06](#i06) Poisson method.** It is
+  marching-cubes output, so every vertex is a corner of at least one triangle:
+  measured on the reference image, **1.2%** interior vertices against alpha 3D's
+  **79.9%** at defaults and 18.8% on the hand-tuned reference. (The residual
+  1.2% is vertices whose faces `min_component_um` cut, not buried points.) The
+  fix recorded above is still what makes `dist_mesh_um` right for the alpha
+  methods; this is a note that one reconstruction does not have the defect to
+  begin with.
+
+  (b) is *improved but not gone*: surface-vertex spacing is **0.92 µm** on the
+  Poisson mesh against 2.25 µm on the reference, so `dist_mesh_um` is a distance
+  to a finer point lattice — still a lattice.
+
 ---
 
 <a id="p10"></a>
@@ -1452,6 +1672,15 @@ pN·µm³.
 Currently blank on this dataset because FRET is not configured ([P18](#p18)), so
 it misleads no one yet — but it will the moment a `fret` block is added. Fix the
 name, the units, or both before that happens.
+
+> **Priority note, 2026-08-13.** The 2026-08-13 scope decision — build the
+> geometry pipeline now, in anticipation of a FRET calibration that does not yet
+> exist — makes this **the one thing on the force side worth fixing today**. The
+> rule it follows from: fix anything that would be *silently wrong the moment
+> force is populated* while it is still blank. This is the only entry that
+> qualifies. ([P02](#p02)'s `background_subtract` clipping will also apply to the
+> FRET channels when they arrive, but that is frozen code and needs a decision at
+> calibration time, not a fix now.)
 
 ---
 
@@ -1507,11 +1736,11 @@ should not share a commit with behaviour changes. **Deliberately deferred.**
 | **Opened** | 2026-08-10 (audit F9) |
 | **Last verified** | 2026-08-11 |
 | **Resolved** | 2026-08-11 (commit `04262b8`) |
-| **Where** | `pipeline/batch_measure.py:181`, `:144`; `pipeline/gui/vessel_mesh.py:551` |
+| **Where** | `pipeline/batch_measure.py:181`, `:144`; `pipeline/gui/vessel_mesh.py:515` (`_load_curv`'s length check) |
 
 Two asymmetries between the GUI and headless paths:
 
-- `gui/vessel_mesh.py:547` prints an explicit warning when a loaded curvature
+- `gui/vessel_mesh.py:515` prints an explicit warning when a loaded curvature
   file's length does not match the mesh, because Measure will silently NaN every
   curvature column. `batch_measure.py` loads the same two files with **no such
   check**, so a stale pairing produces a CSV with four blank columns and no
@@ -1692,7 +1921,7 @@ Grouped because each is small and none affects the headline numbers.
 | **Status** | open |
 | **Severity** | S3 |
 | **Opened** | 2026-08-10 |
-| **Last verified** | 2026-08-10 |
+| **Last verified** | 2026-08-12 (the counterfactual sweep — the floor sits mid-plateau) |
 | **Resolved** | — |
 | **Where** | `pipeline/denoise.py:61`, `pipeline/gui/cadherin.py:42,171,191` |
 | **Affects** | the cadherin mask, and therefore every vessel-geometry column |
@@ -1764,6 +1993,52 @@ mesh rather than the size histogram is the better criterion).
   **Still open**, and nothing here changes it: the criterion is still Otsu on a
   distribution that is not bimodal. Recording a number is not choosing a better
   one. `auto-raw` now makes the counterfactual runnable — nobody has run it yet.
+- 2026-08-12 — **the counterfactual has now been run, and the magic constant is
+  doing real work.** `min_size` swept with the mesh knobs pinned at the reference
+  set, every mesh scored by `mesh_score` against **one fixed mask**
+  (`min_size = 12`) so a filter that discards real wall cannot score as an
+  improvement by being graded on the subset it kept:
+
+  | `min_size` | components kept | mask voxels | surface verts | χ | coverage ≤2 µm | support max reach |
+  |---|---|---|---|---|---|---|
+  | **0** (none) | 226,093 | 1,833,005 | 3,478 | **−3** | **2.5%** | **78.27 µm** |
+  | **3** (≈ the Otsu cut) | 21,808 | 1,595,609 | 8,075 | −289 | 40.3% | 23.43 µm |
+  | **12** (the floor, shipped) | 3,764 | 1,517,396 | 7,282 | −248 | 42.9% | 13.72 µm |
+  | 30 | 2,153 | 1,488,270 | 6,907 | −223 | 43.3% | 12.82 µm |
+  | 100 | 1,069 | 1,429,001 | 6,183 | −209 | 42.4% | 12.61 µm |
+  | 500 | 321 | 1,269,637 | 4,781 | −137 | 36.7% | 10.66 µm |
+
+  Three things follow, none of them previously measurable:
+
+  - **Otsu alone is materially worse than the floor.** At `min_size = 3` the
+    reconstruction carries **23.4 µm** spurs against 13.7 µm at 12, and covers
+    less of the wall (40.3% vs 42.9%). So "the floor defeats Otsu" is true as
+    stated, but the thing it defeats is worse than it is. Running `auto-raw`
+    would degrade this image, not improve it.
+  - **12 is not a knife-edge.** From 12 to 100 — an 8× range — coverage stays
+    42.4–43.3% and max reach 12.6–13.7 µm. The constant is unjustified but it
+    sits in the middle of a broad plateau, which is a much weaker defect than
+    this entry assumed.
+  - **`min_size = 0` is a cliff, not a slope.** With no filtering at all the
+    alpha shape bridges the 226,093 speckle components into one smooth envelope:
+    χ = −3, coverage **2.5%**, spurs to 78 µm. Note that this mesh also has the
+    *best* `slope_loglog` of any built in this project (**+0.07**, i.e. formally
+    "scale-free") — because a featureless blob genuinely is. That is the
+    blob-gaming failure [I03](#i03) predicts, observed rather than hypothesised,
+    and it is caught only by `coverage`. It is the concrete argument for scoring
+    with a vector rather than any single number.
+
+  **Still open**: the criterion. This measures that the shipped value is
+  defensible and that the plateau around it is wide; it does not supply a
+  principled way to pick one, and the distribution is still not bimodal.
+- 2026-08-13 — **a larger problem sits upstream of this one: [P28](#p28).** This
+  entry is about which *components* to discard after binarisation. Measured on
+  the raw channel, the binarisation itself is discarding real wall — the gaps in
+  the mask carry signal at the same radius as the detected wall, ~40% as bright,
+  at 5–6× the lumen noise. So tuning the size floor is optimising downstream of
+  a lossy step. Nothing here is retracted; the plateau measurement above stands.
+  But "the mask is roughly right and the floor is an unjustified constant on it"
+  is too generous a reading of the mask.
 
 ---
 
@@ -1775,9 +2050,9 @@ mesh rather than the size histogram is the better criterion).
 | **Status** | open |
 | **Severity** | S2 |
 | **Opened** | 2026-08-10 |
-| **Last verified** | 2026-08-10 |
+| **Last verified** | 2026-08-12 (scored across `subsample_um` 1 → 5; not a knife-edge) |
 | **Resolved** | — |
-| **Where** | `pipeline/vessel_mesh.py:47` (`voxel_subsample`), `pipeline/gui/vessel_mesh.py:102` |
+| **Where** | `pipeline/vessel_mesh.py:52` (`voxel_subsample`), `pipeline/gui/vessel_mesh.py:85` (the slider default) |
 | **Affects** | `dist_mesh_um`, all four `curv_*` columns, and the alpha value that is meaningful |
 
 The shipped mesh used `subsample_um = 5.0`. That step turned **1,517,396 mask
@@ -1836,6 +2111,24 @@ debris clump or a neighbouring membrane votes as strongly as real wall.
   `voxel_subsample` still keeps one representative per occupied cell and discards
   the occupancy, and [P09](#p09)(b)'s resolution limit is still set by this knob
   rather than by the image.
+- 2026-08-12 (later) — **this knob is now scored, and it is not a knife-edge.**
+  With `alpha3d_um` and `min_component_um` pinned, `subsample_um` 1 → 5 moves
+  `mesh_score`'s `slope_loglog` by only 0.185 and its coverage median smoothly
+  and monotonically (1.62 → 2.16 µm) — so the reconstruction is not balanced on
+  a hair-trigger setting of the dominant knob, which was an open worry rather
+  than a measured fact. Full table in [I03](#i03)'s History.
+
+  The same sweep shows the knob is **not** what produces the spurs reaching out
+  of the vessel: max fabricated reach stays at 14.26 → 13.72 µm and max edge at
+  ~29 µm across the whole range. That is set by `alpha3d_um` ([P21](#p21)), not
+  by this. The `subsample_um = 5.0` rebuild is byte-identical to the shipped
+  `vessel_mesh.npz`, which independently confirms the reference parameter set a
+  second time.
+
+  **Still unchanged:** the vote count. And note that the isolated points this
+  entry says the alpha shape bridges to are exactly what `mesh_score.support`
+  now measures the consequence of — the evidence for the vote-count idea is
+  therefore now collectable, though it has still not been collected.
 
 ---
 
@@ -1847,9 +2140,9 @@ debris clump or a neighbouring membrane votes as strongly as real wall.
 | **Status** | open |
 | **Severity** | S2 |
 | **Opened** | 2026-08-10 |
-| **Last verified** | 2026-08-10 (measured on one image; the taper case is predicted, not yet measured) |
+| **Last verified** | 2026-08-12 (the alpha↔spur relation measured on one image; the taper case is still predicted, not measured) |
 | **Resolved** | — |
-| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/gui/vessel_mesh.py:103` |
+| **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/gui/vessel_mesh.py:86` (the slider default) |
 | **Affects** | what surface `dist_mesh_um` and `curv_*` refer to |
 
 `alpha_shape_faces` returns the boundary of a **solid** — the faces bounding
@@ -1925,7 +2218,44 @@ that varies by construction.
 > lumen, not squeezed between the two. On a taper the narrow end still closes the
 > gap, so the structural argument is unchanged.
 
+> **Addendum, 2026-08-12 — what alpha costs is now measured, and it is what the
+> eye sees.** `mesh_score.support` measures how far the reconstructed surface
+> sits from any retained cadherin voxel — sampled over triangle *interiors*,
+> since the alpha-3D vertices are cadherin voxels and so are at distance zero by
+> construction. Across `alpha3d_um` = 5 → 30 on `V3_..._04step_002`, the maximum
+> fabricated reach tracks **≈ 0.95 × `alpha3d_um`** and the longest edge
+> **≈ 2 × `alpha3d_um`** (the latter exactly as a circumradius bound requires),
+> while `subsample_um` moves neither. So `alpha3d_um` is precisely "the longest
+> spur out of the wall that I permit", and at the shipped 15.0 that is a
+> **13.7 µm** spur with **19.2%** of the surface area sitting more than 5 µm from
+> any voxel.
+>
+> This is the same trade-off this entry describes, now with both sides on one
+> axis: alpha must be large enough to bridge the ~8–10 µm wall gaps (below ~7.5
+> coverage collapses) and every micron above that is bought as fabricated
+> surface. It does not resolve the taper argument — a varying lumen radius still
+> sweeps through any fixed alpha — but it does mean the cost of a too-large alpha
+> is no longer invisible. Table in [I03](#i03)'s History.
+
 **Related:** [P01](#p01), [P20](#p20), [P24](#p24), [I03](#i03).
+
+**History**
+- 2026-08-13 — **`alpha3d_um` as "the longest spur I permit" does not apply to
+  the [I06](#i06) Poisson method at all**, because that method has no alpha and
+  bridges gaps with a harmonic solution rather than a triangle. Its longest
+  triangle edge on the reference image is **3.36 µm** against alpha 3D's
+  **19.90 µm** — the fabricated-surface mechanism this entry describes is simply
+  absent.
+
+  That does not make its bridging free, and the numbers go the other way on
+  reach: `support` max reach is **26.70 µm** for Poisson against **9.87 µm** for
+  alpha 3D at defaults (and 13.72 µm for the hand-tuned reference), with
+  unsupported area >5 µm at 19.6% against 16.5%. So the Poisson surface reaches
+  *further* from the data than the alpha shape does, but as smooth sheet rather
+  than as spurs. The taper argument this entry makes is untouched — it is an
+  argument about a single global length scale, and `poisson_smooth_um` is also a
+  single global length scale, so a tapering vessel sweeps through it too. What
+  changes is only that the cost is no longer paid in spikes.
 
 ---
 
@@ -1934,12 +2264,12 @@ that varies by construction.
 
 | | |
 |---|---|
-| **Status** | fixed |
+| **Status** | fixed — the 2026-08-10 fix was itself **replaced** on 2026-08-13 |
 | **Severity** | S3 (display only — no exported column changes) |
 | **Opened** | 2026-08-10 |
-| **Last verified** | 2026-08-10 |
-| **Resolved** | 2026-08-10 (commit `af8e6c0`) |
-| **Where** | `pipeline/gui/vessel_mesh.py:398` (`_path_z_um`, `_show_path`) |
+| **Last verified** | 2026-08-13 |
+| **Resolved** | 2026-08-10 (commit `af8e6c0`); superseded 2026-08-13 |
+| **Where** | `pipeline/centerline.py:195` (`lumen_center_z`), `pipeline/gui/vessel_mesh.py::_show_path`. **`_path_z_um` no longer exists** — the pre-2026-08-13 fix |
 | **Affects** | the `Vessel path curvature (X-Y)` layer only |
 
 `_show_path` places every centerline point at one z — the mean of **all** mesh
@@ -2012,6 +2342,62 @@ it. This is the overlay only.
   the helper is not later mistaken for an axis estimator, which is a use it was
   never measured for.
 
+- 2026-08-13 — **`_path_z_um` is gone; the Z now comes from a 3D
+  distance-from-wall field.** The 2026-08-11 note above concluded the column mean
+  was "a good overlay and an unusable axis" and left it in place. It turns out it
+  was not a good overlay either. Two measurements taken at the bench when the
+  replacement was written:
+
+  | | column mean (`_path_z_um`) | `lumen_center_z` |
+  |---|---|---|
+  | occupied columns detecting **only one** of the two walls | **86%** | n/a |
+  | spatial roughness of the resulting Z | **2.95 µm** | **0.00 µm** |
+
+  The structural reason is the one [P08](#p08)'s History already gives — a column
+  through a hollow vessel crosses the near **and** far wall — but with a sparse,
+  depth-attenuated signal the two are rarely both detected, so the mean does not
+  land in the lumen. It lands on whichever wall was detected, and flickers
+  between the bottom and top of the stack from point to point.
+
+  **The replacement** (`centerline.lumen_center_z`) block-reduces the mask to a
+  local occupancy density, thresholds it, takes a 3D distance-from-wall field,
+  and puts each centerline point where that distance is greatest inside the
+  footprint. Three properties are what make it work, each recorded because the
+  obvious alternatives were tried and failed:
+
+  - it is **3D**, so a column detecting neither wall still inherits a sensible
+    distance from its neighbours;
+  - it needs **no watertight seal**. Flood-filling the lumen was tried and
+    returns nothing — the wall sheet has genus ≈ 125, so every fill leaks. A hole
+    perturbs a distance field smoothly instead of breaking it;
+  - the stack has only ~10 µm of headroom above the upper wall, so the distance
+    maximum lands in the lumen rather than in the empty space above the vessel.
+
+  **Two things it adds beyond the overlay.** The inscribed **lumen radius** at
+  each point — see [P24](#p24)(b), where it is an independent caliber check — and
+  an explicit `valid` flag marking points where the lumen is unbounded above or
+  below, i.e. **where the vessel leaves the field of view**. Those points are
+  drawn (Z extrapolated from the nearest bounded neighbour) and ringed in a
+  second layer rather than dropped, because gaps along the path read as a broken
+  centerline rather than as a caveat. The Z, the radius and the flag travel with
+  the saved `path_curvature.npz` as extra keys, so an older reader is unaffected
+  and a file predating them says so on load.
+
+  **Still display-only.** κ is computed in xy and Z never enters it, so no
+  exported column moves — the same scope this entry has always had.
+
+  > **Caveat on "roughness 0.00 µm", added the same day.** Z is the `argmax` of a
+  > distance field on a **block-reduced grid**, so it is quantized to roughly
+  > `4 × voxel` ≈ 1.3 µm. Read 0.00 as "below the quantum", not as exact. Two
+  > further limits worth stating before this is used as anything more than an
+  > overlay: on an elongated cross-section ([P24](#p24)(b), aspect 1.6–2.2) the
+  > distance field is nearly flat along the long axis, so the centre is weakly
+  > determined in that direction; and `valid` tests only that the maximum is
+  > bounded in **z** and inside the footprint — it does **not** flag proximity to
+  > the x or y image edge, which is the relevant boundary at a branch end. For
+  > [I06](#i06)'s purposes (which side of the wall is the lumen) none of this
+  > matters; for anything finer it does.
+
 ---
 
 <a id="p23"></a>
@@ -2024,7 +2410,7 @@ it. This is the overlay only.
 | **Opened** | 2026-08-10 |
 | **Last verified** | 2026-08-10 (predicted from the code and the stated geometry; not yet measured on a taper image) |
 | **Resolved** | — |
-| **Where** | `pipeline/centerline.py:109` (`open_um`), `:118` (`prune_um`) |
+| **Where** | `pipeline/centerline.py:122` (`open_um`), `:156` (`prune_um`) |
 | **Affects** | `path_curv_xy`, `dist_branch_um` on non-uniform vessels |
 
 Some vessels in this dataset taper to a fine point rather than running as a
@@ -2063,6 +2449,16 @@ than absolute.
   made** — sweeping `open_um` and `prune_um` on a taper image and watching where
   the centerline ends is the next step, and it is now one command per setting.
 
+- 2026-08-13 — **the measurement got a better dependent variable, and one
+  confound was removed.** `centerline.lumen_center_z` ([P22](#p22)) returns the
+  inscribed lumen radius at every centerline point, so "where does the taper get
+  cut off?" can be read as *the caliber at the last surviving point* rather than
+  only as the path's endpoint — which is the quantity the entry is actually
+  about, since both thresholds are caliber thresholds (`open_um` = 4 µm against a
+  radius that is falling). Separately, the border pad ([P08](#p08)(c)) means an
+  arm truncated by the field of view no longer forks there, so an amputated taper
+  and a clipped one are now distinguishable. **Still not measured.**
+
 ---
 
 <a id="p24"></a>
@@ -2073,9 +2469,9 @@ than absolute.
 | **Status** | open |
 | **Severity** | S1 |
 | **Opened** | 2026-08-11 |
-| **Last verified** | 2026-08-11 |
+| **Last verified** | 2026-08-13 (caliber re-confirmed by a third, independent method) |
 | **Resolved** | — |
-| **Where** | `pipeline/cell_mesh.py:360` (`mesh_curvature`), the `radius_um` slider in `pipeline/gui/vessel_mesh.py` |
+| **Where** | `pipeline/cell_mesh.py:379` (`mesh_curvature`), the `radius_um` slider in `pipeline/gui/vessel_mesh.py` |
 | **Affects** | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` |
 
 [P01](#p01) fixed the curvature *frame*, and the columns are now internally
@@ -2117,6 +2513,68 @@ measurements, neither using the mesh or its curvature:
 Read the z figure as the robust one: it involves no `binary_fill_holes`, no mesh,
 and it stops growing with the search window. The xy figure is an upper bound
 because `fill_holes` closes the region enclosed by the Y.
+
+> **Superseded the same day — see the direct measurement below. The three
+> figures do not measure the same axis.**
+>
+> **A third measurement, 2026-08-13 — and it agrees.** `centerline.lumen_center_z`
+> ([P22](#p22)) returns the **inscribed radius of the lumen** at each centerline
+> point: the distance from the chosen centre to the nearest wall in a 3D
+> distance-from-wall field. On the reference image its median is **38.1 µm**,
+> against the ~40 µm the z-extent figure above gives. This is the pipeline's only
+> direct caliber measurement and it is independent of both rows in the table —
+> different input (a density-thresholded wall, not a slab), different operation
+> (a distance transform, not an extent), no mesh, no `fill_holes`. **The
+> ~40 µm figure is now confirmed by three methods that share no machinery**, so
+> the 3–5× gap between it and the shipped κ2 = −0.0703 (R = 14.2 µm) is not an
+> artefact of how caliber was measured.
+
+> ### Corrected, 2026-08-13 — the cross-section is an ellipse, and "~40 µm" is its **minor** axis
+>
+> The paragraph above is wrong about *what* agrees. Sorted by which direction
+> each figure is sensitive to, the three measurements are **the short axis twice
+> and the long axis once**:
+>
+> | measurement | value | sensitive to |
+> |---|---|---|
+> | wall z extent ⟂ to local axis | ~86 µm → **43 µm** half | the **z** direction |
+> | inscribed lumen radius (`lumen_center_z`) | **38.1 µm** | the **shortest** direction — an inscribed sphere is capped by the minor axis |
+> | xy inscribed half-width of the footprint | **70.6 µm** | the **in-plane** direction |
+>
+> Measured directly, cutting the enclosed lumen out of the cadherin shell on the
+> left arm (`docs/scratch/centerline_corner/`):
+>
+> | x (µm) | lumen area | y extent | z extent | **aspect** | solidity |
+> |---|---|---|---|---|---|
+> | 25 | 10,679 µm² | 151.5 | 92.3 | **1.64** | 0.968 |
+> | 55 | 10,975 | 152.1 | 91.0 | **1.67** | 0.979 |
+> | 70 | 11,067 | 154.1 | 87.8 | **1.76** | 0.979 |
+> | 90 | 11,296 | 160.2 | 89.0 | **1.80** | 0.964 |
+> | 115 | 12,637 | 179.7 | 83.5 | **2.15** | 0.985 |
+>
+> So the lumen is ~150–180 µm across in plane and ~85–92 µm deep — a flattened,
+> slightly D-shaped ellipse. **Not an imaging artefact:** 0.01% of the mask lies
+> in the first z slice and **zero** in the last, 3.1% within 5 µm of either
+> limit, so the vessel fits inside the stack and the flattening is real.
+>
+> **Two consequences for this entry.** (a) is unaffected — scale-independence is
+> a property of any smooth surface whatever its cross-section, so the sweep, the
+> absent plateau and `slope_loglog` all stand. **(b) and (c) need restating.**
+> On an ellipse with semi-axes ~70 and ~40, curvature genuinely varies around
+> the circumference by ~5× — κ ≈ a/b² ≈ 0.044 (R ≈ 23 µm) at the sharp ends
+> against κ ≈ b/a² ≈ 0.008 (R ≈ 123 µm) on the flat sides — and it goes
+> **negative** wherever the wall folds inward. So "κ2 = −0.0703 is 3–5× too
+> curved" compares against a circle the vessel is not, and "there is no good
+> `radius_um` to choose" cannot be argued from a single true caliber. The
+> defect this entry describes is real; the arithmetic used to size it was
+> circular geometry applied to an elliptical vessel.
+>
+> **A concavity is also real.** The user reported a bean-shaped cross-section at
+> a branch end, and it is visible in the **raw** channel as an arc cutting
+> inward while staying connected to the ring at both ends. It is not visible in
+> the mask, which is [P28](#p28). Note the solidity column above cannot resolve
+> it: sealing the ring needs a 12–16 µm closing, which fills any indentation
+> shallower than that.
 
 So the vessel radius is of order **40 µm**. The shipped κ2 = −0.0703 (R = 14.2 µm)
 is 3–5× too curved to be its circumferential curvature. Consistent with
@@ -2187,6 +2645,68 @@ other curvature column).
 
   **This does not advance the entry.** The tool measures the plateau; it does not
   produce a reconstruction that has one. What it removes is the cost of asking.
+- 2026-08-12 (later) — **the plateau test this entry asks for is now a number,
+  and it is calibrated.** `mesh_score.scale_stability` reports `slope_loglog`,
+  the least-squares slope of log|median κ2| against log `radius_um`: **0 means
+  the value is a property of the surface, −1 that it is a pure readout of the
+  fit window.** It reproduces this entry's table exactly (all six medians to
+  four decimals, and the sign-consistency column with them) from an independent
+  code path.
+
+  What makes the scale meaningful rather than asserted: on a **sphere of radius
+  R**, where both principal curvatures genuinely are 1/R at every scale, it
+  recovers κ2 to within 0.2% at every fit radius and returns
+  `slope_loglog = +0.02`. The reference vessel mesh returns **−1.191**. So the
+  claim in (a) — that the estimate is a property of the window rather than of
+  the object — is now quantified against a surface that has the property the
+  vessel lacks.
+
+  Two refinements this entry could not previously state. The **per-pair local
+  slopes** are −0.21 / −1.94 / −1.67 / −1.39 / −0.94 across 5→10→15→20→30→40 µm,
+  so the near-flat first segment is not a plateau in the physical sense: at
+  2.25 µm point spacing a 5 µm window holds 6–12 neighbours, exactly the
+  rank-deficiency boundary [P20](#p20) names, and the widget-defaults mesh —
+  whose 0.97 µm spacing makes that window well-conditioned — shows no flattening
+  at all (−1.33). And **no reconstruction tried so far has a plateau**:
+  `slope_loglog` is −1.19 to −1.43 across every mesh scored, moving smoothly
+  with `subsample_um` and never approaching 0.
+
+  **The entry is unchanged.** `curv_*` still measures the scale it was fitted
+  at. What is new is that the defect is now measured per mesh rather than argued
+  from one table, so a reconstruction that fixed it could be recognised.
+
+- 2026-08-13 (later the same day) — **the plateau is reached, by the
+  [I06](#i06) Poisson reconstruction, on the reference image.** Same mask
+  (`min_size=12`, 1,517,396 voxels), same `mesh_score.scale_stability` sweep,
+  same six radii:
+
+  | fit radius µm | 5 | 10 | 15 | 20 | 30 | 40 |
+  |---|---|---|---|---|---|---|
+  | κ2 median (poisson) | −0.0151 | −0.0149 | −0.0149 | −0.0148 | −0.0150 | −0.0155 |
+  | κ2 median (alpha 3D, defaults) | −0.1463 | −0.0581 | −0.0298 | −0.0191 | −0.0107 | −0.0082 |
+
+  `slope_loglog` = **+0.009** against alpha 3D's **−1.428** on the identical
+  mask, with per-pair local slopes −0.012 / −0.003 / −0.034 / +0.046 / +0.101 —
+  flat across an eightfold change of the ruler, where alpha 3D runs −1.33 to
+  −0.96 and never flattens. The implied radius sits at **66 µm** and stops
+  moving; the previous table had it climbing 14 → 135 µm.
+
+  **What this changes and what it does not.** It changes the *first* clause of
+  this entry: on a Poisson mesh `curv_*` is no longer a readout of `radius_um`.
+  It does **not** yet make `curv_*` in any exported CSV trustworthy — every CSV
+  on disk was measured against an alpha-3D mesh, and this entry stays `open`
+  until the six images are rebuilt and re-joined ([I06](#i06) step 6). Nor does
+  a plateau make the *value* right: 66 µm implied radius against a 38.1 µm
+  measured inscribed radius means κ2 is reading something flatter than the local
+  caliber, which is a separate question this test was never able to ask before.
+  Stability is a necessary condition, not a sufficient one.
+
+  Also worth recording as a caution: the synthetic elliptic cylinder plateaus at
+  `slope_loglog` = **+0.011** and its κ2 recovers the analytic curvature to
+  within 10% per angular bin — but under 45% dropout the plateau *survives*
+  while the per-bin accuracy degrades to 37%. **A plateau does not imply an
+  accurate curvature**, and P24's test cannot tell the two apart. See
+  [I06](#i06)'s acceptance table.
 
 ---
 
@@ -2260,7 +2780,7 @@ class).
 | **Opened** | 2026-08-11 |
 | **Last verified** | 2026-08-11 |
 | **Resolved** | — |
-| **Where** | `pipeline/gui/vessel_mesh.py:96-106` (the `controls` defaults), `pipeline/batch.py::_RUN_STEPS` |
+| **Where** | `pipeline/gui/vessel_mesh.py:80-89` (the `controls` defaults), `pipeline/batch.py::_RUN_STEPS` |
 | **Affects** | `dist_mesh_um` and all four `curv_*`, **across images** |
 
 Found when the five-image batch produced its first mesh.
@@ -2447,7 +2967,269 @@ more.
 
 ---
 
+<a id="p27"></a>
+## P27 — The centerline is a point set in raster order, not a traced path
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S3 (no exported column is currently wrong because of it) |
+| **Opened** | 2026-08-13 |
+| **Last verified** | 2026-08-13 |
+| **Resolved** | — |
+| **Where** | `pipeline/centerline.py:157` (`np.nonzero(skel)`) |
+| **Affects** | nothing exported today; blocks anything needing arc length or an ordered path |
+
+`vessel_path_curvature_xy` returns `pts_yx_um` straight from `np.nonzero(skel)`,
+so the points come out in **raster order** — row by row down the image — not in
+the order they occur along the vessel. It is a point *set* that happens to lie on
+a curve, and the array order carries no geometric meaning at all.
+
+Measured on the reference image: **40% of consecutive points jump more than
+5 µm**, and summing the stored order end to end gives **31,250 µm** across a
+structure roughly 300 µm long — two orders of magnitude out, which is what
+raster order over a curve that doubles back through many rows produces.
+
+**Nothing exported is wrong because of this.** κ is fitted over KD-tree
+neighbourhoods (`query_ball_point`), which are order-independent by construction,
+and `dist_branch_um` is a nearest-neighbour distance. Both are geometric, not
+sequential. The consumers that would break are the ones that do not exist yet.
+
+**What it blocks**, and why it is worth an entry rather than a comment:
+
+- **There is no arc length**, so nothing can be expressed *per unit length along
+  the vessel* — including the axial position variable that [P06](#p06) needs to
+  separate depth from position-along-the-vessel, which is currently the main
+  unresolved confound in the whole dataset.
+- **There is no parameterisation to smooth or resample along**, which is what any
+  fix to [P08](#p08)(e) that reports κ with its scale attached would need.
+- **Drawing the path as a line is not possible** — it is drawn as points for
+  exactly this reason. A `Shapes` path layer would connect raster neighbours and
+  produce a scribble.
+
+**A fix is not free on a Y.** Ordering a branched skeleton is not a sort; it is a
+graph traversal producing one ordered sequence *per branch* between junction and
+endpoint, with the junction shared. That is a different return type from the flat
+array every caller reads today, so it is a small piece of design rather than a
+one-liner — which is why this is recorded rather than fixed in passing.
+
+**Related:** [P08](#p08) (κ is fitted over neighbourhoods, so it is unaffected —
+and that is also why the defect stayed invisible), [P22](#p22) (the Z is per
+point and likewise order-free), [P06](#p06) (axial position is the reason to want
+arc length).
+
+**History**
+- 2026-08-13 — opened, from the module docstring written while adding
+  `lumen_center_z`. Found by inspection rather than by a failure: nothing has
+  yet asked the centerline for an order.
+- 2026-08-13 (later) — **demoted off the critical path.** This was a
+  prerequisite for the centerline-frame sweep, which needed arc length and a
+  tangent frame. [I06](#i06) replaced that approach and needs neither. Still
+  open, still the only route to an axial-position covariate for [P06](#p06).
+
+---
+
+<a id="p28"></a>
+## P28 — The cadherin threshold discards real wall; the "gaps" have signal in them
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S2 |
+| **Opened** | 2026-08-13 |
+| **Last verified** | 2026-08-13 (one image, one arm, three cross-sections) |
+| **Resolved** | — |
+| **Where** | `pipeline/denoise.py` (`niblack_mask`, `sauvola_mask`, `bernsen_mask` — the binarisation), `pipeline/gui/cadherin.py` |
+| **Affects** | the cadherin mask, and therefore every vessel-geometry column and every reconstruction built on it |
+| **Evidence** | `docs/scratch/centerline_corner/` |
+
+The whole reconstruction problem has been framed as "the wall has 8–10 µm gaps in
+it, so the method must bridge them." Measured on the raw channel, **most of those
+gaps are not holes**. They are wall the threshold did not keep.
+
+Ray-cast outward from the lumen centre on the left arm of
+`V3_..._04step_002`, comparing directions where the mask found wall against
+directions where it did not:
+
+| | mask present | **mask gap** |
+|---|---|---|
+| peak raw above lumen background | 53–63 counts | **21–24 counts** |
+| SNR against lumen noise (~4 counts) | ~14 | **~5.6–6.5** |
+| radius at which the peak sits | 59.5–62.5 µm | **59.6–62.4 µm** |
+
+**Same radius, so it is the same wall** — about 40% as bright. The raw ring is
+continuous around the entire circumference; the mask is a dashed copy of it, and
+the gaps are finely interleaved (mostly a few degrees wide) rather than a few
+large arcs.
+
+**Not optical bleed from the neighbouring bright wall.** The signal does not
+decay with angular distance from a detected ray (24.2 counts at 1–5° away, 21–23
+at 5–10°), and the peak sits at the wall radius rather than smeared inward.
+
+**Why it matters more than it looks.** Every reconstruction method in this
+project is judged on how well it bridges gaps, and `alpha3d_um` exists to do
+nothing else — [P21](#p21) shows it buys each bridged micron as up to 0.95 µm of
+fabricated spur. If the gaps are mostly recoverable signal, the method is being
+asked to invent geometry that the data already contains, and the scoring
+([I03](#i03)) is grading it on a task it should not have.
+
+**The fix is to stop binarising this early.** `denoise.py` already computes a
+local mean and standard deviation on the way to each threshold; the continuous
+score (how far a voxel stands above its own neighbourhood, in units of local
+variation) keeps dim-but-real wall alive with a small positive value instead of
+deleting it, and stays depth-corrected because the local statistics adapt with
+depth. That is the input [I06](#i06) wants. Raising the threshold's `k` instead
+would recover the same wall *and* more speckle, which is the trade a continuous
+score avoids having to make.
+
+**Related:** [P19](#p19) — this is a stronger charge than that entry makes. P19
+argues the size floor is an unjustified constant sitting on a wide plateau; this
+says the binarisation upstream of it is losing real wall regardless of where the
+floor sits. [P21](#p21), [I03](#i03), [I06](#i06).
+
+**Not yet established:** whether this holds on the other five images, on other
+arms, or away from the field-of-view edge. Three cross-sections of one arm, all
+consistent and the effect is large, but it should be replicated before being
+treated as general. Also unmeasured: how much of the mask's *speckle*
+(226,093 components, 99% discarded by `min_size`) is the same dim signal in
+places where there is no wall — i.e. what the false-positive cost of a lower
+effective threshold would be.
+
+**History**
+- 2026-08-13 — opened. Found while checking a claim made earlier the same day
+  that the bean-shaped cross-section at a branch end was "missing wall". It is
+  missing from the *mask*; the raw channel has it. The first measurement of this
+  returned the opposite answer (contrast +1 count in the gaps) because it
+  sampled along a moment-fitted ellipse that sits inside the true ring — a
+  reminder that a shape assumption in the *measurement* can manufacture the
+  result. Ray-casting without assuming a shape reversed it.
+
+---
+
+<a id="p29"></a>
+## P29 — A field-of-view notch fabricates a branch node; `dist_branch_um` is wrong for 18% of rows
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S2 |
+| **Opened** | 2026-08-13 |
+| **Last verified** | 2026-08-13 |
+| **Resolved** | — |
+| **Where** | `pipeline/centerline.py:120` (`binary_fill_holes`), `:152` (the pad), `:181-190` (branch nodes) |
+| **Affects** | `dist_branch_um`, the branch count, and the [P08](#p08)(a) workaround built on both |
+| **Evidence** | `docs/scratch/centerline_corner/` |
+
+`V3_..._04step_002` reports **two** branch nodes. The vessel has one. The saved
+`vessel_path_curvature.npz` holds:
+
+```
+[[ 51.7 264.7]   <- fabricated, near the top-right corner
+ [189.2 182.1]]  <- the real Y junction
+```
+
+**Cause: a notch in the footprint that opens onto the image border.**
+`binary_fill_holes` fills only *enclosed* background, and a concavity touching
+the border is not enclosed — verified, zero enclosed holes survive and both
+background components in that window touch the border. So the notch persists and
+the medial axis runs around **both** sides of it, producing one arm in +x and one
+in +y where a single arm should run into the corner. The notch is ~8–10 µm, the
+characteristic cadherin wall-gap scale, so it is dropout ([P28](#p28)) rather
+than vessel structure.
+
+**The border padding does not fix it**, and sharpens it. Replicate-padding
+extends the footprint *perpendicular to each edge*; near a corner the footprint
+touches two edges, so it grows one arm along each. Fork present with and without
+the pad, at identical coordinates.
+
+**It is `close_um`, and the default sits just below the threshold that works:**
+
+| `close_um` | branch nodes |
+|---|---|
+| **8.0 (default)** | 2 — the real Y **plus the fabricated fork** |
+| 10.0 | 1 — real Y only; one clean diagonal arm into the corner |
+| 12.0 | 1 — same |
+| 15.0 | 3 — new spurious nodes appear elsewhere |
+| 20.0 | 3 — worse |
+
+**Exported consequence.** `dist_branch_um` is nearest-of-all-branch-nodes, so the
+fabricated node captures a whole quadrant: **396 of 2,147 adhesions (18.4%)**
+measure to it, understated by a **median 115.5 µm** (53.3 → 160.4 µm corrected).
+**43 rows (2.0%)** would be wrongly discarded by [P08](#p08)(a)'s own recommended
+`dist_branch_um > 20` filter — they are actually ~160 µm from any real junction.
+
+> Caveat on that reproduction: recomputing the column from the saved nodes
+> matches the export to within 4.9 µm but not exactly (median column value
+> 107 µm), so measure's lookup differs slightly — probably a downsample-origin
+> convention. The which-node-is-nearer classification the 18.4% rests on is
+> robust to a few µm.
+
+**The fix is not a bigger `close_um`** — that is a constant tuned on one field,
+the [P19](#p19) pattern, and the sweep above shows it breaks elsewhere by 15.
+Two structural options:
+
+- **Prune branches by caliber.** The fabricated branch hugs the notch and so runs
+  through a shallow part of the distance transform, while the real arm runs along
+  its ridge. Dropping child branches whose median inscribed radius is far below
+  the parent's kills notch-induced forks generally, and the distance transform is
+  already computed a few lines earlier for the pad.
+- **Flag branch nodes inside the border-influence zone.** The code already
+  computes that distance (p95 of the footprint half-width, 81.7 µm here). The
+  fabricated node is 52 µm from the top edge — inside it. The real node is
+  143 µm — outside. Wouldn't have to be the fix, but would have caught this.
+
+**This is the third symptom at the field-of-view boundary**, after
+[P08](#p08)(c)'s 10× κ inflation in the outer 5 µm and the skeleton forking the
+padding addressed. One boundary policy applied consistently across the
+centerline, the curvature and the reconstruction would be better than three
+patches.
+
+**History**
+- 2026-08-13 — opened, reported by the user from the napari view at
+  approximately (z 59, y 52, x 266) µm and reproduced exactly at (51.7, 264.7).
+
+---
+
 # Closed
+
+<a id="p30"></a>
+## P30 — `build_mesh` silently treats an unknown method string as alpha 3D
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S3 |
+| **Opened** | 2026-08-13 |
+| **Last verified** | 2026-08-13 |
+| **Resolved** | — |
+| **Where** | `pipeline/vessel_mesh.py` — `build_mesh`, the fall-through after the `METHOD_POISSON` branch |
+| **Affects** | any caller that passes a `method` string not in `METHODS` |
+
+`build_mesh` dispatches with a chain of `if method == ...` and then **falls
+through to alpha 3D** for anything that matched none of them. A typo, a renamed
+constant, or a `--from-settings` JSON written by an older version therefore does
+not raise — it silently builds a different reconstruction, and
+`vessel_recon.json` records the *requested* method beside geometry that method
+did not produce. That is the same class of failure as [P26](#p26), where knobs
+were recorded as though they had shaped a mesh that never read them.
+
+It is currently unreachable from either shipped caller: `batch_mesh`'s
+`--method` is an argparse `choices=METHODS`, and the GUI's is a `ComboBox` over
+the same list. The exposure is `--from-settings`, which reads a method string
+out of a JSON with no validation, and any future caller.
+
+Found while adding [I06](#i06)'s method, whose branch had to be placed
+*before* the fall-through for exactly this reason. Not fixed in that change on
+purpose: raising on an unknown method changes what an existing caller gets, and
+that belongs in its own change with its own test rather than riding along with a
+new reconstruction method.
+
+**Fix:** replace the fall-through with an explicit `if method == METHOD_ALPHA3D`
+and raise `ValueError` on anything else, listing `METHODS`.
+
+**Related:** [P26](#p26), [I06](#i06).
+
+---
 
 <a id="p16"></a>
 ## P16 — Nucleus splitting inflates `n_nuclei_total`
@@ -2593,8 +3375,9 @@ change against.
 <a id="i03"></a>
 ## I03 — Objective-scored auto-calibration of the vessel mesh
 
-**Opened** 2026-08-10 · **Status** open · **Relates to** [P19](#p19),
-[P20](#p20), [P21](#p21)
+**Opened** 2026-08-10 · **Status** open — **the scorer exists and is validated
+(`pipeline/mesh_score.py`, 2026-08-12); choosing is what is left** · **Relates
+to** [P19](#p19), [P20](#p20), [P21](#p21), [P24](#p24), [I05](#i05)
 
 The vessel surface currently depends on four coupled knobs — `min_size`
 (a hidden constant, [P19](#p19)), `subsample_um` (dominant and undocumented,
@@ -2656,6 +3439,111 @@ a commit with [P01](#p01).
   **What is still entirely missing is the objective.** Nothing computes genus,
   coverage, parsimony or stability, and nothing scores anything. The tool makes a
   sweep cheap; choosing from it is this entry.
+- 2026-08-12 (later) — **the objective now exists and is validated;
+  choosing still does not.** `pipeline/mesh_score.py` computes four scores,
+  reported as a vector and never combined (`batch_mesh --steps score`, recorded
+  into the `scores` block of `vessel_recon.json`):
+
+  | score | question | gameable alone by | caught by |
+  |---|---|---|---|
+  | `scale_stability` | does κ2 stop depending on the fit radius? | — | — |
+  | `topology` | is it shaped like a vessel wall? | collapsing the lumen to a blob | `coverage` |
+  | `coverage` | is the surface everywhere the data is? | draping surface over everything | `support` |
+  | `support` | is the surface anywhere the data is **not**? | shrinking the surface to nothing | `coverage` |
+
+  **Validated against ground truth, not only against this repo's own history.**
+  Reproducing recorded numbers only shows two code paths agree, so the scorer
+  was also run on surfaces whose answers are known from theory: genus 0 for a
+  sphere, 1 for a torus and unchanged under a 2.8× finer triangulation; and on a
+  sphere of radius R it recovers κ2 = 1/R to **0.2% at every fit radius**, giving
+  `slope_loglog = +0.02`. That is what calibrates the slope — **0 means the
+  number is a property of the surface, −1 means it is a readout of the ruler** —
+  and the reference vessel mesh reads **−1.19**. It also reproduces every
+  recorded figure: χ = −248, genus 125, the six κ2 medians of [P24](#p24)(a) to
+  four decimals with their sign-consistency column, 2.25 µm spacing and 18.8%
+  interior vertices ([P09](#p09)).
+
+  **`support` exists because the eye caught what the other three could not.**
+  Asked to compare the hand-tuned reference against the widget defaults on the
+  renders rather than the numbers, the user reported: *"the reference is more
+  solid but includes noise in the mesh, as spiky outliers perpendicular from the
+  vessel; the defaults have fewer of those spiky inclusions, but is more
+  hole-y."* Both halves were then measurable, and one of them was invisible to
+  the scorer as it stood:
+
+  - *hole-y* — `topology` had this and was hiding it. χ's **sign** is the
+    distinction: χ ≪ 0 is one shell with tunnels bored through it, χ ≫ 0 is a
+    foam of disconnected closed pockets. Cutting the non-manifold edges that
+    glue them on, the defaults mesh falls into **1,826 pieces** (1,825 of them
+    tiny, median 2 faces) against the reference's **42**. The entry was
+    reporting "genus 125" and "genus undefined" and throwing that away.
+  - *spiky* — nothing measured it. `coverage` asks "is every wall voxel near the
+    mesh?"; a spur is near no wall voxel at all, which is the wrong direction.
+    Confirmed by construction: bolting 50 spikes onto a meshed sphere leaves
+    `coverage` at **100.0%, median 0.000 — completely unmoved** — while
+    `support`'s reach goes 1.12 → 6.04 µm.
+
+  Two dead ends worth recording so they are not re-tried. Surface **vertex**
+  distance to data is identically zero on every mesh this project builds (the
+  alpha-3D vertices *are* cadherin voxels), so spurs are fabricated *triangles*
+  between real points, not stray vertices — `support` therefore samples triangle
+  interiors, area-weighted. And **aspect ratio does not separate spikes from
+  legitimate bridging**; it ranks the two meshes the opposite way (19.6% sliver
+  area on the defaults against 8.5% on the reference). Absolute reach does.
+
+  **What `support` measures turns out to be `alpha3d_um`, near-deterministically**
+  — which makes that knob interpretable for the first time. Holding
+  `alpha3d_um = 15` and moving `subsample_um` 1 → 5 (a 5× change in the knob
+  [P20](#p20) calls dominant) leaves max reach at 14.26 → 13.72 µm and max edge
+  at ~29 µm, flat. Across alpha instead, max reach ≈ 0.95 × `alpha3d_um` and max
+  edge ≈ 2 × `alpha3d_um`, the latter exactly as a circumradius bound requires.
+  So `alpha3d_um` **is** "the longest spur I permit", and [P21](#p21)'s structural
+  argument now has a number attached to it.
+
+  **Coverage and support are a genuine trade, not a free win.** Sweeping
+  `alpha3d_um` at `subsample_um = 5.0` on `V3_..._04step_002`:
+
+  | `alpha3d_um` | coverage ≤2 µm | support max reach | unsupported area >5 µm | χ |
+  |---|---|---|---|---|
+  | 5.0 | 26.2% | 4.73 µm | 0.0% | +52 |
+  | **7.5** | **47.6%** | 7.06 µm | 4.6% | −263 |
+  | 10.0 | 46.7% | 9.27 µm | 13.6% | −358 |
+  | **15.0 (reference)** | 42.9% | 13.72 µm | 19.2% | −248 |
+  | 20.0 | 39.6% | 19.61 µm | 23.6% | −165 |
+  | 30.0 | 30.2% | 29.38 µm | 38.4% | −39 |
+
+  Coverage is **not monotone** — it peaks near 7.5 and falls in both directions —
+  so minimising `support` cannot simply drive alpha to zero without coverage
+  collapsing. That is the pair working as counterweights. Note also that the
+  reference's `alpha3d_um = 15.0` is beaten on *both* of those scores by 7.5
+  (coverage 47.6% vs 42.9%, unsupported area 4.6% vs 19.2%), while `topology`
+  marginally prefers 15.0 (χ −248 vs −263). **This is one image at one
+  `subsample_um` and is not a recommendation** — it is evidence that the scores
+  now discriminate between settings that were previously indistinguishable.
+
+  **Knob sensitivity, which [P20](#p20) makes a first-class question.**
+  `subsample_um` swept 1 → 5 with the other two knobs pinned: `slope_loglog`
+  moves only 0.185, and coverage moves smoothly and monotonically (1.62 → 2.16 µm
+  median). Not a knife-edge. The exception is topology — χ runs +2,036 → −248
+  without a jump, but **genus is only *defined* over part of that range**, so the
+  headline number blinks out between `subsample_um` 2 and 3. Of the four,
+  topology is the least suitable for automated selection; χ and the non-manifold
+  fraction are its continuous parts, and the non-manifold fraction is itself
+  non-monotone (3.7 → 0.4 → 1.6%).
+
+  Cost, measured: `coverage` and `topology` are free (<0.3 s); `support` is ~1 s;
+  **`scale_stability` is the entire budget** (6.7 s on the reference's 7,282
+  surface vertices, 39.9 s on the defaults' 33,537), because `mesh_curvature`
+  loops in Python per vertex with a ball query that grows with the fit radius.
+  A five-point build-and-score sweep is ~2 minutes.
+
+  **What is still missing is choosing.** Nothing here picks parameters, and
+  nothing weights the four scores — deliberately, since on the reference/defaults
+  pair they rank the two meshes *oppositely*, so any weighting would be the thing
+  deciding the answer. The selection rule, and the sweep it is applied to,
+  remain this entry. Also still absent: the resample-stability score this entry
+  lists ("rebuild from a random half of the components"), and any of this run on
+  the other five images.
 
 ---
 
@@ -2720,6 +3608,474 @@ per image too.
   **Still open:** DAPI, the split nuclei, the cadherin mask itself and the RF
   probability map remain all-or-nothing under `pipeline.batch`. Those are the
   steps that need the image pixels, which is exactly why they are the ones left.
+
+---
+
+<a id="i05"></a>
+## I05 — Is the alpha shape the right reconstruction method at all?
+
+**Opened** 2026-08-12 · **Status** open · **Relates to** [P19](#p19),
+[P20](#p20), [P21](#p21), [P24](#p24), [I03](#i03)
+
+The requirement, stated plainly: **a smooth, continuous 3D surface from which to
+extract geometry measures, built from a noisy cadherin channel.** Alpha 3D is the
+default because it "bridges gaps in 3D and handles branch + curvature natively"
+(`vessel_mesh.py` docstring) — it has never been compared against anything. This
+entry opens that question and records what has actually been measured, now that
+[I03](#i03)'s scorer makes comparison possible. **Nothing here changes the
+default.**
+
+### The structural objection
+
+An alpha shape **interpolates**. Its vertices *are* the cadherin voxels (a
+`voxel_subsample` of them), so it is constrained to pass through its input and
+therefore **cannot smooth**. Every surviving piece of noise becomes a vertex, and
+`alpha3d_um` decides only how far the surface may reach out to meet it. This is
+not a tuning difficulty; it is what the method is.
+
+Measured consequences on `V3_..._04step_002` at the reference parameters:
+8.3% of faces sit on non-manifold edges, the surface falls into 42 pieces when
+those are cut, genus is 125, and **19.2% of its area is more than 5 µm from any
+cadherin voxel**.
+
+### What was measured
+
+**1. The alpha knob is now mechanistically understood** ([I03](#i03),
+[P21](#p21)). Max spur ≈ 0.95 × `alpha3d_um`, max edge ≈ 2 × `alpha3d_um`
+(exactly, as a circumradius bound requires), independent of `subsample_um`. So
+the knob is "the longest spur out of the wall I permit". Coverage is
+**non-monotone** in it, peaking near 7.5 µm.
+
+**2. Sensitivity to the mask is a cliff, not a slope — and it is smaller than
+the sensitivity to alpha.** This partly answers the worry that prompted this
+entry. Across `min_size` 3 → 500, a 167× range, coverage at 2 µm moves only
+40.3% → 36.7% and max spur 23.4 → 10.7 µm ([P19](#p19) History for the table).
+Across `alpha3d_um` 5 → 30 coverage moves 26.2% → 47.6% → 30.2%. **The mesh knob
+is the more sensitive of the two**, not the mask. The one exception is
+`min_size = 0`, where alpha 3D bridges 226,093 speckle components into a single
+smooth envelope — χ = −3, coverage **2.5%**, spurs to 78 µm.
+
+**3. The two other in-repo methods are not practical to compare at full
+resolution.** `polar (per-slice)` was run on the same mask with the same scores
+and **did not complete in over an hour**, against **2.1 s** for alpha 3D. The
+per-slice fills run over ~1,024 slices in two orientations, then `close_volume`
+and marching cubes operate on the full 340 M-voxel volume. Whatever their merits,
+they cannot participate in the kind of sweep [I03](#i03) needs without being
+reworked to run on a decimated volume. **Not yet measured**, therefore: whether
+either produces a better surface.
+
+**4. A density-field alternative was prototyped, and it does not yet win.** The
+approach that answers the structural objection is to **approximate** rather than
+interpolate: block-reduce the mask to a local occupancy density on a coarser
+grid, Gaussian-smooth it, take an isosurface (`docs/scratch/mesh_score/`,
+`m3`–`m6`). Isolated speckle contributes little density and falls below the
+level; real wall is dense over a neighbourhood and survives.
+
+Three of its four predicted advantages hold, measured against the reference
+alpha-3D mesh on the same mask and the same fixed scoring mask:
+
+| | alpha 3D (reference) | density (1.3 µm grid, σ 1.5, level p25) |
+|---|---|---|
+| closed edges / non-manifold | 98.4% / 8.3% of faces | **100.0% / 0.0%** |
+| pieces after cutting non-manifold edges | 42 | 1–17 |
+| genus | 125 | **25** |
+| support max reach | 13.72 µm | **3.00 µm** |
+| unsupported area > 5 µm | 19.2% | **0.0%** |
+| coverage ≤ 2 µm | 42.9% | 40.4% |
+| coverage ≤ 5 µm | **99.1%** | 73.0% |
+| build cost | 2.1 s | ~2 s |
+
+- **It is manifold in every configuration tried** — 100.0% closed edges and zero
+  non-manifold edges at every sigma, level and `min_component_um`. Alpha 3D is
+  never manifold.
+- **It has essentially no spurs** — 0.0% of area beyond 5 µm, against 19.2%.
+- **Its genus/coverage trade is monotone in one knob** (the iso-level): genus
+  4 → 25 → 56 → 141 → 203 as coverage ≤5 µm rises 54% → 73% → 88% → 93% → 95%.
+  Alpha 3D's is **not** monotone (χ = +52, −263, −358, −248, −165, −39 across
+  alpha 5 → 30), which matters a great deal for automated calibration.
+- **It degrades rather than collapses without any component filtering.** At
+  `min_size = 0` it goes from genus 10 to 94 with coverage roughly unchanged,
+  where alpha 3D collapses to a blob at 2.5% coverage.
+
+**5. Smoothness is controllable by the smoothing scale — and trades against
+coverage.** This is the measurement that bears directly on the requirement, and
+it took three attempts because the first configuration tried was the worst one.
+
+| surface | `slope_loglog` (5–40 µm) | 5→10 µm local slope | coverage ≤2 µm |
+|---|---|---|---|
+| alpha 3D (reference) | −1.191 | −0.214 | 42.9% |
+| density, σ = 1.5 µm (1.3 µm grid) | **−2.252** | −1.570 | 40.4% |
+| density, σ = 3 µm (2.6 µm grid) | −1.622 | −0.253 | 7.8% |
+| density, σ = 5 µm (2.6 µm grid) | **−1.099** | +0.151 | 3.6% |
+| density, σ = 8 µm (2.6 µm grid) | not measured | **+0.226** | not measured |
+
+σ = 1.5 µm on a 1.3 µm grid is barely one cell of smoothing, and it reads −2.25
+— far *worse* than alpha 3D. Taken alone that looked like a refutation. It is
+not: smoothness improves **monotonically** with σ (−2.25 → −1.62 → −1.10), and by
+σ = 5 µm the density surface matches alpha 3D (−1.10 against −1.19) while also
+being manifold and spur-free. At σ = 5 and 8 the 5→10 µm local slope goes
+*positive*, meaning |κ2| stops falling as the ruler grows — the beginnings of the
+plateau [P24](#p24) says no reconstruction here has ever shown.
+
+**But coverage collapses exactly where smoothness arrives**: 42.9% → 7.8% → 3.6%
+at 2 µm as σ goes 3 → 5. So **no configuration tested is simultaneously smooth
+and covering.** (Caveat on the table: the σ = 1.5 row is on the fine grid at
+level p25, the others on the coarse grid at p50, so grid and level are not held
+fixed across rows. The monotone trend in σ is clear; the exact values are not a
+controlled comparison.)
+
+**And it still loses the coverage tail.** At the level where its genus is 5×
+better, 27% of wall voxels are more than 5 µm away, against 0.9% for alpha 3D. It
+reconstructs part of the wall tightly and misses the rest.
+
+### One confound to keep in mind
+
+`coverage` structurally favours interpolating methods: alpha 3D's vertices *are*
+data points, so it is being graded partly on a tautology. `support` penalises the
+same property. That the density surface nearly matches on coverage while beating
+support by 4.6× is therefore more meaningful than the raw numbers suggest — and
+is also why neither score should be read alone here.
+
+### Verdict, on the evidence so far
+
+**Alpha 3D remains the best method actually available, but the case against it is
+now empirical as well as structural, and the density field is the more promising
+direction.** Alpha 3D is the only one of the three in-repo methods cheap enough
+to calibrate, its dominant knob is now interpretable, and it is less
+mask-sensitive than feared. Against that, the density field is better on
+manifoldness (always, categorically), spurs (0.0% against 19.2%), monotonicity of
+its knobs, robustness to masking, and — at σ ≥ 5 µm — smoothness. What it has not
+done is deliver smoothness and coverage **at the same time**.
+
+The honest summary is that the two methods fail in different places and neither
+is adequate: alpha 3D covers the wall but is a non-manifold sponge with 13.7 µm
+spurs; the density field is a clean manifold surface that either misses much of
+the wall or is no smoother. **Nothing here justifies switching the default, and
+nothing here justifies treating alpha 3D as settled.**
+
+### What would settle it, in order
+
+1. **Find whether a smooth-and-covering density configuration exists.** This is
+   now the whole question. The two properties were measured on different grids
+   and levels; the trade has never been mapped as a surface over (grid, σ, level,
+   `min_component_um`). Since the smoothness/σ relation is monotone and each
+   point costs seconds to build, this is a small sweep — but it needs
+   [I03](#i03)'s selection rule first, or there is no way to say which point on
+   the trade is best.
+2. **Localise the coverage misses.** 27% of wall voxels more than 5 µm away looks
+   like whole regions dropped by the level or by `min_component_um`, not uniform
+   error. If it is a few dropped regions, it is fixable and the verdict changes.
+3. **Try a genuine surface *fit* rather than an isosurface.** Both methods tested
+   are still thresholding operations. Poisson reconstruction or a moving
+   least-squares fit would approximate in the sense the requirement wants;
+   neither is in the dependency set today, and adding one must be installed by
+   hand in the Windows env.
+4. **Make the per-slice methods measurable** by running them on a decimated
+   volume, so all three in-repo options can be compared at all.
+
+### A practical obstacle this exposed
+
+`scale_stability` is too slow to be the inner loop of a method search on
+marching-cubes meshes. `mesh_curvature` loops per surface vertex and its ball
+query grows with the fit radius, so a 50,000-vertex surface at `radius_um = 40`
+takes tens of minutes — several attempts here had to be abandoned. The 5→10 µm
+**local** slope is comparable across meshes, costs seconds, and separated the
+configurations just as well (alpha 3D −0.214, density σ 1.5 −1.570, σ 5 +0.151).
+Any method sweep should use the cheap local slope and reserve the full sweep for
+finalists.
+
+None of this should start before [I03](#i03)'s selection rule exists — otherwise
+there is again no way to say which of two candidate surfaces is better, which is
+the trap this whole line of work was opened to escape.
+
+**Update, 2026-08-13 — a fourth candidate, and it is now the plan of record.**
+See [I06](#i06). Two structural findings from this session close off part of the
+option space above:
+
+- **A slice can contain two lumens.** Downstream of the Y a plane cuts both
+  daughter branches, so any explicit per-station contour method has to assign
+  contours to branches, track merges, and decide what the surface does through
+  the junction. That is bookkeeping an implicit representation never performs —
+  each branch contributes a field, the fields are unioned, and marching cubes
+  runs once.
+- **The cross-section is neither circular nor reliably convex** ([P24](#p24)(b)):
+  aspect 1.64–2.15, with a real inward fold visible in the raw channel at a
+  branch end. Any radial parameterization — `r(s, θ)`, per-slice polar, the
+  straightened-frame sweep this entry's item 1 proposes — assumes a single-valued
+  radius per direction and would report the vessel as an ellipse everywhere,
+  erasing the concavity **with no warning**. That rules out the whole family, not
+  just tunes it.
+
+Item 3 above ("try a genuine surface *fit*") is what [I06](#i06) is, and its
+dependency objection turns out not to bind: the grid form is a divergence and a
+Laplace solve, both already in scipy.
+
+---
+
+<a id="i06"></a>
+## I06 — Oriented-point implicit reconstruction (the plan of record)
+
+**Opened** 2026-08-13 · **Status** in progress · **Supersedes** the
+centerline-frame sweep sketched in [I05](#i05) · **Relates to** [P01](#p01),
+[P21](#p21), [P24](#p24), [P28](#p28), [I03](#i03)
+
+### What the goal actually requires
+
+Working backwards from "curvature at any point on the lumen surface, related to
+adhesion force", the surface must be: **smooth at the scale curvature is read at**
+(else [P24](#p24)), **correctly oriented** (else the sign of curvature has no
+meaning), **covering without fabricating** (the [I03](#i03) pair), and
+**joinable** to each adhesion. The centerline is not on that list. It is a means,
+and the question is only which means is cheapest.
+
+### The method
+
+1. **Dense oriented points.** The wall is a thin sheet, so locally the cadherin
+   lies in a plane and the perpendicular to it is the surface normal. Computed
+   from the gradient of a lightly smoothed field. The saved per-component normals
+   in `cadherin_labels.npz` are unit-length and non-degenerate but there are only
+   **3,764** of them over ~190,000 µm² of wall — one per ~7 µm, too sparse for a
+   wall with 8–10 µm gaps and for curvature read at 5–15 µm.
+
+2. **Orient them from the centerline.** Local data gives the *line* a normal lies
+   along, never which end is the lumen. Pointing each normal at the nearest
+   centerline point resolves it — and **this is the correct fix to
+   [P01](#p01)'s part B**, which used away-from-global-centroid and was wrong on
+   44.4% of vertices precisely because a global centroid is the wrong reference
+   on a branched tube. Measured on the saved normals: agreement with
+   away-from-centroid is **42.1%**, i.e. a coin flip. Orienting *inward* is also
+   what selects the **luminal** face, rather than the alpha shape's closed solid
+   whose area counts both wall sheets ([P03](#p03)).
+
+3. **Solve for the surface.** Take the indicator that is 1 inside the lumen and 0
+   outside; the normals are measurements of the direction in which it changes
+   fastest. Recovering it is one Poisson solve over the volume, then isosurface
+   at the half level. It **approximates instead of interpolating**, which is
+   [I05](#i05)'s structural objection to alpha 3D; noise averages out rather than
+   becoming vertices, gaps are spanned by a smooth solution rather than by a
+   fabricated triangle, and topology, branching and concavity are handled without
+   being told about them.
+
+### Why this de-risks every open centerline defect
+
+Step 2 is the centerline's only job here, and it is forgiving: the tube is
+85–180 µm across, so the axis need only be *somewhere inside it*. A normal flips
+only if the axis lands on the wrong side of the wall. **[P29](#p29)'s fabricated
+branch node, [P27](#p27)'s raster ordering, [P08](#p08)(c)'s border flare and the
+~1.3 µm quantization of `lumen_center_z`'s Z are all far below that threshold.**
+They remain defects; they stop blocking the surface.
+
+That is the whole argument for this over the sweep, which needed the centerline
+ordered, accurate, branch-aware and edge-clean — i.e. needed every one of those
+fixed first.
+
+### Acceptance
+
+**[P24](#p24)(a)'s plateau test, which is already implemented and already
+calibrated.** `mesh_score.scale_stability`'s `slope_loglog` is 0 when curvature
+is a property of the surface and −1 when it is a readout of the fit window; a
+sphere returns +0.02, the reference vessel mesh **−1.19**, and no reconstruction
+in this project has ever plateaued. Pass/fail for the whole geometry effort, and
+it needs **no force data** — which is what makes this runnable now under the
+2026-08-13 scope decision.
+
+Scored alongside on the full [I03](#i03) four-vector, against alpha 3D and the
+density prototype, **on the same mask** so the comparison is honest.
+
+### Order of work
+
+1. **Method first, on the existing binary mask** — deliberately, despite
+   [P28](#p28) being the bigger defect. Two reasons: `mesh_score`'s coverage and
+   support are defined over *retained mask voxels*, so building on the same mask
+   is the only way the comparison against alpha 3D and every number already
+   recorded in this file is honest; and the acceptance test is the **plateau**,
+   which is about the smoothness of the surface rather than about gaps, so it is
+   answerable without [P28](#p28). Changing the input and the method together
+   would leave any improvement unattributable.
+2. Dense normals, oriented from the centerline; check what fraction of
+   orientations are unstable under perturbation of the axis.
+3. Grid Poisson solve → isosurface. Knobs: grid resolution, regularisation
+   weight, iso-level.
+4. Score, and accept or reject on the plateau.
+4a. **Then [P28](#p28), as a controlled second experiment** with the method held
+   fixed: swap the binary mask for the continuous local-contrast field. If it
+   helps, it helps by shrinking the gaps, and it should show up as coverage
+   rising and the surface having less to invent. Note this moves the yardstick —
+   see Open questions.
+5. Sign convention for `curv_*` relative to the lumen — only meaningful once
+   normals are oriented — and export `curv_*` with the `radius_um` and
+   reconstruction parameters that produced it, which [P24](#p24) notes is
+   currently missing.
+6. Add the method to `vessel_mesh.build_mesh` so the GUI and `batch_mesh` share
+   one path (the no-drift doctrine), record it in `vessel_recon.json`, re-join
+   and re-export all six.
+
+**Added alongside alpha 3D, not replacing it** — nothing existing breaks, and the
+comparison stays runnable.
+
+### Deliberately deferred
+
+[P27](#p27)'s ordering and arc length (only needed for an axial-position
+covariate), the remaining centerline edge work beyond [P29](#p29), the
+bean question, and everything in [P02](#p02)/[P05](#p05).
+
+### Open questions
+
+Whether one normal per *component* would do after all (cheap to try, expected too
+sparse); whether the Poisson solve wants screening/regularisation or plain; and
+whether [P28](#p28)'s continuous input changes what `mesh_score.coverage` is
+measured against, since coverage is currently defined over *retained mask
+voxels* and that yardstick moves if the mask does.
+
+**History**
+- 2026-08-13 — opened as the plan of record, after the session recorded in the
+  Status-at-a-glance queue notes.
+
+- 2026-08-13 (later the same day) — **built, measured, and accepted on its own
+  acceptance test.** `pipeline/vessel_poisson.py`, wired into
+  `vessel_mesh.build_mesh` as `METHOD_POISSON` (`"poisson (oriented points)"`),
+  into `batch_mesh` (three flags, `MESH_DEFAULTS`, `LIVE_PARAMS`) and into the
+  napari tab (three sliders). Alpha 3D is untouched and still the default;
+  rebuilding the reference mesh at its recorded parameters is still
+  byte-identical to `vessel_mesh.npz`.
+
+  **The headline.** On the reference image, same mask, `slope_loglog` =
+  **+0.009** against alpha 3D's **−1.428** — see [P24](#p24)'s History for the
+  full table. The plateau test passes. That is the pass/fail this entry set in
+  advance, and nothing in this project had ever plateaued before.
+
+  **The four-vector, same mask, same scorer** (alpha 3D column is at *widget
+  defaults*, rebuilt for this comparison rather than quoted; the hand-tuned
+  reference mesh's figures are in [I03](#i03)):
+
+  | | poisson | alpha 3D (defaults) |
+  |---|---|---|
+  | `slope_loglog` | **+0.009** | −1.428 |
+  | local slopes 5→40 µm | −0.03 … +0.10 | −1.33 … −0.96 |
+  | χ | **−4** (≈3 tunnels) | +2,870 (a foam of ~1,435 pockets) |
+  | non-manifold faces | **0 (0.0%)** | 13,122 (18.7%) |
+  | pieces after the non-manifold cut | **2** (largest 99.3%) | 1,826 (largest 77.1%) |
+  | interior vertices | **1.2%** | 79.9% |
+  | coverage ≤2 µm | 61.6% | **77.0%** |
+  | coverage ≤5 µm | 87.9% | **99.9%** |
+  | support max reach | 26.70 µm | **9.87 µm** |
+  | unsupported area >5 µm | 19.6% | **16.5%** |
+  | longest triangle edge | **3.36 µm** | 19.90 µm |
+  | mesh build | **3.1 s** | 13.4 s |
+  | rebuild determinism | byte-identical | byte-identical |
+
+  **Read as a vector, which is the whole point of [I03](#i03)'s refusal to
+  total it.** Poisson wins stability and topology outright and is 4× cheaper;
+  alpha 3D wins both coverage columns and support reach. That is not a
+  contradiction, it is the approximate/interpolate trade stated numerically: a
+  surface forced through every voxel is by construction near every voxel
+  (coverage), and a surface that averages instead leaves the noisiest voxels
+  behind. **Which one is right depends on whether those voxels are wall or
+  noise, and this entry does not settle that** — [P28](#p28) is the experiment
+  that would, with the method now held fixed.
+
+  **Synthetic ground truth** (`docs/scratch/vessel_poisson/synthetic_check.py`,
+  full log beside it): an elliptic cylinder with the measured 152×88 µm
+  cross-section, 45% of the shell deleted in correlated patches with the arc gap
+  capped at 12 µm, 50,000 speckle blobs, plus a Y variant and an analytic
+  reference mesh at matched vertex spacing.
+
+  | | criterion | result |
+  |---|---|---|
+  | (a) | plateau, \|slope_loglog\| < 0.15 | **PASS** +0.011 |
+  | (b) | median\|κ1\| < 0.2 median\|κ2\|; κ2 sign ≥ 95%; K<0 at the Y crotch | **PASS** (ratio 0.013; 100%; 50.8% K<0) |
+  | (c) | per-bin κ2 within 15%; end-to-side ratio within 25%; estimator drift < 0.10 | **PASS** (worst 9.9%; 12.1% off; 0.068) |
+  | (d) | ≥99% of normals agree with the analytic outward normal | **PASS** 100.0% |
+  | (e) | p95 distance < 0.5 µm both directions, max < 3 µm | **FAIL** 0.752 / 0.825 µm |
+  | (e2) | \|signed half-cell bias\| < 0.15 µm | **PASS** −0.003 µm |
+  | (f) | 0 non-manifold faces; 1 piece; 2 boundary loops, both on domain faces | **PASS** (Y variant: 3 loops) |
+  | (g) | (c) and (e) survive dropout; drift < 1 µm; no interior loops | **FAIL** — see below (but (a) survives: +0.0099) |
+  | (h) | two runs byte-identical | **PASS** |
+  | (i) | alpha 3D on the same phantom fails (a), (c), (f) | **PASS** (−1.196; 860%; 93.6% non-manifold) |
+
+  **(e) is a resolution statement, not a defect.** The residual tracks
+  `poisson_grid_um` and not `poisson_smooth_um`: at a fixed h = 1.95 µm, σ of
+  3 / 5 / 8 µm all give p95 0.72–1.03 µm, while dropping the grid moves it
+  directly — p95 **0.752 µm at grid 2.0**, **0.507 at 1.0**, **0.400 at 0.65**.
+  The criterion as written never mentioned the grid; at the default it is asking
+  for sub-⅓-cell accuracy. The half-cell coordinate correction it was really
+  aimed at is (e2), which passes at −0.003 µm where dropping the `−h/2` term
+  would have put it at +0.98 µm.
+
+  **(g) is a real limitation and is recorded as one.** Under 45% dropout the
+  plateau *survives* — `slope_loglog` = **+0.0099**, against +0.0106 on the
+  clean shell — but the surface wobbles ±1.5–3 µm at the
+  gaps: p95 mesh→analytic **3.19 µm**, worst per-bin κ error **37%**, drift from
+  the clean mesh p95 **3.12 µm**, and **2 interior boundary loops** where the
+  harmonic solution did not span a hole. Finer grids do not help (tested at 1.0
+  and 0.65 µm), which is what identifies it as genuine surface error rather than
+  discretisation. **So a plateau does not certify an accurate curvature** — the
+  two criteria come apart exactly here, and [P24](#p24) carries that caution.
+
+  **Deviations from the plan of record, all deliberate:**
+
+  1. `build_mesh` gained an optional `extras=` out-dict rather than the planned
+     "call `diagnose()` separately". The per-vertex normals are needed for
+     *correctness* — `mesh_curvature` cannot recover the global sign on a
+     surface this open — and re-deriving them would mean building the whole
+     reconstruction twice, which a sweep cannot afford. The return is still a
+     4-tuple, so `saved_check`, `batch_mesh` and the GUI are unchanged.
+     `diagnose()` still exists.
+  2. Every percentile in the module is **occupancy-weighted**. The unweighted
+     form counts a cell holding one speckle voxel as loudly as a cell packed
+     with wall; on the phantom, speckle cells outnumber wall cells ~6:1 and the
+     unweighted median put the wall threshold at a speckle density, after which
+     `lumen_core` found nothing at all.
+  3. The wall level in `lumen_core` is the occupancy-weighted **p10** ("the band
+     holding 90% of the wall mass"), not the planned p50. At p50 the band is
+     only the top half of the density ridge and the lumen leaks into the
+     exterior through it — measured on the *clean* phantom, which has no gaps,
+     so the leak was the threshold and not the data.
+  4. `lumen_core` requires wall **above and below each cell in its own z
+     column**, in addition to the planned connectivity + z-face rule. Pure
+     connectivity leaks: thresholding widens a hole by ~σ on each side, so a
+     [P28](#p28)-scale 12 µm gap becomes a ~22 µm channel and the lumen merges
+     with the exterior through it. Per-column enclosure is the direct statement
+     of what [P24](#p24) measured (0.01% of the mask in the first z slice, zero
+     in the last) and a lateral leak cannot defeat it. Cost: the lumen comes
+     back as fragments — 31 on the reference image — whose union is used.
+  5. The global-sign guard compares median to median, not median to p99. See
+     [P01](#p01)'s History; the p99 form silently inverted the real image.
+
+  **Measured and rejected, recorded so it is not rediscovered.** Normalising the
+  splatted field by the local sample density (Kazhdan's density compensation)
+  was tried, because χ's jump across the wall is proportional to local wall
+  density and a *global* iso-level therefore sits off-surface where the wall is
+  sparse. It helps the dropout geometry (p95 2.44 → 1.82 µm, max 8.04 → 3.75 µm,
+  bias +0.29 → +0.09 µm) and costs a little on the clean shell (p95 0.752 →
+  0.868 µm) — but it does **not** rescue (c) under dropout (61% vs 66%), and it
+  needs a clamp constant on the boost. Not adopted: a hidden constant that does
+  not buy the criterion it was aimed at is exactly what this project has paid
+  for twice.
+
+  **Cost**, reference image: 3.1 s to build (against alpha 3D's 13.4 s at
+  defaults, 2.3 s at the reference's `subsample_um=5`), so it is usable as the
+  inner loop of an [I03](#i03) sweep, which was the other thing this had to be.
+
+  **Status stays `in progress`,** because steps 4a (the [P28](#p28) experiment)
+  and 6 (re-join and re-export all six images) are not done, and because the
+  four-vector does not yet say which method to adopt. What is settled is that
+  the plateau is reachable.
+
+### Still open, in order
+
+1. **[P28](#p28) as the controlled second experiment** — the method is now the
+   fixed half. Step 2 of the algorithm needs no change for it: `occ` is already
+   a continuous field.
+2. **Boundary-aware genus in `mesh_score`** — `genus = (2 − χ − b)/2` for `b`
+   boundary loops. Without it every Poisson mesh reports `genus: None` (it is an
+   open sheet), so the head-to-head against alpha 3D's genus 125 cannot be made
+   on that axis. A loop counter exists in `synthetic_check.py` and should move
+   into `mesh_score` rather than be written twice.
+3. Whether the 66 µm implied radius is right, against the 38.1 µm measured
+   inscribed radius. New question, only askable now that κ2 stopped moving.
+4. Re-join and re-export all six images; sign convention for `curv_*`; record
+   `radius_um` and the reconstruction parameters beside every `curv_*`.
 
 ---
 

@@ -22,7 +22,7 @@ from magicgui.widgets import (
 from napari.qt.threading import thread_worker
 
 from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
-from ..centerline import vessel_path_curvature_xy
+from ..centerline import lumen_center_z, vessel_path_curvature_xy
 from ..saved_check import curvature_notes
 # The method constants and the build itself live in the core module so the
 # headless `pipeline.batch_mesh` runner builds the *same* mesh from the same
@@ -356,75 +356,68 @@ def build(state, viewer) -> Container:
     path_btn = PushButton(text="Compute in-plane path curvature (X-Y)")
     PATH_LAYER = "Vessel path curvature (X-Y)"
 
-    def _path_z_um(pts_yx_um, win_um=3.0):
-        """Per-point Z (µm) of the cadherin column under each centerline point.
+    PATH_OFF_LAYER = "Vessel centerline (leaves the field)"
 
-        The centerline is derived from the X-Y projection of the cadherin mask,
-        so it carries no Z of its own. Drawing the whole path at one Z puts most
-        of it off the vessel — on a tube that dives through the stack that is
-        tens of µm of error. So take the intensity-weighted mean Z of the
-        cadherin voxels in a small column around each point. Uses the same mask
-        `_compute_path` fed the centerline, so the two agree by construction.
-
-        Returns (z_um array, ok mask), or (None, None) with no mask loaded.
-        Only the ~n_points columns are touched — this runs on the GUI thread, so
-        the full volume must not be materialised.
-        """
-        mask = _cadh_mask_array(state)
-        if mask is None:
-            return None, None
-        sz, sy, sx = (float(s) for s in state.get("scale", (1.0, 1.0, 1.0)))
-        nz, ny, nx = mask.shape
-        z_idx = np.arange(nz, dtype=np.float64)
-        wy = max(1, int(round(win_um / sy)))
-        wx = max(1, int(round(win_um / sx)))
-        yi = np.clip(np.round(pts_yx_um[:, 0] / sy).astype(int), 0, ny - 1)
-        xi = np.clip(np.round(pts_yx_um[:, 1] / sx).astype(int), 0, nx - 1)
-
-        zs = np.zeros(len(pts_yx_um), dtype=np.float64)
-        ok = np.zeros(len(pts_yx_um), dtype=bool)
-        for k in range(len(pts_yx_um)):
-            y0, y1 = max(0, yi[k] - wy), min(ny, yi[k] + wy + 1)
-            x0, x1 = max(0, xi[k] - wx), min(nx, xi[k] + wx + 1)
-            per_z = (np.asarray(mask[:, y0:y1, x0:x1]) > 0).sum(axis=(1, 2))
-            tot = per_z.sum()
-            if tot:
-                zs[k] = float((z_idx * per_z).sum() / tot) * sz
-                ok[k] = True
-        return zs, ok
+    def _fallback_z(n):
+        """Draw at the mesh's mean Z when no lumen Z could be computed — better
+        than 0.0, which puts the whole path on the bottom slice."""
+        zc = 0.0
+        cache = state.get("vessel_mesh_cache") or {}
+        vv = cache.get("verts")
+        if vv is not None and len(vv):
+            zc = float(np.mean(np.asarray(vv)[:, 0]))
+        return np.full(n, zc)
 
     def _show_path(res, visible=True):
-        """Overlay the centerline (points at the local vessel Z, coloured by κ)."""
+        """Overlay the centerline at the **lumen centre** Z, coloured by κ.
+
+        Z comes from `centerline.lumen_center_z` (computed in the worker, since
+        it reads the whole mask). Points where the vessel leaves the field of
+        view have no bounded lumen, so their Z is an extrapolation; they go in a
+        separate, hollow layer instead of being silently mixed in with the rest.
+        """
         pts = np.asarray(res["pts_yx_um"])
         kap = np.asarray(res["kappa"])
         if len(pts) == 0:
             return
-        zvals, ok = _path_z_um(pts)
-        if zvals is None:
-            # No cadherin mask to sample: fall back to the mesh's mean Z, and
-            # only then to 0.0 (which draws the path on the bottom slice).
-            zc = 0.0
-            cache = state.get("vessel_mesh_cache") or {}
-            vv = cache.get("verts")
-            if vv is not None and len(vv):
-                zc = float(np.mean(np.asarray(vv)[:, 0]))
-            zvals = np.full(len(pts), zc)
-        elif not ok.all():
-            # Empty column under this point — use the mask's own mean Z over the
-            # points that did hit, not the mesh's and not 0.0.
-            zvals[~ok] = float(zvals[ok].mean()) if ok.any() else 0.0
-        pts3 = np.column_stack([zvals, pts[:, 0], pts[:, 1]])
-        if PATH_LAYER in viewer.layers:
-            viewer.layers.remove(PATH_LAYER)
+        z = res.get("z_um")
+        if z is None:
+            z = _fallback_z(len(pts))
+            valid = np.ones(len(pts), bool)
+        else:
+            z = np.asarray(z, dtype=np.float64)
+            valid = np.asarray(res.get("valid",
+                                       np.ones(len(pts), bool)), dtype=bool)
+        pts3 = np.column_stack([z, pts[:, 0], pts[:, 1]])
+
+        for name in (PATH_LAYER, PATH_OFF_LAYER):
+            if name in viewer.layers:
+                viewer.layers.remove(name)
+
+        # **Every** point goes in the main layer, so the centerline is
+        # continuous: splitting it by `valid` put the flagged 22% in a second
+        # layer and left visible gaps along the path, which reads as a broken
+        # centerline rather than as a caveat.
+        hi = float(np.percentile(kap, 98)) if kap.size else 1.0
         lyr = viewer.add_points(
             pts3, name=PATH_LAYER, size=3.0, face_color=kap,
             face_colormap="turbo", border_width=0.0)
-        hi = float(np.percentile(kap, 98)) if kap.size else 1.0
         try:
             lyr.face_contrast_limits = (0.0, max(hi, 1e-4))
         except Exception:
             pass
         lyr.visible = visible
+
+        # The extrapolated ones are marked by an overlay ring instead — same
+        # positions, so nothing moves and nothing disappears. Plain grey, NOT
+        # face_color="transparent": napari 0.6.0 rejects that string and
+        # silently resets every point to white.
+        if (~valid).any():
+            off = viewer.add_points(
+                pts3[~valid], name=PATH_OFF_LAYER, size=6.0,
+                face_color="gray", border_width=0.0)
+            off.opacity = 0.4
+            off.visible = visible
 
     def _compute_path(*_, after=None):
         mask = _cadh_mask_array(state)
@@ -440,8 +433,13 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            m = np.asarray(mask)
-            return vessel_path_curvature_xy(m > 0, scale, smooth_um=smooth_um)
+            m = np.asarray(mask) > 0
+            res = vessel_path_curvature_xy(m, scale, smooth_um=smooth_um)
+            # The lumen Z reads the whole mask, so it belongs here in the worker
+            # and not in `_show_path`, which runs on the GUI thread.
+            if len(res["pts_yx_um"]):
+                res.update(lumen_center_z(m, scale, res["pts_yx_um"]))
+            return res
 
         def _done(res):
             state["vessel_centerline"] = res
@@ -460,6 +458,17 @@ def build(state, viewer) -> Container:
                   f"median κ = 0 (straight); {nbr} branch node(s).", flush=True)
             if med > 0:
                 print(f"  {nbr} branch node(s) detected.", flush=True)
+            z = res.get("z_um")
+            if z is not None:
+                ok = np.asarray(res.get("valid"), bool)
+                r = np.asarray(res.get("radius_um"))
+                if ok.any():
+                    print(f"  lumen centre Z {np.asarray(z)[ok].min():.1f}–"
+                          f"{np.asarray(z)[ok].max():.1f} µm over {int(ok.sum())}"
+                          f"/{len(pts)} points; inscribed lumen radius median "
+                          f"{float(np.median(r[ok])):.1f} µm.", flush=True)
+                for note in res.get("notes", []):
+                    print(f"  {note}", flush=True)
 
         def _err(exc):
             print(f"Path curvature error: {exc}", flush=True)
@@ -533,10 +542,19 @@ def build(state, viewer) -> Container:
                   "curvature' first.", flush=True)
             return
         path = str(path_curv_path_w.value)
-        np.savez_compressed(path, pts_yx_um=np.asarray(cl["pts_yx_um"]),
-                            kappa=np.asarray(cl["kappa"]),
-                            branch_yx_um=np.asarray(cl["branch_yx_um"]))
-        print(f"Saved path curvature -> {path}.", flush=True)
+        arrays = {"pts_yx_um": np.asarray(cl["pts_yx_um"]),
+                  "kappa": np.asarray(cl["kappa"]),
+                  "branch_yx_um": np.asarray(cl["branch_yx_um"])}
+        # The lumen Z travels with the centerline when it has been computed, so
+        # loading a saved one draws it in the right place without re-reading the
+        # mask. Extra keys only: `measure_core` and `batch_measure` name the
+        # three above, so an older reader is unaffected.
+        for k in ("z_um", "valid", "radius_um"):
+            if cl.get(k) is not None:
+                arrays[k] = np.asarray(cl[k])
+        np.savez_compressed(path, **arrays)
+        print(f"Saved path curvature -> {path}"
+              + (" (with lumen Z)." if "z_um" in arrays else "."), flush=True)
 
     def _load_path_curv(*_, after=None, visible=True):
         path = str(path_curv_path_w.value)
@@ -544,6 +562,13 @@ def build(state, viewer) -> Container:
             d = np.load(path)
             cl = {"pts_yx_um": d["pts_yx_um"], "kappa": d["kappa"],
                   "branch_yx_um": d["branch_yx_um"]}
+            for k in ("z_um", "valid", "radius_um"):
+                if k in d.files:
+                    cl[k] = d[k]
+            if "z_um" not in cl:
+                print("  (this file predates the lumen Z — the path will be "
+                      "drawn at the mesh's mean Z. Re-run 'Compute in-plane "
+                      "path curvature' to place it in the lumen.)", flush=True)
             state["vessel_centerline"] = cl
             _show_path(cl, visible=visible)
             print(f"Loaded path curvature <- {path}: {len(cl['pts_yx_um'])} "

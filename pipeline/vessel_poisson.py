@@ -20,9 +20,12 @@ The five steps, and the one non-obvious thing about each:
 
 1. **Coarse grid.** Block-mean the mask by ``k`` voxels, one output z-slice at a
    time (the pattern `centerline.lumen_center_z` uses, for the same reason:
-   never materialise a float copy of 340M voxels). The result ``occ`` is already
-   *continuous*, so nothing downstream changes when [P28]'s local-contrast field
-   replaces the binary mask — which is what makes P28 a controlled experiment.
+   never materialise a float copy of 340M voxels). The block mean is taken over
+   the **values**, so ``occ`` is mean wall score in general and the occupancy
+   fraction exactly when the input is 0/1 — nothing downstream changes when
+   [P28]'s local-contrast field replaces the binary mask, and every number
+   recorded on the binary mask still reproduces bit-for-bit. That is what makes
+   P28 a controlled experiment.
 
 2. **Sheet normals from the structure tensor, not from the gradient.** The
    cadherin density is a **ridge** — low in the lumen *and* low outside — so
@@ -163,6 +166,16 @@ def _voxel_um(scale) -> float:
 def occupancy_grid(mask, scale, grid_um: float) -> tuple[np.ndarray, float, int]:
     """Block-mean `mask` onto a ~`grid_um` grid → ``(occ, h_um, k)``.
 
+    `mask` is either the 0/1 cadherin mask or a continuous wall field
+    (`denoise.local_contrast_score`, `docs/ISSUES.md` [P28]). The block mean is
+    taken over the **values**, so ``occ`` is mean wall score in general and the
+    familiar occupancy *fraction* exactly when the input is 0/1 — the same
+    arithmetic on the same 0.0/1.0 summands in the same order, which is what
+    keeps every recorded Poisson number reproducible and `batch_mesh`'s
+    byte-identical rebuild intact. (A caller handing this a *label* image would
+    get block-mean label ids; nothing in the repo does, and `build_mesh` passes
+    either a 0/1 mask or a rectified score.)
+
     ``k = max(1, round(grid_um / voxel))`` and ``h = k · voxel``, so the realised
     spacing is a whole number of voxels and the offset back to µm is exact (see
     `reconstruct` for that correction, which nothing in `mesh_score` can catch).
@@ -183,7 +196,8 @@ def occupancy_grid(mask, scale, grid_um: float) -> tuple[np.ndarray, float, int]
         return np.zeros((0, 0, 0), np.float32), h, k
     occ = np.empty((nz, ny, nx), np.float32)
     for i in range(nz):
-        blk = mask[i * k:(i + 1) * k, :ny * k, :nx * k] > 0
+        blk = mask[i * k:(i + 1) * k, :ny * k, :nx * k].astype(np.float32,
+                                                               copy=False)
         occ[i] = blk.reshape(k, ny, k, nx, k).mean(axis=(0, 2, 4),
                                                    dtype=np.float32)
     return occ, h, k
@@ -508,8 +522,29 @@ def _vertex_normals(verts, faces):
 def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
                 smooth_um: float = DEFAULT_SMOOTH_UM,
                 iso_pct: float = DEFAULT_ISO_PCT,
-                min_component_um: float = 50.0):
+                min_component_um: float = 50.0,
+                extras: dict | None = None):
     """The vessel surface as a level set of the fitted χ.
+
+    ``extras``, when a dict is passed, is filled with the **solved field
+    itself** — ``chi`` (the grid), ``iso_level``, ``h_um``, ``origin_um`` (the
+    µm coordinate of grid cell ``(0,0,0)``, carrying the same half-cell
+    correction the vertices get) and ``core`` (the z-enclosed lumen fragments
+    `lumen_core` found). It is filled on the empty-return paths too, with
+    whatever had been computed, so a caller can see *why* nothing came back.
+
+    This exists because the lumen is already solved for here and throwing it
+    away means recovering it later by a worse route. `lumen_graph` builds the
+    3D centerline on ``chi > iso_level``: smooth by construction, gaps spanned
+    by the harmonic solve, one component, and needing none of the
+    `binary_fill_holes` / `binary_closing` / max-projection machinery whose
+    absence is the whole point of this module (`docs/ISSUES.md` §8B). Nothing
+    is recomputed for it and no parameter is added — it is the same field the
+    surface is a level set of, so the surface and the centerline cannot
+    disagree about where the vessel is.
+
+    ``chi`` is a full float64 grid (~54×168×168 at the default 2 µm), so it is
+    handed over only when asked for.
 
     Returns ``(verts_um, faces, values, normals, info)``. ``values`` is the
     distance from the mesh centroid, matching `vessel_mesh.mesh_from_volume` so
@@ -531,6 +566,11 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
                   "grid_um": float(grid_um), "smooth_um": float(smooth_um),
                   "iso_pct": float(iso_pct),
                   "min_component_um": float(min_component_um)}
+    def _ex(**kw):
+        """Record into the caller's out-dict, if there is one."""
+        if extras is not None:
+            extras.update(kw)
+
     mask = np.asarray(mask)
     if mask.ndim != 3 or not (mask > 0).any():
         info["notes"].append("WARN: the cadherin mask is empty — no surface.")
@@ -538,6 +578,12 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
 
     voxel = _voxel_um(scale)
     occ, h, k = occupancy_grid(mask, scale, grid_um)
+    # Grid cell (i,j,k) sits at i·h + origin. The half-cell term is the same
+    # correction the vertices carry below; without it the lumen volume and the
+    # surface would sit ~1 µm apart, which is exactly the silent offset the
+    # comment on `verts` warns about.
+    _ex(h_um=float(h), k_voxels=int(k),
+        origin_um=np.full(3, (k - 1) * voxel / 2.0 - h / 2.0))
     info.update({"h_um": float(h), "k_voxels": int(k),
                  "grid_shape": tuple(int(s) for s in occ.shape)})
     if occ.size == 0 or not occ.any():
@@ -560,6 +606,7 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
     outside = core_info.pop("outside", np.zeros(occ.shape, bool))
     info["core"] = core_info
     info["notes"].extend(core_info["notes"])
+    _ex(core=core)
     if core_info["n_core_components"] == 0:
         # No fallback, by design — see `lumen_core`.
         return (*_EMPTY, info)
@@ -620,6 +667,9 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
     occupied = occ > 0
     level = _weighted_percentile(chi[occupied], occ[occupied], float(iso_pct))
     info["iso_level"] = level
+    # After the sign check, so `chi > iso_level` is the lumen side in the
+    # caller's hands too and not a coin flip.
+    _ex(chi=chi, iso_level=float(level))
     info["chi_range"] = (float(chi.min()), float(chi.max()))
     if not (chi.min() < level < chi.max()):
         info["notes"].append(

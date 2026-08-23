@@ -61,9 +61,10 @@ For each image it can:
   that classification is an **open problem** ([P05](docs/ISSUES.md#p05)).
 - **Segment the VE-cadherin** junctional network and build a 3D **vessel mesh**
   (alpha shape or marching cubes) from it.
-- **Measure vessel curvature** two ways: local *surface* curvature (quadric fit on
-  the mesh) and *in-plane (X-Y) path* curvature of the vessel centerline, which
-  distinguishes straight from branched vessels.
+- **Measure vessel geometry** two ways: local *surface* curvature (quadric fit on
+  the mesh), and a **3D centerline graph** built on the reconstructed lumen,
+  which carries arc length, per-point caliber, junction topology, and
+  cross-sections cut perpendicular to the vessel axis.
 - **Segment focal adhesions** with a trained random-forest pixel classifier on the
   mClover channel, then split and clean them into instances.
 - **Compute FRET efficiency and force** per voxel from the mClover/mRuby2 channels
@@ -278,8 +279,8 @@ bad file cannot stall the batch.
 > **The batch stops before Measure and writes no CSV.** Its step list
 > (`batch.py::_RUN_STEPS`) deliberately omits the Measure + export step, which
 > crashes headless on a GL/Qt draw. It produces every *intermediate* in each
-> `<stem>_saved/` folder (proba, instances, mesh, curvature, DAPI labels, split
-> nuclei, cadherin mask, fibroblast count).
+> `<stem>_saved/` folder (proba, instances, mesh, curvature, the centerline
+> graph, DAPI labels, split nuclei, cadherin mask, fibroblast count).
 
 > **It also runs all steps or none** — there is no `--steps` flag, so the DAPI,
 > cadherin and RF stages can only be redone by re-running the whole image
@@ -330,7 +331,7 @@ log.
 
 ### Rebuilding the vessel geometry (no image needed)
 
-The vessel mesh, the surface curvature and the in-plane centerline are built from
+The vessel mesh, the surface curvature and the centerline graph are built from
 the **saved cadherin mask**, not from the raw pixels, so they can be rebuilt
 without repeating the expensive RF predict — or, as it turns out, without
 decoding any pixels at all. The voxel size comes from the OME *header*, which
@@ -343,6 +344,11 @@ python -m pipeline.batch_mesh --dir "3d_images_folder/images/WT" --dry-run
 
 # rebuild in place at explicit parameters
 python -m pipeline.batch_mesh --dir "3d_images_folder/images/WT" \
+    --subsample-um 5.0 --alpha3d-um 15.0 --min-component-um 253.03
+
+# mesh + curvature + the 3D centerline graph, which needs a Poisson lumen
+python -m pipeline.batch_mesh --dir "3d_images_folder/images/WT" \
+    --method "alpha 3D solid -> poisson" --tag alphapoisson \
     --subsample-um 5.0 --alpha3d-um 15.0 --min-component-um 253.03
 
 # try a variant without touching the canonical files
@@ -360,10 +366,17 @@ without retyping it; explicit flags still override.
 
 | Flag | Effect |
 |---|---|
-| `--steps mesh,curvature,path` | Any subset. `--steps curvature` reads only the mesh file — no image, no mask |
+| `--steps mesh,curvature,graph` | Any subset. `--steps curvature` reads only the mesh file — no image, no mask; `--steps graph` needs a Poisson-family `--method`, since the centerline is built on the solved lumen |
 | `--tag NAME` | Write `vessel_mesh__NAME.npz` siblings instead of overwriting. `{radius}` / `{smooth}` are substituted per curvature run |
 | `--min-size N\|auto\|auto-raw` | The cadherin despeckle cut. `auto` = `max(otsu, 12)`, what the GUI applies; `auto-raw` drops the floor ([P19](docs/ISSUES.md#p19)) |
+| `--cadherin-field mask\|score` | What the method is handed. `mask` (default) is the binary mask and decodes **no image pixels**; `score` decodes the substrate channel and builds a continuous wall field ([P28](docs/ISSUES.md#p28)). Measured 2026-08-21 to make the surface **worse** on every score — kept because the experiment is worth being able to re-run, not because it is a better input |
+| `--score-window-xy` / `--score-k-lo` | Only read under `--cadherin-field score`. `k_lo` is the z-score the field is hinged to zero below; 2.5 is the lowest value that reconstructs at all |
 | `--curv-radius-um 5,10,15` | Comma-separated = a sweep, one output per value |
+| `--spur-ratio` | A leaf branch shorter than this many *local inscribed radii* is a spur. A ratio, not a length, so it adapts to a taper ([P23](docs/ISSUES.md#p23)) |
+| `--crop-ratio` / `--crop-margin-um` | How near a field-of-view opening an endpoint must be to count as a crop rather than a real vessel terminus |
+| `--kappa-window-um` | Arc-length window for the 3D path-curvature fit |
+| `--section-every-um` | Cut a perpendicular cross-section every this many µm. Between cuts the section columns are NaN, never interpolated |
+| `--section-span` | Sample the cut plane out to this many local inscribed radii. The inscribed radius is the *minor* semi-axis, so this must exceed the aspect ratio or every section is clipped |
 | `--from-settings PATH` | Seed every parameter from a settings or recon JSON |
 | `--suggest-alpha` | One Delaunay per image; prints a suggested `alpha3d_um`, writes nothing |
 | `--dry-run` / `--check-only` | Resolve parameters and exit / describe the folders and exit |
@@ -371,9 +384,10 @@ without retyping it; explicit flags still override.
 Each run writes a **`vessel_recon.json`** beside its outputs recording the git
 SHA, the scale and where it came from, the input mask's size and mtime, the
 resolved `min_size`, the mesh parameters the chosen method actually *read* (the
-ones it ignores are listed separately), the curvature and centerline parameters,
-and per-output counts — vertices, **surface** vertices, faces, finite κ1, median
-κ2, centerline points, branch nodes. `--check-only` prints a summary line per
+ones it ignores are listed separately), the curvature and centerline-graph
+parameters, and per-output counts — vertices, **surface** vertices, faces,
+finite κ1, median κ2, centerline points, edges, junctions, cropped ends, and the
+median cross-section. `--check-only` prints a summary line per
 recon file, and **warns for any `vessel_mesh.npz` that has none**, since that
 mesh cannot say what produced it ([P26](docs/ISSUES.md#p26)).
 
@@ -398,8 +412,16 @@ One row per adhesion, in each `<stem>_saved/<stem>_adhesion_measures_<ts>.csv`.
 | `ratio_clover_ruby` | **The tension readout.** Σ(clover) ÷ Σ(ruby) over the adhesion, each background-subtracted per z-plane, on the native-Z grid. Uncalibrated |
 | `dist_mesh_um` | Distance from the adhesion to the nearest vessel-mesh vertex (µm) |
 | `centroid_z_um`, `centroid_y_um`, `centroid_x_um` | Adhesion centroid in µm — needed for any spatial check |
-| `path_curv_xy` | In-plane (X-Y) centerline curvature κ at the nearest centerline point (1/µm). Unsigned |
-| `dist_branch_um` | X-Y distance to the nearest vessel branch node (µm) |
+| `path_curv_1_um` | 3D path curvature κ of the vessel centerline at the nearest graph point (1/µm), fitted along arc length. Unsigned |
+| `path_curv_xy_1_um` | The same, for the in-plane (X-Y) projection of the path |
+| `dist_junction_um` | Distance **along the vessel** to the nearest junction (µm). Blank on a non-branched vessel — guard for NaN |
+| `dist_crop_um` | Distance along the vessel to the nearest point where the field of view cuts it (µm) |
+| `censored` | `1` if the adhesion sits within a couple of calibers of that cut, where the lumen is no longer fully imaged |
+| `s_um` | Arc length along the centerline edge the adhesion attaches to |
+| `caliber_um` | Inscribed lumen radius at that point (µm). This is the **minor** semi-axis, not the vessel width |
+| `lumen_area_um2` | Cross-sectional area of the lumen, on a plane ⟂ to the local axis (µm²) |
+| `lumen_major_um`, `lumen_minor_um` | Full extents of that cross-section along its principal axes (µm). **Kept separate on purpose** — width and height enter the shear formula with different exponents |
+| `lumen_aspect` | `lumen_major_um / lumen_minor_um` |
 | `curv_mean` | Mean curvature H = (κ1+κ2)/2 of the vessel surface at the nearest surface vertex (1/µm) |
 | `curv_k1`, `curv_k2` | Principal curvatures κmax, κmin (1/µm) |
 | `curv_gaussian` | Gaussian curvature K = κ1·κ2 (1/µm²) |
@@ -435,10 +457,18 @@ The rows below still apply to those exports unless marked otherwise — in
 particular **both curvature measures and the mesh comparability problem are
 untouched by that re-export.**
 
+> **Those CSVs predate the 2026-08-22 centerline rewrite.** They carry the old
+> `path_curv_xy` and `dist_branch_um` columns, which came from the in-plane
+> centerline that has since been deleted, and they carry none of the caliber or
+> cross-section columns. The old two are **not** the new ones renamed — they are
+> different quantities measured a different way — so do not map one onto the
+> other. Re-exporting needs a `vessel_graph.npz`, which needs the reconstruction
+> decision in [I03](docs/ISSUES.md#i03) to be taken first.
+
 | Column(s) | Problem | ID |
 |---|---|---|
-| `dist_branch_um` | **A branch node is fabricated where the vessel exits at a corner of the image.** A notch in the mask that opens onto the image border cannot be filled, so the centerline forks around it and reports a junction that does not exist. On the reference image **18.4% of adhesions (396/2,147)** measure their distance to that phantom node, understating it by a median 115 µm. It also breaks the recommended `dist_branch_um > 20` filter, which would wrongly discard 43 rows that are actually ~160 µm from any real junction | [P29](docs/ISSUES.md#p29) |
-| *all vessel-geometry columns* | **The cadherin threshold discards real wall.** The 8–10 µm "gaps" the reconstruction has to bridge are mostly not holes: the raw channel carries signal at the same radius as the detected wall, ~40% as bright, at 5–6× the lumen noise. The mask is a dashed copy of a continuous ring, so every method is being asked to invent geometry the data already contains | [P28](docs/ISSUES.md#p28) |
+| `path_curv_*`, `dist_junction_um`, `caliber_um`, `lumen_*` | **New columns, and they need a Poisson-family mesh.** They come from the 3D centerline graph, which is built on the reconstructed lumen; with no `vessel_graph.npz` beside the image they all export blank. On two of the six images (`V3b_..._04step_001`, `V3b_..._04step_002`) the fitted lumen leaks out through the top/bottom of the stack, so the graph invents junctions and 44–56% of cross-sections are clipped — their caliber is a lower bound and their junction count is wrong. The other four are right | [P32](docs/ISSUES.md#p32) |
+| *all vessel-geometry columns* | **The cadherin mask discards real wall.** The 8–10 µm "gaps" the reconstruction has to bridge are mostly not holes: the raw channel carries signal 0–1 µm from the detected wall's own radius, at ~4.5× the lumen noise against ~2× for no-wall controls — replicated on five of six images. The mask is a dashed copy of a continuous ring, so every method is being asked to invent geometry the data already contains. **The local threshold is not the culprit** (it passes 100% of that wall); the global intensity floor and the `min_size` component filter delete it, 15–41% and 59–85% respectively | [P28](docs/ISSUES.md#p28), [P19](docs/ISSUES.md#p19) |
 | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **Do not use any CSV exported before 2026-08-11.** A destroyed triangle winding, plus an away-from-centroid normal flip that overrode the winding on 44% of surface vertices, made the curvature fitting frame near-random; correlation between the old column and the corrected one is ρ = +0.069 (54.8% sign agreement — a coin flip). **Fixed 2026-08-10**: the columns are now self-consistent (κ2 99.5% consistent sign on the re-export, face-normal coherence 0.21 → 0.97). Re-export any other image before using these columns. **But see the row below — self-consistent is not the same as measuring the vessel** | [P01](docs/ISSUES.md#p01) |
 | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **The value depends on the scale you fit it at, with no plateau.** Sweeping the curvature fit radius on the shipped mesh moves the implied vessel radius 14.2 → 134.7 µm as `radius_um` goes 5 → 40, tracking the fit window at ~3×. A real tube gives the same κ at any window well below its radius. Independently, the vessel measures ~86 µm deep and ~140 µm wide, so its radius is of order 40 µm and the shipped κ2 (R = 14.2 µm) is 3–5× too curved to be its circumferential curvature. These columns currently describe the reconstruction's roughness at the chosen scale, not the vessel. Not fixable by tuning the slider. **A reconstruction that does plateau now exists** — the Poisson method added 2026-08-13 returns a slope of +0.009 against the alpha shape's −1.428 on the same mask, with κ2's implied radius steady at 66 µm across fit radii 5–40 µm — but **every CSV on disk was measured against an alpha-shape mesh**, so this row still applies to all of them until the six images are rebuilt and re-exported | [P24](docs/ISSUES.md#p24), [I06](docs/ISSUES.md#i06) |
 | `ratio_clover_ruby` | Driven by the ruby channel's noise floor, not by tension — ρ(ratio, ruby) = −0.773 vs ρ(ratio, clover) = +0.068. Spread exceeds what the sensor can physically produce. Treat as a rank at best | [P02](docs/ISSUES.md#p02) |
@@ -448,7 +478,7 @@ untouched by that re-export.**
 | `n_fibroblasts`, `n_nuclei_total` | **Only in CSVs exported before 2026-08-11.** The count was never cleared between images, so an image whose nuclei step failed silently inherited the previous image's counts. Only single-image runs are safe from this; a batch run is not. **Fixed 2026-08-11** | [P25](docs/ISSUES.md#p25) |
 | `ratio_clover_ruby` | Correlates with imaging depth, but **the sign flips between images** (ρ −0.241 to +0.307 across the six, negative in only 2). That rules out simple optical attenuation, which would push the same way every time, and points instead at the geometry: the vessel dives through the stack, so depth is partly position along the vessel, and which way is arbitrary per field. Do not apply a depth correction with a fixed sign | [P06](docs/ISSUES.md#p06) |
 | `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries | `peak_local_max` discarded watershed seeds near the volume edge, so nuclei touching the stack boundary were dropped and elongated adhesions failed to split. **Fixed 2026-08-10**; on the re-exported image the counts move 273 → 276 nuclei and 2,092 → 2,147 adhesions (`n_fibroblasts` happened not to change — all three recovered nuclei were non-fibroblast, which is one image, not a general result). Re-export any other image to pick this up | [P07](docs/ISSUES.md#p07) |
-| `path_curv_xy` | **Fitted over a 20 µm window on a vessel ~140 µm wide**, so it largely measures wobble in the extracted centerline rather than bending of the vessel — the skeleton is only ~4.5 vessel-widths long in a field ~2.4 widths across. On top of that: contaminated within `smooth_um` of a branch (filter on `dist_branch_um`, but guard for NaN or non-branched images lose every row); ~10× inflated within 5 µm of the xy field boundary, where 42% of the highest-κ points sit (a border-padding fix landed 2026-08-13, but that table has **not** been re-measured — assume the inflation is still there); and unsigned, so inside and outside of a bend are indistinguishable | [P08](docs/ISSUES.md#p08) |
+| `curv_*` | **No scale-independent value on an alpha mesh** — the implied radius climbs 14.2 → 134.7 µm as `radius_um` goes 5 → 40, so the number reports the fit window rather than the vessel. The Poisson reconstruction does reach a plateau, but no exported CSV has been rebuilt against one yet | [P24](docs/ISSUES.md#p24) |
 | `dist_mesh_um`, `curv_*` | **Partly fixed 2026-08-12.** `dist_mesh_um` used to measure to *every* mesh vertex, including the many that sit strictly inside the alpha-shape solid and belong to no face — 73–85% of them on five of the six images, so 35–63% of adhesions were measuring their distance to a point buried in the wall. It now measures to the surface only, and the median rose 1.4–2.3× on those five. Still open: the vertices are a ~2 µm-spaced point cloud whose resolution is set by `subsample_um`, not by the image, and curvature is still assigned with no maximum distance | [P09](docs/ISSUES.md#p09), [P20](docs/ISSUES.md#p20) |
 | `dist_mesh_um`, `curv_*` | **Not comparable *between* images.** The headless batch builds every mesh at the widget defaults, while one image was built at hand-tuned values (`subsample_um = 5.0` against the default 1.0) — 7,282 surface vertices against 11k–41k. Vertex count also varies 5× between images at *identical* settings, tracking cadherin mask size. Rebuilding **one image** both ways, with its mask held fixed, moves the surface-vertex count 4.6× (7,282 → 33,537), `dist_mesh_um`'s median 2.30 → 1.63 µm and κ2's −0.070 → −0.163 1/µm — the parameters alone, nothing else changed. Note the hand-tuned image is **not** a known-good target — it was tuned lightly and the exercise mainly revealed how strongly these outputs depend on the parameters, which is the problem itself. Within-image rank only | [P26](docs/ISSUES.md#p26) |
 | `force_*_pN` | Blank by design without a FRET calibration. If you configure one, the numbers are only as good as your calibration | [P18](docs/ISSUES.md#p18) |

@@ -38,6 +38,24 @@ Since 2026-08-11 that classification is joinable per adhesion via the
 the column inherits every P05 problem above, now attached to every row rather
 than to two image-level scalars. Do not stratify an analysis on it yet.
 
+**There is now a second, independent handle on it — `pipeline/nuc_side.py`.**
+Fibroblasts are abluminal, so which *side of the wall* a nucleus sits on is a
+physical statement about its cell type that shares no machinery with a marker
+intensity. The signed nucleus-to-surface distance agrees with the marker
+classifier on **5 of 6 images** (AUC 0.64–0.77), while the unsigned version is
+chance — see `docs/DIRECTION.md` §8C.4 and P05's 2026-08-22 History.
+
+Two cautions that matter more than the result:
+
+- **Agreement between two unvalidated measures is not validation.** It is the
+  first external corroboration P05 has ever had and nothing more.
+- **The obvious way to validate it does not work, and the reason is
+  structural** (§8C.5): calibrating against nuclei that touch the VE-cadherin
+  network fails because fibroblasts sit on the outside of that very wall, so the
+  reference population is not independent of the axis being measured. What is
+  needed is an **independent endothelial label**; `cadherin_junction_proba`
+  (P14, currently consumed by nothing) is the nearest candidate in the repo.
+
 - Channels (see `3d_images_folder/params.json`):
   - `mClover` — donor, VnTs sensor (fibroblasts)
   - `mRuby` — acceptor, VnTs sensor (fibroblasts)
@@ -67,11 +85,43 @@ than to two image-level scalars. Do not stratify an analysis on it yet.
 
 ## End goal (long term)
 
-Relate **per-adhesion tension** to **local vessel geometry** (surface curvature,
-in-plane path curvature, distance to the wall and to branch nodes). Reaching
-that credibly needs the depth confound ruled out first — depth and curvature
-covary on a tube, so optical attenuation masquerades as a curvature effect.
-`centroid_z_um` is exported for exactly this check.
+**`docs/DIRECTION.md` is the program document — read it first, before this
+file's module list and before `ISSUES.md`.** It states what is being measured,
+why, what is established, and what to do next. This section is the one-paragraph
+version and defers to it on every detail.
+
+Relate **per-adhesion tension** to the **local mechanical environment of the
+vessel** — specifically **wall shear stress**. The working hypothesis is that
+fibroblasts attach preferentially, or adhere with different force, where the
+lumen experiences high shear.
+
+Two things follow that are easy to get wrong:
+
+- **Fibroblasts are abluminal.** They were seeded onto an already-formed,
+  already-perfused vessel, so they feel no shear directly; the endothelium is
+  the sensor and the signal crosses the wall. The shear covariate for an
+  adhesion is therefore the shear at the **nearest luminal surface point**, not
+  at the adhesion's own position, and transmural distance is a covariate in its
+  own right.
+- **Geometry is a proxy, not the target.** A geometric descriptor is worth only
+  what it predicts about shear. This reordered the plan in 2026-08-22:
+  per-vertex surface curvature left the critical path, because Gaussian
+  curvature is K = −r″/(r(1+r′²)²) and is therefore **blind to a taper** and
+  flags crotch, flare and waist identically. What matters instead is the
+  **cross-section** — and width and height enter the shear formula with
+  different exponents, so they must stay separate columns and never be
+  collapsed into one "caliber".
+
+Reaching any of this credibly needs the depth confound ruled out — depth and
+geometry covary on a tube, so optical attenuation masquerades as a geometric
+effect. `centroid_z_um` is exported for exactly this check, and the flat
+cross-section gives a real handle on it: predicted shear is **U-shaped in z**
+while attenuation is monotonic, and those forms are separable.
+
+**Force is not in this dataset.** FRET is uncalibrated and `ratio_clover_ruby`
+tracks the ruby noise floor (`docs/ISSUES.md` P02), so the mechanical half
+cannot be tested here at all. What is testable now is the **spatial** half —
+where the fibroblasts are.
 
 ## What exists now
 
@@ -83,11 +133,22 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
 - `fret.py` — **FROZEN** FRET math (background subtract, bleedthrough, force LUT).
 - `gpu.py` — optional cupy shim for windowed ndimage ops. Falls back to CPU on
   genuine OOM only; any other CUDA error raises.
-- `denoise.py` — Otsu / Niblack / Sauvola / Bernsen thresholding, size filtering.
+- `denoise.py` — Otsu / Niblack / Sauvola / Bernsen thresholding, size filtering,
+  and `local_contrast_score` — the Niblack statistic as a **continuous rectified
+  field** rather than a mask (`docs/ISSUES.md` P28). It and `niblack_mask` both
+  call `_local_zscore`, so the threshold and the field are the same quantity by
+  construction, not two copies that drift; the identity
+  `niblack_mask(v, w, k) == (local_contrast_score(v, w, vx, 0) > k)` is pinned by
+  `docs/scratch/p28/score_check.py`. **The field was measured on 2026-08-21 to
+  make every reconstruction worse** — it is kept so the experiment stays
+  re-runnable, not because it is a better input. Do not reach for it as an
+  improvement without reading P28's History first.
 - `rf.py` — random-forest voxel classifier + instance labeling.
 - `cell_mesh.py` — per-cell surfaces, vertex normals, quadric surface curvature.
 - `vessel_mesh.py` — vessel surface from the cadherin mask (polar / 2D alpha /
-  3D alpha / poisson — see `vessel_poisson.py`). **`build_mesh` is the single
+  3D alpha / poisson / alpha-3D-solid→poisson — see `vessel_poisson.py`).
+  `rasterize_alpha_solid` turns the alpha complex's *interior* into a volume so
+  the last of those can feed alpha's gap-bridging into Poisson's surface fit. **`build_mesh` is the single
   dispatch point** and both the napari tab and `batch_mesh` call it, so the
   interactive and headless paths cannot drift — the same doctrine as
   `saved_check.py`. `LIVE_PARAMS` says which knobs each method actually reads;
@@ -98,14 +159,30 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
   `LIVE_PARAMS` + `ALL_PARAMS` here, and `MESH_DEFAULTS` + the `explicit` dict +
   an argparse flag in `batch_mesh` — because `resolve_params` indexes both by
   `ALL_PARAMS` and raises `KeyError` otherwise.
-- `centerline.py` — in-plane centerline + path curvature + branch nodes, and
-  `lumen_center_z` (the lumen-centre Z under each point, from a 3D
-  distance-from-wall field, plus the **inscribed lumen radius** — the only direct
-  caliber measurement in the pipeline). The footprint is replicate-padded before
-  `skeletonize` so the field-of-view border does not fork the medial axis.
-  **The points it returns are a point set in raster order, not a traced path**
-  (`docs/ISSUES.md` P27) — there is no arc length, and κ survives only because it
-  is fitted over KD-tree neighbourhoods.
+- `lumen_graph.py` — **the vessel centerline, as a 3D graph on the Poisson
+  lumen.** Replaced `centerline.py`, which is deleted: that module skeletonized
+  a *max projection* of the cadherin mask, and making a projection solid needs
+  `binary_fill_holes`, which is the single root of seven recorded defects
+  (`docs/DIRECTION.md` §8B). Input is χ from `vessel_poisson` via
+  `build_mesh(..., extras=)`, so **the centerline and the surface are level sets
+  of the same field and cannot disagree about where the vessel is.** It gives
+  arc length by construction (`docs/ISSUES.md` P27 closes), caliber everywhere
+  from a 3D distance transform, spur pruning **as a ratio of the local
+  caliber** rather than an absolute length (P23), endpoints classified as
+  field-of-view **crop** vs real terminus, and — the payoff — **cross-sections
+  cut perpendicular to the axis**, which is the in-plane caliber §8A.2 could not
+  measure by any route and which the shear estimate needs. Pure functions, no
+  Qt. **It chooses nothing**: `censored`, `section_clipped` and the z-face
+  warning are flags for the caller, not filters it applies.
+- `nuc_side.py` — which side of the wall a nucleus is on: **signed** distance,
+  exact nearest-**triangle** (two passes; the second is what makes it exact),
+  no subsample. Only meaningful on a Poisson-family mesh, whose ∇χ normals make
+  positive mean abluminal — `mesh_sign_is_luminal` refuses on anything else,
+  because on an alpha solid "outward" points *into* the lumen on the inner sheet
+  (P21) and the numbers would look identical. Agrees with the P05 marker
+  classifier on 5 of 6 images (AUC 0.64–0.77); the unsigned version is chance,
+  which is the whole point. **Two unvalidated measures agreeing is not
+  validation** — see P05's 2026-08-22 History before quoting it.
 - `vessel_poisson.py` — the fourth reconstruction method, and the only one that
   **approximates** rather than interpolates: sheet normals from the structure
   tensor, oriented into the lumen *volume* (no centerline, no fill-holes, no
@@ -120,6 +197,10 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
   to pass `docs/ISSUES.md` P24's plateau test (`slope_loglog` +0.009 against
   alpha 3D's −1.428 on the same mask); it does **not** beat alpha 3D on coverage,
   and I06 records the whole four-vector rather than a verdict.
+  `occupancy_grid` block-means the input **values**, so `occ` is mean wall score
+  for a continuous field and the occupancy *fraction* exactly for a 0/1 mask —
+  bit-identical, which is the contract behind `batch_mesh`'s byte-identical
+  rebuild and the reason this module stays off `gpu.*`.
 - `mesh_score.py` — how good is a vessel reconstruction: scale stability,
   topology, coverage, support. Pure functions, same doctrine as `saved_check.py`.
   **Four numbers, reported as a vector and never combined into one** — a
@@ -129,7 +210,9 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
   anywhere the data is *not*?) are duals and must be read together: each alone
   is gamed by the other's failure mode. Validated against known surfaces, not
   just against this repo's own recorded numbers — see `docs/ISSUES.md` I03.
-- `measure_core.py` — headless per-adhesion measurement. **Never prints**; it
+- `measure_core.py` — headless per-adhesion measurement. `graph_columns` is
+  **shared with the GUI worker** rather than copied — P11 records that P04 and
+  P12 each had to be written twice, and that is where it stopped. **Never prints**; it
   returns its degradation warnings in `result["notes"]` for the caller to print.
 - `saved_check.py` — the consistency checks over `_saved` intermediates, as pure
   functions (numpy in, `list[str]` out; no Qt, no napari, no `state`). Both the
@@ -139,9 +222,18 @@ covary on a tube, so optical attenuation masquerades as a curvature effect.
 - `batch.py`, `batch_measure.py`, `batch_mesh.py`, `batch_postprocess.py` —
   headless runners. **`batch.py` writes no CSV** (stops before Measure);
   `batch_measure.py` does. `batch_mesh.py` rebuilds only the vessel geometry
-  (mesh / surface curvature / centerline) from the saved cadherin mask plus the
+  (mesh / surface curvature / centerline **graph**; `--steps graph` needs a
+  Poisson-family method, since the graph is built on the solved lumen) from the saved cadherin mask plus the
   OME *header* — no pixels decoded, no napari — and writes a `vessel_recon.json`
-  recording what produced each mesh. Its fourth step, `--steps score`, builds
+  recording what produced each mesh. **`--cadherin-field score` is the one
+  exception to "no pixels decoded"**: it loads the substrate channel to build
+  P28's continuous field. It defaults to `mask`, so every existing invocation
+  still decodes nothing, and it is **headless-only — the napari tab has no
+  equivalent**. That is a deliberate exception to the no-drift rule below, not an
+  oversight: the field is measured to degrade the surface, and a slider would
+  invite tuning something that should not be tuned yet. If it ever becomes worth
+  seeing interactively, the honest form is a read-only score *layer* in the
+  Cadherin tab, not a mesh knob. Its fourth step, `--steps score`, builds
   nothing and only records `mesh_score`'s four numbers into that JSON; it is
   opt-in because it costs more than the rebuild does. All print a per-image
   summary and set an exit code.
@@ -184,6 +276,12 @@ Two machines, two separate environments that happen to share a name:
   sitting exactly at one may have been truncated rather than converged.
 - Keep the pipeline narrow. Resist adding abstractions for hypothetical
   future data types — that's exactly what sank the previous version.
+- **napari is the only viewer.** A geometry library may be added for its
+  algorithms (Open3D's screened Poisson is the live candidate, `docs/ISSUES.md`
+  I06), but never for its rendering: `open3d.visualization` and equivalents are
+  not to be imported. Anything a library builds comes back as verts/faces and is
+  drawn through the same `add_surface` path as every other method. The end user
+  gets one window.
 - FRET math is load-bearing and copied from the old pipeline; treat it
   as frozen unless the user asks otherwise.
 - **Don't report a number as meaningful when it isn't.** If a column can't be
@@ -197,6 +295,11 @@ status, and the dates it was opened, last verified, and resolved. Read it before
 trusting or extending any output. Do not keep a second copy of the priority list
 here; it will drift.
 
+- **`docs/DIRECTION.md`** — the **program**: goal, hypothesis, physics, dataset
+  and the work queue. Cites issue IDs and quotes only the single number that
+  carries an argument; **the `Pnn` entry is always authoritative** for the
+  measurement and the date. If the two disagree, `ISSUES.md` is right and
+  `DIRECTION.md` is stale.
 - **`docs/ISSUES.md`** — living state. One entry per problem, permanent IDs
   (`P01`, `P02`, …). Closed entries stay, including ones closed as `invalid`.
 - **`docs/audit.md`** — frozen evidence: a dated snapshot of the full audit
@@ -208,7 +311,9 @@ When a problem is found, opened, or fixed, update `ISSUES.md` — add a `History
 line with the date rather than rewriting the entry in place, so the record of what
 was believed and when survives.
 
-**`ISSUES.md` carries the current ordering and the reasoning — read it there.**
+**The work queue lives in `docs/DIRECTION.md` §8, and `ISSUES.md`'s
+status-at-a-glance section carries the defect-level ordering and its reasoning —
+read them there.**
 This file deliberately does not restate the queue. It used to, and the copy went
 stale within a day of the fixes landing, which is the drift this section warns
 about.

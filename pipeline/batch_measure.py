@@ -52,8 +52,11 @@ DEFAULT_PARAMS = ROOT / "3d_images_folder" / "params.json"
 DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
 
 COLS = ["label", "ratio_clover_ruby", "dist_mesh_um",
-        "centroid_z_um", "centroid_y_um", "centroid_x_um", "path_curv_xy",
-        "dist_branch_um", "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
+        "centroid_z_um", "centroid_y_um", "centroid_x_um",
+        "path_curv_1_um", "path_curv_xy_1_um", "dist_junction_um",
+        "dist_crop_um", "censored", "s_um", "caliber_um", "lumen_area_um2",
+        "lumen_major_um", "lumen_minor_um", "lumen_aspect",
+        "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
         "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
         "volume_um3", "axis_major_um", "axis_minor_um", "eccentricity", "nuc_id",
         "nuc_is_fibroblast"]
@@ -215,11 +218,10 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
         cv = np.load(saved / "vessel_curvature.npz")
         curvature = {k: cv[k] for k in ("mean", "k1", "k2", "gaussian")
                      if k in cv.files}
-    centerline = None
-    if (saved / "vessel_path_curvature.npz").exists():
-        pc = np.load(saved / "vessel_path_curvature.npz")
-        centerline = {"pts_yx_um": pc["pts_yx_um"], "kappa": pc["kappa"],
-                      "branch_yx_um": pc["branch_yx_um"]}
+    graph = None
+    if (saved / "vessel_graph.npz").exists():
+        pc = np.load(saved / "vessel_graph.npz")
+        graph = {k: pc[k] for k in pc.files}
     fib = {}
     if (saved / "fibroblast_count.npz").exists():
         fc = np.load(saved / "fibroblast_count.npz")
@@ -237,7 +239,7 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     _p("compute_measurements")
     result = compute_measurements(labels, force_vol, vessel_verts, dapi_labels,
                                   scale, clover_native, ruby_native, raw_voxel,
-                                  curvature, centerline, nuc_ids=nuc_ids,
+                                  curvature, graph, nuc_ids=nuc_ids,
                                   nuc_is_fib=nuc_is_fib,
                                   vessel_faces=vessel_faces)
     if result is None:

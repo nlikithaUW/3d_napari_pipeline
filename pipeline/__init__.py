@@ -10,7 +10,9 @@ Layout:
 - `rf`          — random-forest voxel classifier + instance labeling.
 - `cell_mesh`   — per-cell surfaces, vertex normals, quadric surface curvature.
 - `vessel_mesh` — vessel surface from the VE-cadherin mask (alpha shape).
-- `centerline`  — in-plane vessel centerline + path curvature.
+- `lumen_graph` — the 3D vessel centerline graph, built on the Poisson
+                  lumen. Replaced the old in-plane `centerline` module
+                  (docs/DIRECTION.md §8B).
 - `measure_core`— per-adhesion measurements, headless.
 - `batch*`      — headless multi-image runners.
 - `view`        — the napari app; `gui/` holds one module per tab.

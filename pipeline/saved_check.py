@@ -74,17 +74,59 @@ def curvature_notes(curvature, nverts: int) -> list[str]:
     return []
 
 
-def centerline_notes(centerline) -> list[str]:
-    """Notes for ``path_curv_xy`` and ``dist_branch_um``."""
-    if centerline is None or not len(centerline.get("pts_yx_um", [])):
-        return ["WARN: no vessel centerline — path_curv_xy and dist_branch_um "
-                "will both be blank."]
-    if not len(np.asarray(centerline.get("branch_yx_um", []))):
-        return ["WARN: the centerline has no branch nodes — dist_branch_um "
-                "will be blank. Expected on a non-branched vessel (a single "
-                "tunnel or a cone); note that a bare `dist_branch_um > X` "
-                "filter then drops every row rather than none."]
-    return []
+def graph_notes(graph) -> list[str]:
+    """Notes for the columns the 3D centerline graph feeds.
+
+    Replaces the old ``centerline_notes``. The columns are the same two —
+    ``path_curv_xy`` and ``dist_branch_um`` — but they are now read off an
+    ordered graph rather than a raster-order point set, so the failure modes
+    worth warning about are different ones.
+    """
+    if graph is None or not len(np.asarray(graph.get("points_zyx_um", []))):
+        return ["WARN: no vessel centerline graph — path_curv_xy, "
+                "dist_branch_um and every caliber column will be blank."]
+    out = []
+    # Counted from the node arrays, not read from a scalar. The saved
+    # `vessel_graph.npz` holds arrays only — the scalars live in
+    # vessel_recon.json — so a `graph.get("n_junctions", 0)` default of 0
+    # silently reported "no junction" on a branched vessel loaded from disk.
+    kind = np.asarray(graph.get("node_kind", []))
+    ek = np.asarray(graph.get("node_endpoint_kind", []))
+    n_junc = (int((kind == "junction").sum()) if kind.size
+              else int(graph.get("n_junctions", 0)))
+    n_term = (int((ek == "terminus").sum()) if ek.size
+              else int(graph.get("n_terminus_endpoints", 0)))
+    if n_junc == 0:
+        out.append(
+            "WARN: the graph has no junction — dist_branch_um will be blank. "
+            "Expected on a non-branched vessel (three of the six images); note "
+            "that a bare `dist_branch_um > X` filter then drops every row "
+            "rather than none (docs/ISSUES.md P08(d)).")
+    if n_term:
+        out.append(
+            f"WARN: {n_term} centerline endpoint(s) stop inside the volume "
+            f"rather than at a field-of-view opening. No image in this dataset "
+            f"is expected to contain a real vessel terminus "
+            f"(docs/DIRECTION.md §5.1), so this usually means the lumen was "
+            f"reconstructed short — check before trusting the caliber near it.")
+    sec = np.asarray(graph.get("area_um2", []), float)
+    if sec.size:
+        finite = np.isfinite(sec)
+        if not finite.any():
+            out.append("WARN: no cross-section was measurable anywhere on the "
+                       "centerline — every caliber column is blank.")
+        else:
+            clip = np.asarray(graph.get("section_clipped", []), bool)
+            if clip.size == sec.size and finite.sum():
+                frac = float(clip[finite].mean())
+                if frac > 0.25:
+                    out.append(
+                        f"WARN: {frac:.0%} of cross-sections ran into the edge "
+                        f"of the sampling disc or of the volume, so their "
+                        f"width and area are lower bounds rather than "
+                        f"measurements. Raise --section-span, or treat this "
+                        f"image's caliber as censored.")
+    return out
 
 
 def native_notes(clover_native, ruby_native, labels_shape) -> list[str]:
@@ -396,18 +438,30 @@ def describe_saved(path) -> list[str]:
             for n in curvature_notes(curv, nverts):
                 lines.append(f"  {n}")
 
-    pc = present.get("vessel_path_curvature.npz")
-    if pc is None:
-        lines.append(f"  {'vessel_path_curvature.npz':<26} —  MISSING")
-        lines.append("  " + centerline_notes(None)[0])
+    gp = present.get("vessel_graph.npz")
+    if gp is None:
+        lines.append(f"  {'vessel_graph.npz':<26} —  MISSING")
+        lines.append("  " + graph_notes(None)[0])
+        if present.get("vessel_path_curvature.npz") is not None:
+            lines.append(
+                "  NOTE: vessel_path_curvature.npz is present but is no longer "
+                "read — the in-plane centerline was replaced by the 3D lumen "
+                "graph (docs/DIRECTION.md §8B). Re-run `batch_mesh --steps "
+                "mesh,graph` with a Poisson method.")
     else:
-        d = _scalars(pc, ("pts_yx_um", "kappa", "branch_yx_um"))
-        npts = len(d.get("pts_yx_um", []))
-        nbr = len(d.get("branch_yx_um", []))
-        lines.append(f"  {'vessel_path_curvature.npz':<26} {npts} centerline "
-                     f"points, {nbr} branch node(s)")
-        for n in centerline_notes({"pts_yx_um": d.get("pts_yx_um", []),
-                                   "branch_yx_um": d.get("branch_yx_um", [])}):
+        d = _scalars(gp, ("points_zyx_um", "edge_len_um", "node_kind",
+                          "node_endpoint_kind", "area_um2",
+                          "section_clipped", "caliber_um"))
+        npts = len(d.get("points_zyx_um", []))
+        kind = np.asarray(d.get("node_kind", []))
+        njunc = int((kind == "junction").sum()) if kind.size else 0
+        ek = np.asarray(d.get("node_endpoint_kind", []))
+        ncrop = int((ek == "crop").sum()) if ek.size else 0
+        total = float(np.sum(d.get("edge_len_um", [0])))
+        lines.append(f"  {'vessel_graph.npz':<26} {npts} points, "
+                     f"{len(d.get('edge_len_um', []))} edge(s), {njunc} "
+                     f"junction(s), {ncrop} cropped end(s), {total:.0f} um")
+        for n in graph_notes(d):
             lines.append(f"  {n}")
 
     # --- where the mesh came from (P26) --------------------------------------

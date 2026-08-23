@@ -21,7 +21,7 @@ from scipy.spatial import cKDTree as KDTree
 
 from .fret import background_subtract
 from .saved_check import (
-    centerline_notes, curvature_notes, force_notes, mesh_notes, native_notes,
+    graph_notes, curvature_notes, force_notes, mesh_notes, native_notes,
     nuclei_notes, ratio_dropout_note, surface_verts_for_distance,
     volume_shape_notes,
 )
@@ -43,9 +43,88 @@ def _bs_per_z(vol: np.ndarray) -> np.ndarray:
     return out
 
 
+GRAPH_COLUMNS = ("path_curv_1_um", "path_curv_xy_1_um", "dist_junction_um",
+                 "dist_crop_um", "censored", "s_um", "caliber_um",
+                 "lumen_area_um2", "lumen_major_um", "lumen_minor_um",
+                 "lumen_aspect")
+
+
+def graph_columns(graph, adhesion_um, order, first, counts):
+    """Per-adhesion columns read off the 3D centerline graph.
+
+    Extracted so the GUI worker and `measure_core` share one implementation
+    rather than a fourth copy — [P11] records that [P04] and [P12] each had to
+    be written twice, and this is the change where that stops getting worse.
+    Returns ``(columns, notes)``.
+
+    Each adhesion attaches to its **nearest point on the graph in 3D**, and
+    inherits that point's whole record. The old code did this in the xy
+    projection against a raster-order point set, so an adhesion on the far wall
+    and one on the near wall at the same (y,x) received the same curvature, and
+    "distance to branch" was Euclidean rather than along the vessel ([P08](a),
+    [P27], [P29]).
+
+    ``caliber_um`` and the three ``lumen_*`` columns are new, and they are the
+    ones the shear estimate needs: for a flat duct tau ~ 6 uQ/(w h^2), so width
+    and height enter with different exponents and must travel as separate
+    columns rather than be collapsed into one caliber (DIRECTION §4).
+    """
+    n_ad = len(first)
+    out = {k: np.full(n_ad, np.nan, dtype=np.float32) for k in GRAPH_COLUMNS}
+    out["censored"] = np.zeros(n_ad, dtype=np.float32)
+    notes = list(graph_notes(graph))
+    gpts = (np.asarray(graph.get("points_zyx_um", []))
+            if graph is not None else np.zeros((0, 3)))
+    if not len(gpts):
+        return out, notes
+
+    _, cnn = KDTree(gpts).query(adhesion_um)
+
+    def reduce_to_adhesion(arr, how="mean"):
+        a = np.asarray(arr)
+        if a.shape[0] != len(gpts):
+            return np.full(n_ad, np.nan, dtype=np.float32)
+        v = a[cnn][order].astype(np.float64)
+        if how == "min":
+            return np.minimum.reduceat(v, first).astype(np.float32)
+        if how == "max":
+            return np.maximum.reduceat(v, first).astype(np.float32)
+        return (np.add.reduceat(v, first) / counts).astype(np.float32)
+
+    out["path_curv_1_um"] = reduce_to_adhesion(graph["kappa_1_um"])
+    out["path_curv_xy_1_um"] = reduce_to_adhesion(graph["kappa_xy_1_um"])
+    out["caliber_um"] = reduce_to_adhesion(graph["caliber_um"])
+    out["s_um"] = reduce_to_adhesion(graph["s_um"])
+    if "dist_junction_um" in graph:
+        out["dist_junction_um"] = reduce_to_adhesion(
+            graph["dist_junction_um"], "min")
+    if "dist_crop_um" in graph:
+        out["dist_crop_um"] = reduce_to_adhesion(graph["dist_crop_um"], "min")
+    if "censored" in graph:
+        out["censored"] = reduce_to_adhesion(
+            np.asarray(graph["censored"], np.float64), "max")
+
+    # The cross-sections are cut every few µm and are NaN in between, and that
+    # gap is deliberate — an interpolated section is not a measurement ([P26]).
+    # So each adhesion takes the nearest *measured* section rather than
+    # averaging into NaN.
+    sec_ok = np.isfinite(np.asarray(graph.get("area_um2", [])))
+    if sec_ok.any():
+        sidx = np.nonzero(sec_ok)[0]
+        _, snn = KDTree(gpts[sidx]).query(adhesion_um)
+        snn = sidx[snn]
+        for col, key in (("lumen_area_um2", "area_um2"),
+                         ("lumen_major_um", "major_um"),
+                         ("lumen_minor_um", "minor_um"),
+                         ("lumen_aspect", "aspect")):
+            v = np.asarray(graph[key])[snn][order].astype(np.float64)
+            out[col] = (np.add.reduceat(v, first) / counts).astype(np.float32)
+    return out, notes
+
+
 def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale,
                          clover_native, ruby_native, raw_voxel, curvature,
-                         centerline, nuc_ids=None, nuc_is_fib=None,
+                         graph, nuc_ids=None, nuc_is_fib=None,
                          vessel_faces=None):
     """Return the per-adhesion measurement dict (or None if no adhesions).
 
@@ -214,22 +293,8 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         s_cv = cv[surf_mask][s_surf_nn].astype(np.float64)
         curv_out[key] = (np.add.reduceat(s_cv, first) / counts).astype(np.float32)
 
-    # In-plane path curvature + distance to branch.
-    n_ad = len(first)
-    path_curv = np.full(n_ad, np.nan, dtype=np.float32)
-    dist_branch = np.full(n_ad, np.nan, dtype=np.float32)
-    notes += centerline_notes(centerline)
-    if centerline is not None and len(centerline.get("pts_yx_um", [])):
-        adh_yx = adhesion_um[:, 1:3]
-        cl_tree = KDTree(np.asarray(centerline["pts_yx_um"]))
-        _, cnn = cl_tree.query(adh_yx)
-        s_kap = np.asarray(centerline["kappa"])[cnn][order].astype(np.float64)
-        path_curv = (np.add.reduceat(s_kap, first) / counts).astype(np.float32)
-        branch = np.asarray(centerline.get("branch_yx_um", []))
-        if len(branch):
-            bd, _ = KDTree(branch).query(adh_yx)
-            dist_branch = np.minimum.reduceat(bd[order],
-                                              first).astype(np.float32)
+    gcols, gnotes = graph_columns(graph, adhesion_um, order, first, counts)
+    notes += gnotes
 
     return {
         "label": unique_ids,
@@ -256,8 +321,12 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         "curv_k1": curv_out["k1"],
         "curv_k2": curv_out["k2"],
         "curv_gaussian": curv_out["gaussian"],
-        "path_curv_xy": path_curv,
-        "dist_branch_um": dist_branch,
+        # **Renamed, because they are different quantities.** The old
+        # `path_curv_xy` was fitted to a Euclidean neighbourhood of an
+        # unordered xy point set; these are fitted along arc length on an
+        # ordered 3D path. Reusing the name would repeat [P04]'s `nuc_id`
+        # trap — the same header meaning a different thing across a boundary.
+        **gcols,
         # Not a metric column — callers print it, `metric_cols` filters it out.
         "notes": notes,
     }

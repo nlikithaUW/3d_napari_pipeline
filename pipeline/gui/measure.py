@@ -13,8 +13,9 @@ from napari.qt.threading import thread_worker
 from scipy.spatial import KDTree
 
 from ..fret import background_subtract
+from ..measure_core import graph_columns
 from ..saved_check import (
-    centerline_notes, curvature_notes, force_notes, mesh_notes, native_notes,
+    curvature_notes, force_notes, mesh_notes, native_notes,
     nuclei_notes, ratio_dropout_note, surface_verts_for_distance,
     volume_shape_notes,
 )
@@ -99,7 +100,7 @@ def build(state, viewer):
         ruby_native = state.get("ruby_raw_native")
         raw_voxel = tuple(state.get("raw_voxel_zyx_um", scale))
         curvature = (state.get("vessel_mesh_cache") or {}).get("curvature")
-        centerline = state.get("vessel_centerline")
+        graph = state.get("vessel_graph")
 
         lyr = viewer.layers["Adhesion instances"]
         adh_data = lyr.data
@@ -312,25 +313,14 @@ def build(state, viewer):
                 curv_out[key] = (np.add.reduceat(s_cv, first)
                                  / counts).astype(np.float32)
 
-            # Step 7c — in-plane (X-Y) vessel path curvature per adhesion: κ at
-            # the nearest centerline point (averaged over the adhesion's voxels)
-            # and the X-Y distance to the nearest vessel branch node.
-            n_ad = len(first)
-            path_curv = np.full(n_ad, np.nan, dtype=np.float32)
-            dist_branch = np.full(n_ad, np.nan, dtype=np.float32)
-            notes += centerline_notes(centerline)
-            if centerline is not None and len(centerline.get("pts_yx_um", [])):
-                adh_yx = adhesion_um[:, 1:3]
-                cl_tree = KDTree(np.asarray(centerline["pts_yx_um"]))
-                _, cnn = cl_tree.query(adh_yx)
-                s_kap = np.asarray(centerline["kappa"])[cnn][order].astype(np.float64)
-                path_curv = (np.add.reduceat(s_kap, first)
-                             / counts).astype(np.float32)
-                branch = np.asarray(centerline.get("branch_yx_um", []))
-                if len(branch):
-                    bd, _ = KDTree(branch).query(adh_yx)
-                    dist_branch = np.minimum.reduceat(bd[order],
-                                                      first).astype(np.float32)
+            # Step 7c — everything read off the 3D centerline graph. **The
+            # shared implementation**, not a second copy: [P11] records that
+            # P04 and P12 each had to be written twice because this worker and
+            # `measure_core` had diverged, and the no-drift rule in CLAUDE.md
+            # says extract rather than duplicate.
+            gcols, gnotes = graph_columns(graph, adhesion_um, order, first,
+                                          counts)
+            notes += gnotes
 
             # Step 8 — assemble result
             return {
@@ -358,8 +348,7 @@ def build(state, viewer):
                 "curv_k1":        curv_out["k1"],
                 "curv_k2":        curv_out["k2"],
                 "curv_gaussian":  curv_out["gaussian"],
-                "path_curv_xy":   path_curv,
-                "dist_branch_um": dist_branch,
+                **gcols,
                 # Not a metric column — `_export` selects by name.
                 "notes":          notes,
             }
@@ -417,8 +406,10 @@ def build(state, viewer):
 
             for _nm, _key in (("mean curv", "curv_mean"), ("κ1", "curv_k1"),
                               ("κ2", "curv_k2"), ("gaussian", "curv_gaussian"),
-                              ("path_curv_xy", "path_curv_xy"),
-                              ("dist_branch", "dist_branch_um"),
+                              ("path_curv_3d", "path_curv_1_um"),
+                              ("caliber", "caliber_um"),
+                              ("lumen_aspect", "lumen_aspect"),
+                              ("dist_junction", "dist_junction_um"),
                               ("dist_mesh", "dist_mesh_um")):
                 _corr(_nm, result[_key])
 
@@ -539,7 +530,10 @@ def build(state, viewer):
         # then the rest of the per-adhesion metrics.
         cols = ["label", "ratio_clover_ruby", "dist_mesh_um",
                 "centroid_z_um", "centroid_y_um", "centroid_x_um",
-                "path_curv_xy", "dist_branch_um",
+                "path_curv_1_um", "path_curv_xy_1_um", "dist_junction_um",
+                "dist_crop_um", "censored", "s_um", "caliber_um",
+                "lumen_area_um2", "lumen_major_um", "lumen_minor_um",
+                "lumen_aspect",
                 "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
                 "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
                 "volume_um3", "axis_major_um", "axis_minor_um",

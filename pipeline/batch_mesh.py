@@ -80,13 +80,20 @@ import tifffile
 faulthandler.enable()
 
 from .cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
-from .centerline import vessel_path_curvature_xy
-from .denoise import auto_min_size_otsu, filter_by_size
+from . import lumen_graph
+from .denoise import auto_min_size_otsu, filter_by_size, local_contrast_score
+from . import io as _io
 from .io import _parse_ome_voxel_zyx
-from .mesh_score import DEFAULT_RADII_UM, format_scores, score_mesh
+from .mesh_score import (
+    DEFAULT_RADII_UM,
+    coverage as score_coverage,
+    format_scores,
+    score_mesh,
+    support as score_support,
+)
 from .saved_check import (
     _member_shapes,
-    centerline_notes,
+    graph_notes,
     curvature_notes,
     describe_saved,
     mesh_notes,
@@ -106,12 +113,12 @@ from .vessel_mesh import (
 
 ROOT = Path(__file__).resolve().parent.parent
 
-STEPS = ("mesh", "curvature", "path", "score")
+STEPS = ("mesh", "curvature", "graph", "score")
 # `score` is opt-in. It builds nothing, and its scale-stability sweep costs more
 # than the whole rebuild does (6.6 s against 2.1 s on the reference mesh, and it
 # grows with vertex count times fit radius), so defaulting it on would silently
 # multiply the cost of every existing rebuild.
-DEFAULT_STEPS = ("mesh", "curvature", "path")
+DEFAULT_STEPS = ("mesh", "curvature", "graph")
 
 # Defaults are the **current widget defaults**, not the reference image's
 # settings JSON. P26's 2026-08-12 correction demotes that mesh from baseline to
@@ -132,19 +139,67 @@ MESH_DEFAULTS = {
     "poisson_grid_um": vessel_poisson.DEFAULT_GRID_UM,
     "poisson_smooth_um": vessel_poisson.DEFAULT_SMOOTH_UM,
     "poisson_iso_pct": vessel_poisson.DEFAULT_ISO_PCT,
+    # The grid the alpha solid is rasterized onto for
+    # `METHOD_ALPHA_POISSON`. Defaults to the Poisson grid so the solve
+    # sees the solid at its own resolution and `occupancy_grid` reduces to
+    # the identity (k = 1); a finer value hands Poisson a fractional
+    # occupancy instead, which is a real choice and therefore a knob.
+    "alpha_raster_um": vessel_poisson.DEFAULT_GRID_UM,
 }
+# --- the cadherin field (`docs/ISSUES.md` [P28]) ---------------------------
+# **Not a mesh parameter and not a method.** `build_mesh` gains no argument for
+# this, so `vessel_mesh`'s METHODS / LIVE_PARAMS / ALL_PARAMS are untouched and
+# CLAUDE.md's four-place rule does not fire; what changes is the *input field*
+# the chosen method is handed. That is also why these live in their own block
+# rather than in MESH_DEFAULTS: `mesh_all` is splatted into `build_mesh`, which
+# would reject them.
+#
+# `mask` is the default and the pixel-free rebuild contract is unchanged under
+# it — no image data is decoded. `score` decodes the substrate channel and hands
+# the method `denoise.local_contrast_score`, rectified at `score_k_lo`.
+FIELD_MASK, FIELD_SCORE = "mask", "score"
+CADHERIN_FIELDS = (FIELD_MASK, FIELD_SCORE)
+# `score_k_lo` is set from a measurement, and the measurement came out worse
+# than [P28] expected. `docs/scratch/p28/rays.py` (2026-08-21, five measurable
+# images) found the dim gap wall at a Niblack z-score of 2.74-3.23 (p10
+# 1.74-2.17) and the **no-wall controls at 3.23-3.64** — i.e. at this window the
+# z-score does *not* separate real dim wall from lumen noise, so there is no
+# value that keeps one and drops the other. The default is therefore the level
+# that keeps ~90% of the measured gap wall (its p10), stated as what it is: a
+# retention target, not a separator. What it costs in false positives is the
+# thing the four-arm experiment measures.
+# The default is the **lowest value the reconstruction tolerates**, not the
+# retention target. `docs/scratch/p28/klo_sweep.py` measured that at k_lo = 2.0
+# (the gap wall's p10) the field covers 6.2x the binary mask's voxels, the
+# "wall" swallows the lumen and `lumen_core` refuses to orient — 0 vertices. At
+# 2.5 it reconstructs (2.8x the voxels); at 3.0 it keeps only 1.3x, which is
+# roughly the gap wall's *median* and so throws half of it away again.
+P28_K_LO = 2.5
+P28_K_LO_PROVENANCE = (
+    "docs/scratch/p28/rays.py (2026-08-21, five measurable images: gap-wall "
+    "z-score median 2.74-3.23, p10 1.74-2.17; NOT separated from the no-wall "
+    "controls at 3.23-3.64) and docs/scratch/p28/klo_sweep.py (2.0 floods the "
+    "lumen and yields no surface; 2.5 is the lowest that reconstructs). "
+    "See docs/ISSUES.md P28")
+FIELD_DEFAULTS = {"cadherin_field": FIELD_MASK, "score_window_xy": 50,
+                  "score_k_lo": P28_K_LO}
 CURV_DEFAULTS = {"radius_um": 5.0, "smooth_iter": 10}
+# The 3D centerline graph (`lumen_graph`). Every one of these is a **ratio or a
+# window, not an absolute length**, which is the point: the old centerline's
+# `open_um` / `prune_um` were absolute constants and [P23] is the record of them
+# amputating exactly the tapering, high-shear regions the program cares about.
+GRAPH_DEFAULTS = {
+    "spur_ratio": lumen_graph.DEFAULT_SPUR_RATIO,
+    "crop_ratio": lumen_graph.DEFAULT_CROP_RATIO,
+    "crop_margin_um": lumen_graph.DEFAULT_CROP_MARGIN_UM,
+    "kappa_window_um": lumen_graph.DEFAULT_KAPPA_WINDOW_UM,
+    "section_every_um": lumen_graph.DEFAULT_SECTION_EVERY_UM,
+    "section_span": lumen_graph.DEFAULT_SECTION_SPAN,
+}
 # The radii P24's plateau table was measured at, so a `--steps score` run is
 # directly comparable to the evidence already on record.
 SCORE_DEFAULTS = {"radii_um": ",".join(f"{r:g}" for r in DEFAULT_RADII_UM),
                   "max_verts": None, "max_query": None}
-# `smooth_um` is the only one of these with a slider today; the other four are
-# bare function defaults in `centerline.vessel_path_curvature_xy` (P23 names
-# `open_um` and `prune_um` as amputating a tapering vessel and has never been
-# able to measure it). Exposing them is what makes that measurable.
-PATH_DEFAULTS = {"smooth_um": 20.0, "target_px_um": 1.0, "close_um": 8.0,
-                 "open_um": 4.0, "prune_um": 30.0}
-
 # The despeckle cut the Cadherin tab applies (`gui/cadherin.py:42,191`):
 # max(auto_min_size_otsu(sizes), 12). P19 measured the auto value at 3 on the
 # reference image, so the constant is what is always in force — `auto-raw` runs
@@ -193,6 +248,15 @@ def _mtime(p: Path) -> str:
 # Scale from the OME header — no pixels decoded
 # --------------------------------------------------------------------------- #
 
+def _nanmed(a):
+    """Median ignoring NaN, or None when everything is NaN — the sections are
+    cut every few µm and are NaN in between by design, so a bare median is
+    always NaN."""
+    a = np.asarray(a, float)
+    a = a[np.isfinite(a)]
+    return float(np.median(a)) if a.size else None
+
+
 def _header_scale(tif: Path) -> tuple[tuple, tuple, tuple]:
     """``(voxel_raw_zyx, scale_iso_zyx, expected_iso_shape)`` from the header.
 
@@ -219,6 +283,30 @@ def _header_scale(tif: Path) -> tuple[tuple, tuple, tuple]:
     return tuple(float(v) for v in voxel), (target, target, target), expected
 
 
+def _substrate_volume(tif: Path, expected, target_um: float) -> np.ndarray:
+    """The substrate channel on the isotropic grid the saved mask is on.
+
+    `io.to_isotropic` would resample all five channels; `resample_volume` does
+    the one, with the same target and the same order, so the result is what
+    `to_isotropic` would have produced for this channel. The shape is checked
+    against the OME header's expectation for the same reason the mask is —
+    a field that is not on the mask's grid is not comparable to it.
+
+    Only `--cadherin-field score` calls this. Under the default the rebuild
+    still decodes no image pixels.
+    """
+    params = _io.load_params(ROOT / "3d_images_folder" / "params.json")
+    stack = _io.load_stack(tif, params)
+    ci = stack.channels.index(stack.roles["substrate"])
+    vol = _io.resample_volume(stack.data[:, ci], stack.voxel_zyx_um,
+                              float(target_um), order=1)
+    if tuple(vol.shape) != tuple(expected):
+        raise ValueError(f"{tif.name}: the substrate channel resampled to "
+                         f"{tuple(vol.shape)}, but the OME header implies "
+                         f"{tuple(expected)}")
+    return np.ascontiguousarray(vol)
+
+
 # --------------------------------------------------------------------------- #
 # Parameter resolution: built-in defaults < --from-settings < explicit flags
 # --------------------------------------------------------------------------- #
@@ -240,11 +328,12 @@ def _seed_from(path: Path) -> tuple[dict, dict, dict, str | None]:
     mesh.update(d.get("mesh_inert") or {})
     curv = dict(settings.get("surface_curvature") or d.get("surface_curvature")
                 or {})
-    pathp = dict(settings.get("path_curvature") or d.get("path_curvature") or {})
+    graphp = dict(settings.get("centerline_graph")
+                  or d.get("centerline_graph") or {})
     ms = d.get("min_size") or {}
     min_size = str(ms.get("mode")) if isinstance(ms, dict) and ms.get("mode") \
         else None
-    return mesh, curv, pathp, min_size
+    return mesh, curv, graphp, min_size
 
 
 def _pick(explicit, seed, default, key):
@@ -270,12 +359,12 @@ def _ints(text: str, what: str) -> list[int]:
 
 def resolve_params(args) -> dict:
     """Everything the run needs, with where each value came from."""
-    seed_mesh, seed_curv, seed_path, seed_min = {}, {}, {}, None
+    seed_mesh, seed_curv, seed_graph, seed_min = {}, {}, {}, None
     if args.from_settings:
         src = Path(args.from_settings)
         if not src.exists():
             raise SystemExit(f"--from-settings: {src} does not exist.")
-        seed_mesh, seed_curv, seed_path, seed_min = _seed_from(src)
+        seed_mesh, seed_curv, seed_graph, seed_min = _seed_from(src)
 
     mesh, source = {}, {}
     explicit = {
@@ -287,6 +376,7 @@ def resolve_params(args) -> dict:
         "poisson_grid_um": args.poisson_grid_um,
         "poisson_smooth_um": args.poisson_smooth_um,
         "poisson_iso_pct": args.poisson_iso_pct,
+        "alpha_raster_um": args.alpha_raster_um,
     }
     for key in ALL_PARAMS:
         mesh[key], source[f"mesh.{key}"] = _pick(
@@ -318,15 +408,24 @@ def resolve_params(args) -> dict:
     # surface. One knob, not two that can disagree.
     score["smooth_iter"] = smooths[0]
 
-    pathp = {}
-    explicit_path = {"smooth_um": args.path_smooth_um,
-                     "target_px_um": args.path_target_px_um,
-                     "close_um": args.path_close_um,
-                     "open_um": args.path_open_um,
-                     "prune_um": args.path_prune_um}
-    for key, default in PATH_DEFAULTS.items():
-        pathp[key], source[f"path.{key}"] = _pick(
-            explicit_path[key], seed_path, default, key)
+    field = {}
+    explicit_field = {"cadherin_field": args.cadherin_field,
+                      "score_window_xy": args.score_window_xy,
+                      "score_k_lo": args.score_k_lo}
+    for key, default in FIELD_DEFAULTS.items():
+        field[key], source[f"field.{key}"] = _pick(
+            explicit_field[key], {}, default, key)
+
+    graph = {}
+    explicit_graph = {
+        "spur_ratio": args.spur_ratio, "crop_ratio": args.crop_ratio,
+        "crop_margin_um": args.crop_margin_um,
+        "kappa_window_um": args.kappa_window_um,
+        "section_every_um": args.section_every_um,
+        "section_span": args.section_span}
+    for key, default in GRAPH_DEFAULTS.items():
+        graph[key], source[f"graph.{key}"] = _pick(
+            explicit_graph[key], seed_graph, default, key)
 
     if args.min_size is not None:
         min_size, source["min_size"] = str(args.min_size), "flag"
@@ -351,8 +450,8 @@ def resolve_params(args) -> dict:
     live_mesh = {k: v for k, v in mesh.items() if k == "method" or k in live}
 
     return {"mesh": live_mesh, "mesh_inert": inert, "mesh_all": mesh,
-            "curv_combos": combos, "path": pathp, "score": score,
-            "min_size": min_size, "source": source}
+            "curv_combos": combos, "graph": graph, "score": score,
+            "field": field, "min_size": min_size, "source": source}
 
 
 def parameter_warnings(params: dict) -> list[str]:
@@ -372,6 +471,21 @@ def parameter_warnings(params: dict) -> list[str]:
         vals = ", ".join(f"{k}={mesh[k]}" for k in set_inert)
         notes.append(f"WARN: {vals} — ignored by this method ({method}); "
                      f"recorded under 'mesh_inert', not as a mesh parameter.")
+    fld = params["field"]
+    if fld["cadherin_field"] == FIELD_SCORE and method != METHOD_POISSON:
+        notes.append(
+            f"NOTE: --cadherin-field score with method '{method}', which "
+            f"interpolates and so takes `score > 0` — i.e. a Niblack threshold "
+            f"at k = score_k_lo = {fld['score_k_lo']} instead of the saved "
+            f"mask. That is the intended fourth arm of docs/ISSUES.md P28's "
+            f"experiment, not a mistake, but it is a *looser mask*, not a "
+            f"continuous field: only Poisson reads the values.")
+    if fld["cadherin_field"] == FIELD_MASK and (
+            src.get("field.score_window_xy") == "flag"
+            or src.get("field.score_k_lo") == "flag"):
+        notes.append(
+            "WARN: --score-window-xy / --score-k-lo were given but "
+            "--cadherin-field is 'mask', so neither is read.")
     if method == METHOD_ALPHA3D:
         a3, sub = float(mesh["alpha3d_um"]), float(mesh["subsample_um"])
         if sub > 0 and a3 < 3.0 * sub:
@@ -402,9 +516,19 @@ def format_params(params: dict) -> list[str]:
                f"[{src.get('curv.smooth_iter', 'default')}]")
     if len(combos) > 1:
         out.append(f"    -> {len(combos)} curvature run(s) per image")
-    out.append("path curvature:")
-    for k, v in params["path"].items():
-        out.append(f"    {k:<18} {v}   [{src.get(f'path.{k}', 'default')}]")
+    out.append("cadherin field:")
+    fld = params["field"]
+    out.append(f"    {'cadherin_field':<18} {fld['cadherin_field']}   "
+               f"[{src.get('field.cadherin_field', 'default')}]")
+    if fld["cadherin_field"] == FIELD_SCORE:
+        for k in ("score_window_xy", "score_k_lo"):
+            out.append(f"    {k:<18} {fld[k]}   "
+                       f"[{src.get(f'field.{k}', 'default')}]")
+    else:
+        out.append("    (the pixel-free rebuild: no image data is decoded)")
+    out.append("centerline graph:")
+    for k, v in params["graph"].items():
+        out.append(f"    {k:<18} {v}   [{src.get(f'graph.{k}', 'default')}]")
     out.append("mesh scores:")
     sc = params["score"]
     out.append(f"    {'radii_um':<18} "
@@ -491,7 +615,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     # mask is loaded. A standalone scoring script would have to duplicate the
     # mask-loading and the OME shape check, which is the second copy the
     # project rule forbids.
-    need_mask = ("mesh" in steps) or ("path" in steps) or ("score" in steps) \
+    need_mask = ("mesh" in steps) or ("graph" in steps) or ("score" in steps) \
         or suggest_alpha
     combos = params["curv_combos"]
     single_tag = (tag_template.format(radius=combos[0][0], smooth=combos[0][1])
@@ -568,6 +692,56 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     if dry_run:
         return "ok", []
 
+    # ---- the cadherin field the method is handed ---------------------------
+    # `mask` stays the size-filtered binary mask throughout: it is the pinned
+    # yardstick every recorded number in ISSUES.md was measured against, and the
+    # centerline and the scored point set both read it. `mesh_input` is what
+    # build_mesh gets, which is the only thing --cadherin-field changes.
+    mesh_input = mask
+    field_pts = None
+    fld = params["field"]
+    if "mesh" in steps and need_mask and fld["cadherin_field"] == FIELD_SCORE:
+        t = time.perf_counter()
+        vol = _substrate_volume(tif, expected, float(scale[0]))
+        mesh_input = local_contrast_score(vol, int(fld["score_window_xy"]),
+                                          scale, float(fld["score_k_lo"]))
+        del vol
+        gc.collect()
+        n_field = int((mesh_input > 0).sum())
+        timings["field_s"] = time.perf_counter() - t
+        recon["cadherin_field"] = {
+            "field": FIELD_SCORE,
+            "window_xy": int(fld["score_window_xy"]),
+            "k_lo": float(fld["score_k_lo"]),
+            "k_lo_provenance": (P28_K_LO_PROVENANCE
+                                if params["source"].get("field.score_k_lo")
+                                != "flag"
+                                else "given explicitly with --score-k-lo"),
+            "source": f"substrate channel of {tif.name}, resampled to "
+                      f"{scale[0]:.4f} um",
+            "n_voxels_nonzero": n_field,
+            "n_voxels_binary_mask": int(mask.sum()),
+            "mean_score_where_nonzero": (
+                float(mesh_input[mesh_input > 0].mean()) if n_field else 0.0),
+            "note": ("the global intensity floor is NOT applied to the score "
+                     "(P28: the floor, not the local threshold, is what "
+                     "deletes the dim gap wall)"),
+        }
+        field_pts = mask_to_points_um(mesh_input > 0, scale)
+        _p(f"cadherin field: score window_xy="
+           f"{fld['score_window_xy']} k_lo={fld['score_k_lo']} -> "
+           f"{n_field:,} nonzero voxels against {int(mask.sum()):,} in the "
+           f"binary mask  [{timings['field_s']:.1f} s]")
+        notes.append(
+            f"NOTE: built on the P28 local-contrast field, not the binary "
+            f"mask ({n_field:,} nonzero voxels vs {int(mask.sum()):,}). The "
+            f"scores below are still measured against the **binary** mask, so "
+            f"they stay comparable to every recorded number.")
+    elif need_mask:
+        recon["cadherin_field"] = {
+            "field": FIELD_MASK,
+            "note": "the size-filtered binary mask; no image pixels decoded"}
+
     # ---- mesh ---------------------------------------------------------------
     verts = faces = None
     # Per-vertex normals, when the method produces them (Poisson does). They are
@@ -575,10 +749,12 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     # otherwise, and cannot on a surface that is open by construction, so the
     # sign of every kappa2 would be a coin flip (P01(B)).
     normals = None
+    mesh_extras: dict = {}
     if "mesh" in steps:
         t = time.perf_counter()
-        extras: dict = {}
-        kind, verts, faces, _vals = build_mesh(mask, scale, extras=extras,
+        extras = mesh_extras
+        kind, verts, faces, _vals = build_mesh(mesh_input, scale,
+                                               extras=extras,
                                                **params["mesh_all"])
         normals = extras.get("normals")
         timings["mesh_s"] = time.perf_counter() - t
@@ -659,19 +835,37 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
             for n in curvature_notes(curv, len(verts)):
                 notes.append(n)
 
-    # ---- in-plane path curvature -------------------------------------------
+    # ---- the 3D centerline graph -------------------------------------------
+    # Built on the Poisson lumen, not on a max projection of the mask — see
+    # `lumen_graph`. It therefore needs a Poisson-family mesh: the lumen field
+    # comes back through `build_mesh`'s `extras`, and the interpolating methods
+    # never solve for one.
     cl = None
-    if "path" in steps:
-        t = time.perf_counter()
-        cl = vessel_path_curvature_xy(mask > 0, scale, **params["path"])
-        timings["path_s"] = time.perf_counter() - t
-        npts = len(cl["pts_yx_um"])
-        nbr = len(cl["branch_yx_um"])
-        med = float(np.median(cl["kappa"])) if npts else 0.0
-        _p(f"centerline: {npts:,} points, {nbr} branch node(s), median k = "
-           f"{med:.4f} 1/um  [{timings['path_s']:.1f} s]")
-        for n in centerline_notes(cl):
-            notes.append(n)
+    if "graph" in steps:
+        lum = (mesh_extras or {}).get("lumen") or {}
+        if lum.get("chi") is None:
+            notes.append(
+                f"WARN: --steps graph needs a reconstruction that solves for a "
+                f"lumen field, and '{params['mesh']['method']}' does not. Use "
+                f"'{METHOD_POISSON}' or '{METHOD_ALPHA_POISSON}'; no "
+                f"centerline was written.")
+        else:
+            t = time.perf_counter()
+            cl = lumen_graph.build_graph(
+                lum["chi"], lum["iso_level"], lum["h_um"], lum["origin_um"],
+                core=lum.get("core"),
+                domain_shape_um=np.asarray(mask.shape) * float(scale[0]),
+                **params["graph"])
+            timings["graph_s"] = time.perf_counter() - t
+            _p(f"centerline graph: {len(cl['points_zyx_um']):,} points, "
+               f"{len(cl['edge_len_um'])} edge(s), {cl['n_junctions']} "
+               f"junction(s), {cl['n_endpoints']} endpoint(s) "
+               f"({cl['n_crop_endpoints']} cropped), "
+               f"{cl['total_length_um']:.0f} um  [{timings['graph_s']:.1f} s]")
+            for n in cl["notes"]:
+                notes.append(n)
+            for n in graph_notes(cl):
+                notes.append(n)
 
     # ---- mesh quality scores ------------------------------------------------
     # Three numbers, never one — see `mesh_score`. This step writes no npz: the
@@ -682,6 +876,13 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     if "score" in steps:
         t = time.perf_counter()
         sc = params["score"]
+        # **The yardstick is pinned to the binary mask, in every arm.** Under
+        # --cadherin-field score the *mesh* is built from the field, but the
+        # point set it is scored against stays the size-filtered binary mask —
+        # otherwise the four-vector would stop being comparable to every number
+        # recorded in docs/ISSUES.md, and the P28 experiment would be measuring
+        # two changes at once. The field-derived coverage is computed below and
+        # labelled as the secondary number it is.
         scores = score_mesh(verts, faces, mask_to_points_um(mask > 0, scale),
                             normals=normals,
                             radii_um=sc["radii_um"],
@@ -698,6 +899,33 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
         # findings like these, folding them into `degraded` would make --strict
         # fire on all of them and so tell you nothing.
         findings.extend(n for n in scores["notes"] if n.startswith("WARN:"))
+        if field_pts is not None and len(field_pts):
+            # Secondary, and never mixed into the vector above: coverage and
+            # support of the same surface against the *field's* points rather
+            # than the binary mask's. It answers "is the surface where the
+            # continuous field says wall is", which is a different question
+            # from the one every recorded number answers.
+            sc2 = params["score"]
+            scores["coverage_vs_field"] = score_coverage(
+                verts, faces, field_pts, max_query=sc2["max_query"])
+            scores["support_vs_field"] = score_support(verts, faces, field_pts)
+            scores["coverage_vs_field"]["note"] = (
+                "SECONDARY: measured against the P28 local-contrast field's "
+                "nonzero voxels, not the binary mask. Not comparable to the "
+                "coverage numbers recorded in docs/ISSUES.md.")
+            scores["support_vs_field"]["note"] = \
+                scores["coverage_vs_field"]["note"]
+            cvf = (scores["coverage_vs_field"].get("covered_fraction_um")
+                   or {})
+            cvd = (scores["coverage_vs_field"].get("distance_um") or {})
+            svd = (scores["support_vs_field"].get("distance_um") or {})
+            frac = "  ".join(f"<={t} um {100 * (v or 0):.1f}%"
+                             for t, v in cvf.items())
+            _p(f"    [SECONDARY, vs the field's {len(field_pts):,} points] "
+               f"coverage median {cvd.get('median') or float('nan'):.2f} um  "
+               f"{frac}")
+            _p(f"    [SECONDARY, vs the field] support median "
+               f"{svd.get('median') or float('nan'):.2f} um")
         for n in scores["notes"]:
             if not n.startswith("WARN:"):
                 _p(n)
@@ -750,15 +978,26 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
         _p(f"wrote {cp.name}")
 
     if cl is not None:
-        pp = _out(saved, "vessel_path_curvature", single_tag, ".npz")
-        np.savez_compressed(pp, pts_yx_um=np.asarray(cl["pts_yx_um"]),
-                            kappa=np.asarray(cl["kappa"]),
-                            branch_yx_um=np.asarray(cl["branch_yx_um"]))
+        pp = _out(saved, "vessel_graph", single_tag, ".npz")
+        # Only the arrays; the notes and the nested info dicts go into
+        # vessel_recon.json, which is where provenance already lives.
+        np.savez_compressed(pp, **{k: v for k, v in cl.items()
+                                   if isinstance(v, np.ndarray)})
         _group(single_tag)["outputs"][pp.name] = {
-            "n_centerline_points": int(len(cl["pts_yx_um"])),
-            "n_branch_nodes": int(len(cl["branch_yx_um"])),
-            "kappa_median": (float(np.median(cl["kappa"]))
-                             if len(cl["kappa"]) else None)}
+            "n_points": int(len(cl["points_zyx_um"])),
+            "n_edges": int(len(cl["edge_len_um"])),
+            "n_junctions": int(cl["n_junctions"]),
+            "n_endpoints": int(cl["n_endpoints"]),
+            "n_crop_endpoints": int(cl["n_crop_endpoints"]),
+            "n_terminus_endpoints": int(cl["n_terminus_endpoints"]),
+            "total_length_um": float(cl["total_length_um"]),
+            "lumen_volume_um3": float(cl["lumen_volume_um3"]),
+            "caliber_um_median": _nanmed(cl["caliber_um"]),
+            "section_area_um2_median": _nanmed(cl["area_um2"]),
+            "section_major_um_median": _nanmed(cl["major_um"]),
+            "section_minor_um_median": _nanmed(cl["minor_um"]),
+            "section_aspect_median": _nanmed(cl["aspect"]),
+            "face_openings": cl.get("face_openings", {})}
         _p(f"wrote {pp.name}")
 
     # A mesh rebuilt without its curvature leaves a per-vertex file of the wrong
@@ -822,7 +1061,7 @@ def _write_recon(saved: Path, tag: str | None, tif: Path, params: dict,
             doc = {}
     carried = [k for k in ("mesh", "mesh_inert", "min_size", "cadherin_labels",
                            "scale_um_zyx", "scale_source", "surface_curvature",
-                           "path_curvature", "scores") if k in doc]
+                           "centerline_graph", "scores") if k in doc]
 
     # `outputs` is keyed by filename, and a run only knows about the files it
     # wrote — so it must be **merged**, not replaced. Replacing it means a
@@ -871,9 +1110,9 @@ def _write_recon(saved: Path, tag: str | None, tif: Path, params: dict,
         # curvature parameters describe the file this run just deleted.
         doc.pop("surface_curvature", None)
         carried = [c for c in carried if c != "surface_curvature"]
-    if "path" in steps:
-        doc["path_curvature"] = params["path"]
-        carried = [c for c in carried if c != "path_curvature"]
+    if "graph" in steps:
+        doc["centerline_graph"] = params["graph"]
+        carried = [c for c in carried if c != "centerline_graph"]
     if scores is not None:
         doc["scores"] = scores
         carried = [c for c in carried if c != "scores"]
@@ -957,6 +1196,31 @@ def main() -> None:
     g.add_argument("--poisson-grid-um", type=float, default=None)
     g.add_argument("--poisson-smooth-um", type=float, default=None)
     g.add_argument("--poisson-iso-pct", type=float, default=None)
+    g.add_argument("--alpha-raster-um", type=float, default=None,
+                   help="grid the alpha solid is rasterized onto for "
+                        "the 'alpha 3D solid -> poisson' method "
+                        "(default: the poisson grid). No upper bound.")
+
+    g = ap.add_argument_group(
+        "cadherin field (docs/ISSUES.md P28) — what the method is handed, not "
+        "which method runs")
+    g.add_argument("--cadherin-field", default=None, choices=CADHERIN_FIELDS,
+                   help=f"'{FIELD_MASK}' (default) is the size-filtered binary "
+                        f"mask and decodes no image pixels. '{FIELD_SCORE}' "
+                        f"decodes the substrate channel and builds "
+                        f"denoise.local_contrast_score, rectified at "
+                        f"--score-k-lo, so dim-but-real wall survives with a "
+                        f"small positive value. Only the Poisson method reads "
+                        f"the values; the interpolating methods take "
+                        f"'score > 0'.")
+    # No upper bound on either, deliberately (CLAUDE.md): a slider ceiling is a
+    # widget limit, not a physical one.
+    g.add_argument("--score-window-xy", type=int, default=None,
+                   help="xy window for the local mean/std, in pixels (the "
+                        "Cadherin tab's window_xy; z is scaled for anisotropy).")
+    g.add_argument("--score-k-lo", type=float, default=None,
+                   help="the z-score the field is hinged to zero below. "
+                        "Measured, not chosen — see P28 step 1.")
 
     g = ap.add_argument_group("surface curvature (comma-separated = a sweep)")
     g.add_argument("--curv-radius-um", default=None)
@@ -981,13 +1245,29 @@ def main() -> None:
                         "well before the full mask.")
 
     g = ap.add_argument_group(
-        "in-plane path curvature (the last four are bare function defaults in "
-        "centerline.py with no slider today — docs/ISSUES.md P23)")
-    g.add_argument("--path-smooth-um", type=float, default=None)
-    g.add_argument("--path-target-px-um", type=float, default=None)
-    g.add_argument("--path-close-um", type=float, default=None)
-    g.add_argument("--path-open-um", type=float, default=None)
-    g.add_argument("--path-prune-um", type=float, default=None)
+        "3D centerline graph (--steps graph; built on the Poisson lumen, so it "
+        "needs a Poisson-family --method)")
+    g.add_argument("--spur-ratio", type=float, default=None,
+                   help="a leaf branch shorter than this many local inscribed "
+                        "radii is a spur. A ratio, not a length, so it adapts "
+                        "to a taper (docs/ISSUES.md P23).")
+    g.add_argument("--crop-ratio", type=float, default=None,
+                   help="an endpoint within this many local radii of a "
+                        "field-of-view opening is a crop, not a vessel "
+                        "terminus.")
+    g.add_argument("--crop-margin-um", type=float, default=None,
+                   help="absolute floor under --crop-ratio, in um.")
+    g.add_argument("--kappa-window-um", type=float, default=None,
+                   help="arc-length window for the 3D path curvature fit.")
+    g.add_argument("--section-every-um", type=float, default=None,
+                   help="cut a perpendicular cross-section every this many um "
+                        "of arc length. Between cuts the section columns are "
+                        "NaN, never interpolated.")
+    g.add_argument("--section-span", type=float, default=None,
+                   help="sample the cut plane out to this many local inscribed "
+                        "radii. The inscribed radius is the *minor* semi-axis, "
+                        "so this must exceed the aspect ratio or every section "
+                        "is clipped.")
 
     g = ap.add_argument_group("modes")
     g.add_argument("--dry-run", action="store_true",
@@ -1035,7 +1315,7 @@ def main() -> None:
     combos = params["curv_combos"]
     tag = args.tag
     if len(combos) > 1:
-        if "mesh" in steps or "path" in steps or "score" in steps:
+        if "mesh" in steps or "graph" in steps or "score" in steps:
             raise SystemExit(
                 "a curvature sweep varies only the curvature: run "
                 "'--steps mesh,path' once, then sweep with '--steps curvature "
@@ -1080,7 +1360,7 @@ def main() -> None:
         raise SystemExit(f"No *_saved folders in {directory}"
                          + (f" matching {args.only!r}." if args.only else "."))
     missing = [t for t, _ in targets if not t.exists()]
-    if missing and ("mesh" in steps or "path" in steps):
+    if missing and ("mesh" in steps or "graph" in steps):
         for t in missing:
             print(f"  skip: image {t.name} not found (its header is where the "
                   f"scale comes from).", flush=True)

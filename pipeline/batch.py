@@ -62,7 +62,7 @@ _RUN_STEPS = [
     ("VE-Cadherin (Sauvola)", "run_cadherin"),
     ("Vessel mesh", "run_vessel_mesh"),
     ("Surface curvature", "run_vessel_curvature"),
-    ("In-plane path curvature", "run_vessel_path_curvature"),
+    ("3D centerline graph", "run_vessel_path_curvature"),
     ("Clover Otsu", "run_clover"),
     ("RF predict", "run_rf_predict"),
     ("RF post-process (split-merged)", "run_rf_postprocess"),
@@ -222,7 +222,7 @@ def main() -> None:
             pass
         for k in ("dapi_raw", "cadh_raw", "clover_raw", "ruby_raw",
                   "clover_raw_native", "ruby_raw_native", "force_vol",
-                  "adhesion_proba", "clover_ruby_ratio", "vessel_centerline",
+                  "adhesion_proba", "clover_ruby_ratio", "vessel_graph",
                   "measure_result", "dapi_mask_layer", "cadh_mask_layer",
                   "clover_mask_layer", "fibroblast_count"):
             state[k] = None

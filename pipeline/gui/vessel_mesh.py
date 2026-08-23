@@ -27,7 +27,7 @@ from magicgui.widgets import (
 from napari.qt.threading import thread_worker
 
 from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
-from ..centerline import lumen_center_z, vessel_path_curvature_xy
+from .. import lumen_graph
 from ..saved_check import curvature_notes
 # The method constants and the build itself live in the core module so the
 # headless `pipeline.batch_mesh` runner builds the *same* mesh from the same
@@ -84,6 +84,7 @@ def build(state, viewer) -> Container:
         poisson_grid_um={"widget_type": "FloatSlider", "min": 0.65, "max": 6.0, "step": 0.325},
         poisson_smooth_um={"widget_type": "FloatSlider", "min": 1.0, "max": 15.0, "step": 0.5},
         poisson_iso_pct={"widget_type": "FloatSlider", "min": 5.0, "max": 95.0, "step": 1.0},
+        alpha_raster_um={"widget_type": "FloatSlider", "min": 0.325, "max": 6.0, "step": 0.325},
     )
     def controls(
         method: str = METHOD_ALPHA3D,
@@ -99,6 +100,7 @@ def build(state, viewer) -> Container:
         poisson_grid_um: float = 2.0,
         poisson_smooth_um: float = 5.0,
         poisson_iso_pct: float = 50.0,
+        alpha_raster_um: float = 2.0,
     ):
         _run_build()
 
@@ -125,6 +127,7 @@ def build(state, viewer) -> Container:
         poisson_grid_um = float(controls["poisson_grid_um"].value)
         poisson_smooth_um = float(controls["poisson_smooth_um"].value)
         poisson_iso_pct = float(controls["poisson_iso_pct"].value)
+        alpha_raster_um = float(controls["alpha_raster_um"].value)
         state.setdefault("run_settings", {})["vessel_mesh"] = {
             "method": method, "orientation": orientation, "alpha3d_um": alpha3d_um,
             "alpha2d_um": alpha2d_um, "subsample_um": subsample_um,
@@ -133,7 +136,8 @@ def build(state, viewer) -> Container:
             "r_smooth_bins": r_smooth_bins,
             "poisson_grid_um": poisson_grid_um,
             "poisson_smooth_um": poisson_smooth_um,
-            "poisson_iso_pct": poisson_iso_pct}
+            "poisson_iso_pct": poisson_iso_pct,
+            "alpha_raster_um": alpha_raster_um}
 
         @thread_worker
         def _run():
@@ -148,7 +152,8 @@ def build(state, viewer) -> Container:
                 close_um=close_um, min_component_um=min_component_um,
                 poisson_grid_um=poisson_grid_um,
                 poisson_smooth_um=poisson_smooth_um,
-                poisson_iso_pct=poisson_iso_pct, extras=extras)
+                poisson_iso_pct=poisson_iso_pct,
+                alpha_raster_um=alpha_raster_um, extras=extras)
             return out, extras
 
         def _done(result):
@@ -183,6 +188,11 @@ def build(state, viewer) -> Container:
             )
             state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
                                           "normals": normals}
+            # The solved lumen field, for the 3D centerline graph below. Only
+            # the Poisson family produces one; the interpolating methods leave
+            # it absent and the graph button then says so rather than falling
+            # back to something that looks like a centerline and is not.
+            state["vessel_lumen_field"] = extras.get("lumen") or None
             print(f"Vessel mesh ({method}, orientation={orientation}): "
                   f"{len(verts)} verts, {len(faces)} faces.", flush=True)
 
@@ -397,135 +407,169 @@ def build(state, viewer) -> Container:
     # plane — the "straight vs curved vs branched" geometry — ignoring caliber
     # and the noisy Z axis. Built from the cadherin mask (the vessel mesh point
     # cloud is too rough to skeletonize cleanly). ----
-    path_smooth_w = FloatSlider(value=20.0, min=5.0, max=60.0, step=1.0,
-                                label="path_smooth_um")
-    path_btn = PushButton(text="Compute in-plane path curvature (X-Y)")
-    PATH_LAYER = "Vessel path curvature (X-Y)"
+    # ---- the 3D centerline graph (docs/DIRECTION.md §8B) --------------------
+    # Replaces the in-plane centerline entirely. The old one skeletonized a max
+    # projection of the cadherin mask; this one is built on the Poisson lumen,
+    # so it has arc length, a real graph, per-point caliber and — the thing the
+    # projection could never give — cross-sections cut perpendicular to the
+    # axis.
+    #
+    # Every knob is a **ratio or a window**, not an absolute length. The old
+    # `open_um` / `prune_um` were absolute and [P23] records them amputating
+    # exactly the tapering, high-shear regions the program is about.
+    spur_ratio_w = FloatSlider(value=lumen_graph.DEFAULT_SPUR_RATIO,
+                               min=0.0, max=4.0, step=0.1, label="spur_ratio")
+    crop_ratio_w = FloatSlider(value=lumen_graph.DEFAULT_CROP_RATIO,
+                               min=0.0, max=6.0, step=0.25, label="crop_ratio")
+    kappa_win_w = FloatSlider(value=lumen_graph.DEFAULT_KAPPA_WINDOW_UM,
+                              min=5.0, max=120.0, step=5.0,
+                              label="kappa_window_um")
+    sec_every_w = FloatSlider(value=lumen_graph.DEFAULT_SECTION_EVERY_UM,
+                              min=1.0, max=40.0, step=1.0,
+                              label="section_every_um")
+    sec_span_w = FloatSlider(value=lumen_graph.DEFAULT_SECTION_SPAN,
+                             min=1.0, max=8.0, step=0.25, label="section_span")
+    graph_color_w = ComboBox(
+        choices=["caliber_um", "kappa_1_um", "kappa_xy_1_um", "lumen_area_um2",
+                 "lumen_major_um", "lumen_minor_um", "lumen_aspect",
+                 "dist_junction_um", "dist_crop_um", "censored"],
+        value="caliber_um", label="colour by")
+    graph_btn = PushButton(text="Compute 3D centerline graph (lumen)")
 
-    PATH_OFF_LAYER = "Vessel centerline (leaves the field)"
+    GRAPH_LAYER = "Vessel centerline (3D graph)"
+    GRAPH_PATH_LAYER = "Vessel centerline path"
+    GRAPH_NODE_LAYER = "Centerline nodes"
 
-    def _fallback_z(n):
-        """Draw at the mesh's mean Z when no lumen Z could be computed — better
-        than 0.0, which puts the whole path on the bottom slice."""
-        zc = 0.0
-        cache = state.get("vessel_mesh_cache") or {}
-        vv = cache.get("verts")
-        if vv is not None and len(vv):
-            zc = float(np.mean(np.asarray(vv)[:, 0]))
-        return np.full(n, zc)
+    _COLOR_KEY = {"lumen_area_um2": "area_um2", "lumen_major_um": "major_um",
+                  "lumen_minor_um": "minor_um", "lumen_aspect": "aspect"}
 
-    def _show_path(res, visible=True):
-        """Overlay the centerline at the **lumen centre** Z, coloured by κ.
+    def _show_graph(g, visible=True):
+        """Draw the graph: the path as lines, the points coloured, nodes marked.
 
-        Z comes from `centerline.lumen_center_z` (computed in the worker, since
-        it reads the whole mask). Points where the vessel leaves the field of
-        view have no bounded lumen, so their Z is an extrapolation; they go in a
-        separate, hollow layer instead of being silently mixed in with the rest.
+        **Drawing it as a path is new and is the point of [P27] closing.** The
+        old centerline was a raster-order point set, so connecting consecutive
+        points produced a scribble and it had to be drawn as loose dots. These
+        points are ordered along each edge, so a `Shapes` polyline is exactly
+        the vessel.
         """
-        pts = np.asarray(res["pts_yx_um"])
-        kap = np.asarray(res["kappa"])
-        if len(pts) == 0:
-            return
-        z = res.get("z_um")
-        if z is None:
-            z = _fallback_z(len(pts))
-            valid = np.ones(len(pts), bool)
-        else:
-            z = np.asarray(z, dtype=np.float64)
-            valid = np.asarray(res.get("valid",
-                                       np.ones(len(pts), bool)), dtype=bool)
-        pts3 = np.column_stack([z, pts[:, 0], pts[:, 1]])
-
-        for name in (PATH_LAYER, PATH_OFF_LAYER):
+        for name in (GRAPH_LAYER, GRAPH_PATH_LAYER, GRAPH_NODE_LAYER):
             if name in viewer.layers:
                 viewer.layers.remove(name)
+        pts = np.asarray(g.get("points_zyx_um", []))
+        if not len(pts):
+            return
 
-        # **Every** point goes in the main layer, so the centerline is
-        # continuous: splitting it by `valid` put the flagged 22% in a second
-        # layer and left visible gaps along the path, which reads as a broken
-        # centerline rather than as a caveat.
-        hi = float(np.percentile(kap, 98)) if kap.size else 1.0
-        lyr = viewer.add_points(
-            pts3, name=PATH_LAYER, size=3.0, face_color=kap,
-            face_colormap="turbo", border_width=0.0)
-        try:
-            lyr.face_contrast_limits = (0.0, max(hi, 1e-4))
-        except Exception:
-            pass
-        lyr.visible = visible
+        key = _COLOR_KEY.get(graph_color_w.value, graph_color_w.value)
+        vals = np.asarray(g.get(key, np.zeros(len(pts))), dtype=np.float64)
+        if vals.shape[0] != len(pts):
+            vals = np.zeros(len(pts))
+        finite = np.isfinite(vals)
+        # NaN is a real answer here — sections are cut every few µm and the
+        # gaps are deliberately not interpolated — so it is drawn at the low
+        # end rather than dropped, which would make the path look broken.
+        fill = float(np.nanmin(vals)) if finite.any() else 0.0
+        shown = np.where(finite, vals, fill)
 
-        # The extrapolated ones are marked by an overlay ring instead — same
-        # positions, so nothing moves and nothing disappears. Plain grey, NOT
-        # face_color="transparent": napari 0.6.0 rejects that string and
-        # silently resets every point to white.
-        if (~valid).any():
-            off = viewer.add_points(
-                pts3[~valid], name=PATH_OFF_LAYER, size=6.0,
-                face_color="gray", border_width=0.0)
-            off.opacity = 0.4
-            off.visible = visible
+        eid = np.asarray(g.get("edge_id", np.zeros(len(pts), int)))
+        paths = [pts[eid == e] for e in np.unique(eid)]
+        paths = [q for q in paths if len(q) >= 2]
+        if paths:
+            lyr = viewer.add_shapes(paths, shape_type="path", name=GRAPH_PATH_LAYER,
+                                    edge_color="white", edge_width=1.2,
+                                    opacity=0.7)
+            lyr.visible = visible
 
-    def _compute_path(*_, after=None):
-        mask = _cadh_mask_array(state)
-        if mask is None:
-            print("Path curvature: compute or load the cadherin mask first "
-                  "(Cadherin tab).", flush=True)
+        pl = viewer.add_points(pts, name=GRAPH_LAYER, size=3.0,
+                               face_color=shown, face_colormap="turbo",
+                               border_width=0.0)
+        if finite.any():
+            lo = float(np.percentile(shown[finite], 2))
+            hi = float(np.percentile(shown[finite], 98))
+            try:
+                pl.face_contrast_limits = (lo, max(hi, lo + 1e-6))
+            except Exception:
+                pass
+        pl.visible = visible
+
+        # Junctions and crop endpoints, which are what you check by eye: a
+        # junction that is not a real Y, or a "terminus" that is really the
+        # edge of the frame, is visible immediately and invisible in a table.
+        nodes = np.asarray(g.get("nodes_zyx_um", []))
+        if len(nodes):
+            kind = np.asarray(g.get("node_kind", []))
+            ek = np.asarray(g.get("node_endpoint_kind", []))
+            col = np.where(kind == "junction", "red",
+                           np.where(ek == "crop", "deepskyblue", "yellow"))
+            nl = viewer.add_points(nodes, name=GRAPH_NODE_LAYER, size=9.0,
+                                   face_color=list(col), border_width=0.0)
+            nl.opacity = 0.85
+            nl.visible = visible
+
+    def _graph_params():
+        return {"spur_ratio": float(spur_ratio_w.value),
+                "crop_ratio": float(crop_ratio_w.value),
+                "kappa_window_um": float(kappa_win_w.value),
+                "section_every_um": float(sec_every_w.value),
+                "section_span": float(sec_span_w.value)}
+
+    def _compute_graph(*_, after=None):
+        lum = state.get("vessel_lumen_field")
+        if not lum or lum.get("chi") is None:
+            print("Centerline graph: build the mesh first with a Poisson "
+                  "method ('poisson (oriented points)' or 'alpha 3D solid -> "
+                  "poisson'). The graph is built on the solved lumen, and the "
+                  "interpolating methods never solve for one.", flush=True)
             call_all(after)
             return
+        mask = _cadh_mask_array(state)
         scale = state.get("scale", (1.0, 1.0, 1.0))
-        smooth_um = float(path_smooth_w.value)
-        state.setdefault("run_settings", {})["path_curvature"] = {
-            "smooth_um": smooth_um}
+        gp = _graph_params()
+        state.setdefault("run_settings", {})["centerline_graph"] = dict(gp)
+        dom = (np.asarray(np.asarray(mask).shape) * float(scale[0])
+               if mask is not None else None)
 
         @thread_worker
         def _run():
-            m = np.asarray(mask) > 0
-            res = vessel_path_curvature_xy(m, scale, smooth_um=smooth_um)
-            # The lumen Z reads the whole mask, so it belongs here in the worker
-            # and not in `_show_path`, which runs on the GUI thread.
-            if len(res["pts_yx_um"]):
-                res.update(lumen_center_z(m, scale, res["pts_yx_um"]))
-            return res
+            return lumen_graph.build_graph(
+                lum["chi"], lum["iso_level"], lum["h_um"], lum["origin_um"],
+                core=lum.get("core"), domain_shape_um=dom, **gp)
 
-        def _done(res):
-            state["vessel_centerline"] = res
-            pts = res["pts_yx_um"]
-            kap = res["kappa"]
-            nbr = len(res["branch_yx_um"])
-            if len(pts) == 0:
-                print("Path curvature: no centerline found.", flush=True)
+        def _done(g):
+            state["vessel_graph"] = g
+            for n in g.get("notes", []):
+                print(f"  {n}", flush=True)
+            if not len(g.get("points_zyx_um", [])):
+                print("Centerline graph: nothing found.", flush=True)
                 return
-            _show_path(res)
-            med = float(np.median(kap))
-            print(f"In-plane path curvature: {len(pts)} centerline points, "
-                  f"median κ = {med:.4f} 1/µm "
-                  f"(radius ~ {1.0/med:.0f} µm)" if med > 0 else
-                  f"In-plane path curvature: {len(pts)} centerline points, "
-                  f"median κ = 0 (straight); {nbr} branch node(s).", flush=True)
-            if med > 0:
-                print(f"  {nbr} branch node(s) detected.", flush=True)
-            z = res.get("z_um")
-            if z is not None:
-                ok = np.asarray(res.get("valid"), bool)
-                r = np.asarray(res.get("radius_um"))
-                if ok.any():
-                    print(f"  lumen centre Z {np.asarray(z)[ok].min():.1f}–"
-                          f"{np.asarray(z)[ok].max():.1f} µm over {int(ok.sum())}"
-                          f"/{len(pts)} points; inscribed lumen radius median "
-                          f"{float(np.median(r[ok])):.1f} µm.", flush=True)
-                for note in res.get("notes", []):
-                    print(f"  {note}", flush=True)
+            _show_graph(g)
+            def med(k):
+                a = np.asarray(g.get(k, []), float)
+                a = a[np.isfinite(a)]
+                return float(np.median(a)) if a.size else float("nan")
+            print(f"Centerline graph: {len(g['points_zyx_um'])} points on "
+                  f"{len(g['edge_len_um'])} edge(s), {g['n_junctions']} "
+                  f"junction(s), {g['n_endpoints']} endpoint(s) "
+                  f"({g['n_crop_endpoints']} cropped, "
+                  f"{g['n_terminus_endpoints']} terminating inside), "
+                  f"{g['total_length_um']:.0f} µm of vessel.", flush=True)
+            print(f"  inscribed radius median {med('caliber_um'):.1f} µm; "
+                  f"cross-section {med('area_um2'):.0f} µm², "
+                  f"{med('major_um'):.0f} x {med('minor_um'):.0f} µm, "
+                  f"aspect {med('aspect'):.2f}.", flush=True)
 
         def _err(exc):
-            print(f"Path curvature error: {exc}", flush=True)
+            print(f"Centerline graph error: {exc}", flush=True)
 
-        print("Computing in-plane vessel path curvature (X-Y) ...", flush=True)
+        print("Building the 3D centerline graph on the lumen ...", flush=True)
         w = _run()
-        w.returned.connect(with_after(_done, after, "Path curvature"))
-        w.errored.connect(with_after(_err, after, "Path curvature"))
+        w.returned.connect(with_after(_done, after, "Centerline graph"))
+        w.errored.connect(with_after(_err, after, "Centerline graph"))
         w.start()
 
-    path_btn.changed.connect(_compute_path)
+    graph_color_w.changed.connect(
+        lambda *_: (state.get("vessel_graph")
+                    and _show_graph(state["vessel_graph"])))
+    graph_btn.changed.connect(_compute_graph)
 
     # ---- Save / load the computed curvature so it need not be recomputed each
     # session (only the mesh geometry is saved with the mesh; curvature and the
@@ -577,54 +621,51 @@ def build(state, viewer) -> Container:
         finally:
             call_all(after, label="Load curvature")
 
-    path_curv_path_w = FileEdit(value="vessel_path_curvature.npz",
-                                label="path_curv_path", mode="w")
-    save_path_curv_w = PushButton(text="Save path curvature")
-    load_path_curv_w = PushButton(text="Load path curvature")
+    path_curv_path_w = FileEdit(value="vessel_graph.npz",
+                                label="graph_path", mode="w")
+    save_path_curv_w = PushButton(text="Save centerline graph")
+    load_path_curv_w = PushButton(text="Load centerline graph")
 
     def _save_path_curv(*_):
-        cl = state.get("vessel_centerline")
-        if not cl or not len(cl.get("pts_yx_um", [])):
-            print("No path curvature to save — click 'Compute in-plane path "
-                  "curvature' first.", flush=True)
+        g = state.get("vessel_graph")
+        if not g or not len(g.get("points_zyx_um", [])):
+            print("No centerline graph to save — click 'Compute 3D centerline "
+                  "graph' first.", flush=True)
             return
         path = str(path_curv_path_w.value)
-        arrays = {"pts_yx_um": np.asarray(cl["pts_yx_um"]),
-                  "kappa": np.asarray(cl["kappa"]),
-                  "branch_yx_um": np.asarray(cl["branch_yx_um"])}
-        # The lumen Z travels with the centerline when it has been computed, so
-        # loading a saved one draws it in the right place without re-reading the
-        # mask. Extra keys only: `measure_core` and `batch_measure` name the
-        # three above, so an older reader is unaffected.
-        for k in ("z_um", "valid", "radius_um"):
-            if cl.get(k) is not None:
-                arrays[k] = np.asarray(cl[k])
-        np.savez_compressed(path, **arrays)
-        print(f"Saved path curvature -> {path}"
-              + (" (with lumen Z)." if "z_um" in arrays else "."), flush=True)
+        # Arrays only. The notes and the nested info dicts are provenance and
+        # belong in vessel_recon.json, which is where provenance already lives.
+        np.savez_compressed(path, **{k: v for k, v in g.items()
+                                     if isinstance(v, np.ndarray)})
+        print(f"Saved centerline graph -> {path}: "
+              f"{len(g['points_zyx_um'])} points, "
+              f"{len(g['edge_len_um'])} edge(s).", flush=True)
 
     def _load_path_curv(*_, after=None, visible=True):
         path = str(path_curv_path_w.value)
         try:
-            d = np.load(path)
-            cl = {"pts_yx_um": d["pts_yx_um"], "kappa": d["kappa"],
-                  "branch_yx_um": d["branch_yx_um"]}
-            for k in ("z_um", "valid", "radius_um"):
-                if k in d.files:
-                    cl[k] = d[k]
-            if "z_um" not in cl:
-                print("  (this file predates the lumen Z — the path will be "
-                      "drawn at the mesh's mean Z. Re-run 'Compute in-plane "
-                      "path curvature' to place it in the lumen.)", flush=True)
-            state["vessel_centerline"] = cl
-            _show_path(cl, visible=visible)
-            print(f"Loaded path curvature <- {path}: {len(cl['pts_yx_um'])} "
-                  f"centerline points, {len(cl['branch_yx_um'])} branch node(s).",
-                  flush=True)
+            d = np.load(path, allow_pickle=False)
+            g = {k: d[k] for k in d.files}
+            if "points_zyx_um" not in g:
+                print(f"Load centerline graph: {path} is an old in-plane "
+                      f"`vessel_path_curvature.npz`, which this build no "
+                      f"longer reads — the 2D centerline was replaced by the "
+                      f"3D lumen graph (docs/DIRECTION.md §8B). Rebuild the "
+                      f"mesh with a Poisson method and click 'Compute 3D "
+                      f"centerline graph'.", flush=True)
+                return
+            for k in ("n_junctions", "n_endpoints", "n_crop_endpoints",
+                      "n_terminus_endpoints", "total_length_um"):
+                g.setdefault(k, 0)
+            state["vessel_graph"] = g
+            _show_graph(g, visible=visible)
+            print(f"Loaded centerline graph <- {path}: "
+                  f"{len(g['points_zyx_um'])} points, "
+                  f"{len(g.get('edge_len_um', []))} edge(s).", flush=True)
         except Exception as exc:
-            print(f"Load path curvature error: {exc}", flush=True)
+            print(f"Load centerline graph error: {exc}", flush=True)
         finally:
-            call_all(after, label="Load path curvature")
+            call_all(after, label="Load centerline graph")
 
     save_curv_w.changed.connect(_save_curv)
     load_curv_w.changed.connect(_load_curv)
@@ -634,7 +675,7 @@ def build(state, viewer) -> Container:
     state["load_vessel_path_curvature"] = _load_path_curv
     state.setdefault("save_path_widgets", []).extend([
         (curv_path_w, "vessel_curvature.npz"),
-        (path_curv_path_w, "vessel_path_curvature.npz"),
+        (path_curv_path_w, "vessel_graph.npz"),
     ])
 
     # Chainable "Run all" steps: compute then save, then call `after`.
@@ -643,7 +684,7 @@ def build(state, viewer) -> Container:
     state["run_vessel_curvature"] = lambda after=None: _compute_curv(
         after=lambda: call_all(_save_curv, after,
                                label="run_vessel_curvature"))
-    state["run_vessel_path_curvature"] = lambda after=None: _compute_path(
+    state["run_vessel_path_curvature"] = lambda after=None: _compute_graph(
         after=lambda: call_all(_save_path_curv, after,
                                label="run_vessel_path_curvature"))
 
@@ -651,7 +692,9 @@ def build(state, viewer) -> Container:
                               mesh_path_w, save_mesh_w, load_mesh_w,
                               curv_measure_w, curv_radius_w, curv_smooth_w,
                               curv_btn, curv_path_w, save_curv_w, load_curv_w,
-                              path_smooth_w, path_btn,
+                              spur_ratio_w, crop_ratio_w, kappa_win_w,
+                              sec_every_w, sec_span_w, graph_color_w,
+                              graph_btn,
                               path_curv_path_w, save_path_curv_w,
                               load_path_curv_w],
                      labels=False),

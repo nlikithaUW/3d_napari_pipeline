@@ -3521,6 +3521,48 @@ candidate to reach for **if** the far wall's evidence ever becomes load-bearing
 — e.g. for [P32](#p32), where missing wall stops being a confidence question
 and lets the level set escape.
 
+> **Attempted 2026-08-24, twice, and both attempts are invalid. The test is
+> harder to construct than it looks and the reason is structural — record this
+> before re-running it.** `docs/scratch/p28/sheetness.py`.
+>
+> Populations were built in 3D from this entry's own "the gap peak sits at the
+> wall radius": **wall** = voxels a permissive threshold newly admits within
+> 2 µm of the strict mask; **speckle** = newly admitted beyond 15 µm. Sheetness
+> on the raw channel, σ ∈ {1, 2, 4} µm, with **λ3 (gradient magnitude) as a
+> control** — an intensity-like quantity, so if it separates as well as
+> sheetness then shape added nothing.
+>
+> | σ µm | sheetness AUC | sheetness AUC, intensity-matched | λ3 control |
+> |---|---|---|---|
+> | 1.0 | 0.902 | 0.898 | **1.000** |
+> | 2.0 | 0.938 | 0.938 | **1.000** |
+> | 4.0 | 0.945 | 0.945 | **1.000** |
+>
+> **The control reads 1.000, so neither run measured shape.** The populations
+> are trivially separable on a gradient-like quantity, and sheetness scores
+> *below* the trivial control — it is a noisier proxy for the same thing.
+>
+> Matching the two populations exactly on raw intensity (40 brightness strata,
+> median 558.0 in both) **moved sheetness by 0.004 and left the control at
+> 1.000.** That is the informative part: λ3 is a **gradient** measure, so a
+> voxel on the steep flank of the bright detected wall carries a large gradient
+> *whatever its own brightness*. Brightness was never the confound.
+>
+> **The confound is the population definition itself.** "Distance from the
+> strict mask" is precisely what sets the local gradient, so *every* local
+> structure measure separates these two sets by construction. This entry's own
+> comparison avoids it — its gap peaks lie in directions where the mask found
+> **no** wall, so they are not beside detected wall at all.
+>
+> **The design that would work**, untried: draw **A** = newly admitted, near the
+> `alpha→poisson` *surface* but >5 µm from any strict-mask voxel (in the gaps,
+> not the halo), and **B** = newly admitted, far from that surface. Both are
+> then dim *and* away from bright wall, so neither sits on a flank. Mild
+> circularity — the surface was fit to the strict mask — but it interpolates
+> across gaps, so "near surface, far from mask" is this entry's gap wall.
+> **Keep λ3, and treat a control near 0.5 as the precondition for believing any
+> sheetness number at all.** At 1.000 the test is reporting on something else.
+
 **History**
 - 2026-08-13 — opened. Found while checking a claim made earlier the same day
   that the bean-shaped cross-section at a branch end was "missing wall". It is

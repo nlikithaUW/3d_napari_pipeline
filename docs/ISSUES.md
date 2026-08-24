@@ -64,7 +64,7 @@ true of the code and data on that date and may not be true now.
 |---|---|---|---|
 | [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | **fixed** — part B has a principled replacement for [I06](#i06) |
 | [P02](#p02) | `ratio_clover_ruby` tracks the ruby noise floor, not tension | S1 | open |
-| [P03](#p03) | Adhesion detection is depth-truncated | S1 | open — **confirmed 6/6** |
+| [P03](#p03) | Adhesion detection is depth-truncated | S1 | open — **confirmed 6/6; confirmed optical not gravity 2026-08-24**, fix is [I07](#i07) |
 | [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | **fixed** |
 | [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open |
 | [P06](#p06) | Tension readout drifts with imaging depth | S2 | open — **sign flips 6 images** |
@@ -99,7 +99,11 @@ true of the code and data on that date and may not be true now.
 | [I04](#i04) | `batch.py` has no way to re-run one step | idea | open — **mesh/curvature/centerline done** |
 | [I05](#i05) | Is the alpha shape the right reconstruction method at all? | idea | open |
 | [I06](#i06) | Oriented-point implicit reconstruction — the plan of record | idea | **in progress — `alpha 3D solid -> poisson` is the direction of record as of 2026-08-21**, visually confirmed; three refinements open (bumps, runtime, Open3D) |
+| [I07](#i07) | Local thresholding on the clover channel | idea | open — **root cause of [P03](#p03); tools exist, unused on this path** |
+| [I08](#i08) | "Refine with cadherin" is a dead end and should be removed | idea | open — **superseded by [I06](#i06); sole consumer of [P34](#p34)'s centroids** |
 | [P32](#p32) | The fitted lumen leaks through the z faces on images 4 and 5, wrecking the graph topology | S2 | open — **diagnosed and warned, not fixed** |
+| [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
+| [P34](#p34) | Cadherin tab computed per-component centroids eagerly for an off-path consumer | S3 | **fixed** — 34.45 s -> 0 at `floor_k` 3.0 |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -954,6 +958,111 @@ analysis. If it holds, correcting the intensities will not be enough on its own.
   this dataset contrasts a near-complete shallow sample against a systematically
   incomplete deep one, in every image. Correcting intensities for attenuation
   cannot fix that, because the missing adhesions were never measured.
+
+- 2026-08-24 — **the optical reading is confirmed against its main rival, and
+  this entry's argument from flat adhesion volume is corrected.** Scripts:
+  `docs/scratch/tier2/{orientation_vs_depth,circumferential}.py`. Scratch is
+  gitignored, so the numbers here are the tracked record. Three parts.
+
+  **(a) The flat volume distribution does not mean what this entry says it
+  means.** The entry argues "truncation removes objects rather than shrinking
+  them" and cites median volume falling only 11%. Checked against the whole
+  distribution rather than the median — volume percentiles by depth quartile,
+  reference image:
+
+  | band µm | n | p10 | p25 | p50 | p75 | p90 |
+  |---|---|---|---|---|---|---|
+  | 1–10 | 537 | 4.77 | 6.97 | 13.04 | 20.60 | 29.31 |
+  | 10–14 | 536 | 5.34 | 8.29 | 13.49 | 21.70 | 31.12 |
+  | 14–74 | 537 | 5.42 | 8.38 | 13.90 | 22.11 | 31.79 |
+  | 74–103 | 537 | 5.22 | 7.62 | 12.50 | 20.87 | 28.73 |
+
+  Flat at **every** percentile, in all six images, while the count falls 63%.
+  So the observation is stronger than the entry claims — but the *reasoning* is
+  wrong. Under a threshold applied directly to a soft-edged object, dimming
+  shrinks the object before it vanishes, so shrinkage is what should be seen.
+  The reason it is not is **architectural and specific to this pipeline**: the
+  global Otsu is not the segmenter, it is a **gate** (`gate_by_clover`, default
+  on, dilated 1 µm) deciding which voxels the RF may look at, and the RF
+  segments inside it. A gate acts all-or-nothing per object — clear the
+  threshold and you are segmented at full extent, miss it and you are invisible.
+  Count falls, surviving sizes unaffected. "Truncation removes objects rather
+  than shrinking them" is true *here because of the gate*, not as a general
+  principle, and the entry should not be quoted as if it were one.
+
+  There is a hard floor at exactly 3.433 µm³ in every image, but p10 sits at
+  ~5 and does not drift toward it with depth, so a size cutoff is not what
+  produces the flatness.
+
+  **(b) A rival explanation this entry never considered: gravity.** The
+  fibroblasts were seeded onto an already-formed vessel
+  (`docs/DIRECTION.md` §1). If they settled under gravity the up-facing wall
+  gets more cells — real biology, large, and pointing the same way as the
+  optical artifact. A falling count with an unchanged size distribution is what
+  **both** produce, so nothing previously recorded here separated them.
+
+  **The discriminator, and it comes out optical.** Attenuation depends on
+  absolute depth in the stack; gravity depends on which way the wall faces. On
+  a tube those are normally locked together, but the vessel axis dives 6–36 µm
+  (`docs/scratch/tier2/depth_confound.py`; p90 |dz/ds| 0.33–0.71), so the
+  up-facing wall exists across a range of
+  absolute depths. Holding orientation fixed at the nearly-flat top wall
+  (per-vertex ∇χ normals, `n_z < −0.9`), shallow half vs deep half:
+
+  | image | z span µm | shallow | deep | ratio |
+  |---|---|---|---|---|
+  | `V3_..._04step_002` | 38 | 21.17 | 15.09 | **1.40** |
+  | `V3_..._04step_003` | 18 | 15.37 | 20.85 | 0.74 |
+  | `V3_..._09step_001` | 24 | 26.77 | 10.23 | **2.62** |
+  | `V3b_..._04step_001` | 67 | 22.95 | 24.67 | 0.93 |
+  | `V3b_..._04step_002` | 27 | 37.04 | 17.48 | **2.12** |
+  | `V3b_..._04step_003` | 34 | 36.72 | 12.23 | **3.00** |
+
+  **Four of six fall with depth at constant orientation** (up to 4.7× at
+  `n_z < −0.95`). Gravity cannot produce that — it is one wall facing one way.
+  The two exceptions are the two with least power: `04step_003` has 18 µm of
+  span (the flattest vessel, its axis barely dives) and `V3b_..._04step_001` is
+  [P32](#p32)'s z-leak image.
+
+  **This does not exclude a gravity component**, and the tempting comparison
+  does not work: the up/down gap (1.4–15.8×) exceeds the within-orientation
+  gradient, but the down-facing wall is imaged through the whole lumen and
+  everything above it, so the two populations do not share an attenuation law
+  and the extrapolation is meaningless. Gravity is **not required**; it is not
+  ruled out.
+
+  A confound had to be fixed mid-run and is recorded so it is not reintroduced:
+  at a loose orientation cut (`n_z < −0.5`) the "up-facing" set still includes
+  surface wrapping toward the sides, and that wrap *itself* increases z, so
+  binning by depth inside it silently re-measures circumferential position —
+  the exact confound the test exists to remove. Stable from 0.8 up.
+
+  **(c) A null worth recording so it is not re-proposed.** This entry's five
+  depth bands are not monotonic (10.39 / 2.10 / 0.73 / 2.91 / 3.61), and the
+  band areas show why: the extreme bands are the top and bottom walls, the
+  middle band is the sides. That invited the reading that part of it is real
+  circumferential shear — for an elliptical section τ(minor-axis end) /
+  τ(major-axis end) = a/b, so ~2× at the measured aspects, high at **both** z
+  extremes where attenuation can only ever run one way.
+
+  **Measured, and it is absent.** Binning adhesion density by angle around the
+  perpendicular cross-section, minor-axis ends vs major-axis ends: **1.04 /
+  1.25 / 0.95 / 0.87** on the four images with reliable geometry (2.07 and 1.09
+  on [P32](#p32)'s two). Predicted ~2, observed ~1. The apparent structure in
+  the z bands is depth, not angle.
+
+  Caveat on that null, and on a discarded first version of it: excluding
+  `censored` centerline points removed 50–76% of the data non-randomly by angle
+  and manufactured a spurious anti-correlation (0.55/1.02/0.81/0.68). The
+  radial gate is inert by comparison (2.5× / 5× / none agree to ±0.05). The
+  null also has little power at the deep end, where attenuation suppresses
+  detection ~2–3× — the same size as the predicted effect — but the shallow end
+  is *brighter* than the sides and should have been biased toward the predicted
+  result, and still reads 1.0.
+
+  **What this settles.** The root cause named in **Where** is confirmed as
+  optical rather than biological, for the first time with evidence that
+  separates the two. That promotes the fix: see [I07](#i07).
 
 ---
 
@@ -3508,6 +3617,27 @@ neighbourhood-aware recovery is untried.
   unrecorded: it is not a default, it is a measurement of each volume. No new
   entry is opened for this — the finding is that there is no defect here.
 
+- 2026-08-24 — **the floor's 15–41% and [P19](#p19)'s 59–85% are not
+  independent: the first partly *causes* the second.** Ordering, in
+  `gui/cadherin.py::_run`: the floor is ANDed in **before** `label_and_sizes`,
+  while `min_size` is applied **after**, in `_compute_mask`. So the floor does
+  not merely delete voxels — it **fragments** a dim wall segment into several
+  small components, each of which then falls below `min_size` and is deleted
+  whole.
+
+  Two consequences for anyone tuning these:
+
+  - **The two numbers must not be added.** Part of `min_size`'s 59–85% is
+    material the floor broke up rather than material that was independently too
+    small.
+  - **Testing them one at a time understates both.** Lowering `floor_k` should
+    return more than its own 15–41%, because it also stops feeding fragments to
+    the size filter. The paired experiment is the informative one.
+
+  Mechanism only — not yet measured. It follows from the ordering in the code,
+  and the measurement to do is the `floor_k` x `min_size` grid rather than
+  either axis alone.
+
 ---
 
 <a id="p29"></a>
@@ -4955,6 +5085,329 @@ voxels* and that yardstick moves if the mask does.
    inscribed radius. New question, only askable now that κ2 stopped moving.
 4. Re-join and re-export all six images; sign convention for `curv_*`; record
    `radius_um` and the reconstruction parameters beside every `curv_*`.
+
+---
+
+<a id="p33"></a>
+## P33 — `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-24 |
+| **Severity** | S3 (performance only — output is bit-identical) |
+| **Opened** | 2026-08-24 |
+| **Last verified** | 2026-08-24 (reference image, 324x1024x1024 uint16) |
+| **Resolved** | 2026-08-24, `pipeline/denoise.py::sauvola_mask` |
+| **Where** | `pipeline/denoise.py` — `sauvola_mask`'s `v = vol.astype(np.float32)` |
+| **Affects** | every cadherin mask build; `_run_cadherin_step` forces Sauvola, so this was the interactive *and* batch path |
+
+`gpu.local_mean_std` is deliberately written to transfer the volume in its
+**native dtype** and cast to float32 **on the device** — its docstring: "the
+volume crosses the PCIe bus only once — transferred as uint16 (half the bytes
+of float32) ... host<->device copies are not [cheap]".
+
+`niblack_mask` honours that (`_local_zscore` passes `vol` through untouched).
+**`sauvola_mask` cast on the host first**, so it shipped float32 and defeated
+the one optimisation that function exists for. Both call `_mean_std` exactly
+once, so this was the entire difference between them.
+
+It compounded rather than merely doubling: on the reference stack native is
+**679 MB** against **1359 MB** as float32, and the larger figure exceeds the
+pinned-memory pool, so the copy silently degraded to a **synchronous** transfer
+(and to a CPU fallback beyond that). The cupy warning names the exact byte
+count — `1358954496 bytes` — which is the float32 size to the byte, and it is
+what identified the cause.
+
+| | time | foreground |
+|---|---|---|
+| before (host float32 cast) | **8.79 s** | 339,738,527 |
+| after (native dtype), same process | 5.40 s | 339,738,527 |
+| after (native dtype), **clean warm run** | **2.89 s** | — |
+
+**Bit-identical** — verified by array comparison, not inferred. Nothing
+downstream changes and no artifact is invalidated.
+
+**Read the third row, not the second.** The first two were measured
+back-to-back in one process, so the "after" run started cold *and* in the
+pinned-memory pool the "before" run had just exhausted — it is an overestimate
+of the fixed path. Measured cleanly the fix is far larger than the 1.63x that
+pairing suggests.
+
+**The decisive check is parity with Niblack**, which is what the diagnosis
+predicts: both call `_mean_std` exactly once and differ in nothing else costly,
+so if the transfer was the whole story they must land together. Warm, same
+volume, same window:
+
+| | time |
+|---|---|
+| `niblack_mask` | 2.92 s |
+| `sauvola_mask` | **2.89 s** |
+
+They do. (A first call in a fresh process costs ~4.7 s regardless of method —
+cupy context and memory-pool init, not a property of either threshold. Benchmark
+either one cold and the comparison is meaningless.)
+
+`v` was only used for `.max()`/`.min()` and the `_mean_std` call — the final
+comparison already used `vol` — so removing the cast was free.
+
+**`bernsen_mask` has the same host-side cast (`denoise.py:227`) and is NOT
+fixed**, deliberately: there the cast does real work, because
+`midgray = 0.5 * (hi + lo)` would overflow in uint16. The correct fix there is
+to filter in native dtype and cast afterwards. Bernsen is also inherently far
+costlier than the other two at the same window — min/max are rank filters,
+where `uniform_filter` is an O(1) running sum — which is expected behaviour
+rather than a defect.
+
+**Related:** [P28](#p28) (the Sauvola threshold is the innocent gate),
+[I07](#i07) (the same host/device transfer discipline on the clover path).
+
+---
+
+<a id="p34"></a>
+## P34 — The Cadherin tab computed per-component centroids eagerly, for a consumer that is not on the main path
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-24 |
+| **Severity** | S3 (performance only — no output changes) |
+| **Opened** | 2026-08-24 |
+| **Last verified** | 2026-08-24 (reference image) |
+| **Resolved** | 2026-08-24 — `gui/cadherin.py::_ensure_centroids`, `gui/cell_mesh.py` |
+| **Where** | `gui/cadherin.py::_run` called `cell_mesh.label_centroids_normals(labels, scale, min_voxels=1)` on every run |
+| **Affects** | every Cadherin run, interactive and batch; the reason a permissive `floor_k` was unusable |
+
+`label_centroids_normals` is a **Python loop over every component**, doing
+`labels[sl]`, `np.argwhere(sub == lid)`, a mean, a covariance and a 3x3
+`np.linalg.eigh` each. The tab called it with **`min_voxels=1`**, so it ran on
+every 1-voxel speck — and the function's own docstring says PCA on clouds that
+small is unstable, so most of the output was unusable by construction.
+
+Cost against a **constant ~3.7 s** for `label_and_sizes` on the same volume:
+
+| `floor_k` | components | `label_and_sizes` | `label_centroids_normals` |
+|---|---|---|---|
+| 5.0 | 170,236 | 3.70 s | 4.98 s |
+| 4.0 | 375,467 | 3.65 s | 9.92 s |
+| 3.0 | 1,335,402 | 3.74 s | **34.45 s** |
+
+**Labelling itself is not what scales — this loop is.** Component count grows
+superlinearly as the floor drops (7.8x for 3.4x the voxels), because what a
+lower floor admits is speckle. At `floor_k` 2.0 the process reached **2654% CPU
+and 13 GB RSS** and was killed; the memory is `ndi.find_objects` plus millions
+of small `argwhere` allocations.
+
+**Nothing on the main path reads the result.** Traced every consumer:
+
+- the **vessel mesh consumes the binary mask**, not the labels
+  (`gui/vessel_mesh.py::_cadh_mask_array` reads the mask *layer*);
+- `sizes` alone drives the size filter, the histogram and
+  `auto_min_size_otsu`;
+- `centroids`/`normals` have **exactly one consumer in the codebase** —
+  `gui/cell_mesh.py`'s optional "Refine with cadherin" button, which is **not in
+  `batch.py`'s `_RUN_STEPS`**.
+
+So every headless run computed this and discarded it.
+
+**Fix:** `_ensure_centroids()` memoises on first use; `_cadh_vertices()` is the
+single entry point for outside consumers, materialising centroids, normals and
+`keep_mask` together so callers need not know anything is lazy. `_compute_mask`
+materialises only when the band filter will genuinely use it (`band_um > 0` and
+a DAPI mesh exists); at the default `band_um = 0` it stays lazy.
+`cell_mesh.py`'s refine fetches **inside its worker**, so a first-use
+computation cannot freeze the GUI.
+
+**No behaviour change** — verified: after a run the fields are `None`; the
+accessor returns (549, 3) centroids, (549, 3) normals and a consistent
+`keep_mask`; the second call is cached at 0.0000 s.
+
+If it ever needs computing often, the `eigh` calls should be **batched** —
+measured 1.44 s looped against 0.33 s batched for 200k 3x3 matrices, a free
+4.4x on that portion.
+
+**Related:** [I08](#i08) (the sole consumer is itself a candidate for removal),
+[P19](#p19), [P28](#p28).
+
+---
+
+<a id="i07"></a>
+## I07 — Local thresholding on the clover channel
+
+**Opened** 2026-08-24 · **Status** open · **Fixes** [P03](#p03)
+
+`denoise.otsu_mask` is `threshold_otsu(vol)` — **one scalar for the entire 3D
+stack** — and it is what builds the clover mask (`gui/clover.py:80`) and the
+adhesion gate (`gui/adhesion_rf.py:261`). On a channel with a systematic depth
+gradient, a single global number necessarily over-accepts shallow and
+under-accepts deep. [P03](#p03)'s 2026-08-24 History confirms that gradient is
+optical rather than biological, so this is the root cause of an S1 defect and
+not a robustness nicety.
+
+**The tools already exist and are already correct for this data.** `denoise.py`
+has `niblack_mask`, `sauvola_mask` and `bernsen_mask`, all local, all taking
+`voxel_zyx_um` so they scale the z window for the 0.325/0.4 (and 0.9)
+anisotropy. They are used on the cadherin channel. **Nothing on the clover path
+calls them.**
+
+**This has an unusually concrete success criterion**, which is rare in this
+repo: [P03](#p03)'s shallow/deep ratio at fixed wall orientation (1.40 / 0.74 /
+2.62 / 0.93 / 2.12 / 3.00) should move toward **1.0** if the fix works. Rerun
+`docs/scratch/tier2/orientation_vs_depth.py` against the new instances. The
+far-wall-vs-near-wall figure in [P03](#p03) is the coarser version of the same
+check.
+
+**Measured 2026-08-24, reference image** (`docs/scratch/tier2/{threshold_depth,
+clover_gate_sweep}.py`, isotropic grid — the RF, the gate and
+`adhesion_instances.npz` all live there, 324 planes against 263 native).
+
+**(a) The gate's depth bias is real and the local threshold removes it.**
+Accepted voxel fraction, shallow third vs deep third:
+
+| gate | shallow | deep | sh/dp |
+|---|---|---|---|
+| **global Otsu (current)** | 2.141% | 0.698% | **3.06** |
+| niblack k=+0.0 | 40.333% | 42.238% | 0.95 |
+| niblack k=+0.5 | 22.123% | 24.247% | **0.91** |
+| niblack k=+1.0 | 11.876% | 13.173% | 0.90 |
+| niblack k=+3.0 | 0.962% | 0.937% | 1.03 |
+
+The Otsu ratio **3.06** independently corroborates this entry's parent
+[P03](#p03), whose far-wall-vs-near-wall figure is 37% (1/0.37 = 2.7) by a
+different route. **Depth-uniformity is a property of the method, not of k** —
+every k lands at 0.90–1.03 — so k can be chosen purely on recall vs cost. At
+k ≤ 1.5 the gate is slightly *more* permissive deep, partially compensating for
+attenuation rather than merely not amplifying it.
+
+**(b) k must be permissive, and the cadherin default is catastrophic here.**
+The clover mask is **a gate on the RF, not a segmentation**: its job is to
+discard only what is certainly not an adhesion. Recall of the 992,011 voxels in
+`adhesion_instances.npz`:
+
+| gate | volume retained | recall |
+|---|---|---|
+| global Otsu (current) | 0.969% | 94.82% |
+| niblack k=+0.0 | 42.275% | 99.98% |
+| niblack k=+0.5 | 24.254% | **98.85%** |
+| niblack k=+1.0 | 13.181% | 91.63% |
+| **niblack k=+3.0** (cadherin default) | 0.921% | **36.57%** |
+
+**k=3.0 is the worst available choice** — the same volume as Otsu for a third
+of the recall. It was briefly the shipped default on the strength of its 1.03
+depth ratio alone; uniformity at that k is uniform *discarding*, and
+uniformity is not a sufficient criterion on its own.
+
+**Recommended: `niblack_k = 0.5`, `window_xy = 50`** — 98.85% recall, 0.91
+depth ratio, 24% volume. The cost is ~25× more voxels through
+`rf.predict_proba`, and that runtime is the only real argument for a stricter k.
+
+**Two limits on (b), both structural.** The reference instances were produced
+*through* the Otsu gate, so they cannot contain anything it excluded: recall
+against them is a necessary condition, never sufficient, and it is blind to
+exactly the deep population [P03](#p03) says is missing. Otsu's own recall is
+94.82% rather than 100% only because the gate is dilated 1 µm before use. And
+Otsu's recall is **depth-flat (95.41 / 93.51)**, which looks reassuring and
+means nothing — adhesions it excluded were never detected, so they are not in
+the set to be missed. **The comparison is rigged in Otsu's favour** and must not
+be read as "Otsu is better"; niblack keeps different voxels, losing Otsu-found
+ones while gaining ones this metric cannot see. Only re-detection settles it.
+
+**Cautions.**
+
+- **[P28](#p28) is not evidence against this.** P28 measured a continuous
+  local-contrast *field* degrading the cadherin surface fit. That is a
+  different use — a field feeding a reconstruction, not a mask replacing a
+  global threshold — and the two should not be conflated. Someone will raise
+  it; the answer is on the record here.
+- **[P19](#p19) applies directly.** `auto_min_size_otsu` + `filter_by_size` run
+  immediately after the threshold on this same path, and P19 records that
+  `min_size` deletes 59–85% of the dim wall on the cadherin channel. A local
+  threshold that recovers dim deep adhesions will hand them straight to a size
+  filter tuned against the global-threshold population. **Both have to be
+  looked at together or the fix will be masked.**
+- Per the working agreement the knob is a slider in the Clover tab with an
+  argparse equivalent of **no upper bound**, and the GUI and headless paths
+  call one shared function in `pipeline/` — the `build_mesh` doctrine. The gate
+  in `adhesion_rf` and the mask in `clover` must not acquire two
+  implementations.
+- Changing this **invalidates every existing adhesion CSV**. The
+  `20260812_011*` exports are the current authoritative six; a re-measure is
+  part of the work, not a follow-up.
+
+**History**
+
+- 2026-08-24 — opened, measured, and **the Clover tab default changed from
+  global Otsu to Niblack k = 0.5** (`window_xy` 50) on the user's decision.
+  `denoise.build_mask` is now the single dispatch for threshold + label +
+  size-suggest, and both `gui/clover.py` and `gui/adhesion_rf.py`'s gate
+  fallback call it — they each had their own copy of
+  `otsu_mask -> label_and_sizes -> auto_min_size_otsu`, so the mask the user
+  tuned and the mask the RF gated on could differ silently. The RF gate path
+  itself is unchanged: `adhesion_rf.py` still reads `clover_mask_layer.data`,
+  dilates it by `clover_dilation_um`, and passes `gate_indices` to
+  `rf.predict_proba`.
+
+  **`batch.py` runs every tab at widget defaults and has no CLI for them, so
+  this default is now the headless setting**, and the `20260812_011*` CSVs are
+  superseded in principle even though nothing has been re-run yet. **The fix is
+  not yet demonstrated** — everything measured above is upstream of the RF.
+  Confirming it needs re-detection (RF predict -> post-process -> re-measure)
+  and then rerunning `docs/scratch/tier2/orientation_vs_depth.py` to see
+  whether P03's shallow/deep ratios move toward 1.0. Equal *acceptance* is not
+  proof the right voxels were accepted.
+
+  **The [P19](#p19) interaction was checked and is benign at this setting.** The
+  gate reads the *size-filtered* mask, so `min_size` is a second strictness knob
+  on the same gate, and a permissive threshold changes the component structure
+  completely — 12,247,014 components at k = 0.5 against Otsu's 89,303. It could
+  therefore have clawed back the permissiveness. It does not:
+  `auto_min_size_otsu` seeds **3**, not something large, taking volume 24.254%
+  -> 20.955% for a recall cost of **0.01 points** (98.85% -> 98.84%) with the
+  depth split unchanged. That is a size filter removing 1-2 voxel speckle, which
+  is what it is for. No override of the auto-seed is needed on this tab.
+  **This says nothing about P19 on the cadherin channel**, where the filter is
+  measured to delete 59-85% of the dim wall; the two are the same code and
+  different regimes.
+
+---
+
+<a id="i08"></a>
+## I08 — "Refine with cadherin" is a dead end and should be removed
+
+**Opened** 2026-08-24 · **Status** open · **Type** cleanup, not a defect
+
+`gui/cell_mesh.py`'s "Refine with cadherin" button adds cadherin component
+centroids as extra vertices to the **DAPI cell mesh**, where nuclei are too
+sparse to close the surface: keep cadherin points within `refine_band_um` of
+the existing mesh, drop any within `min_sep_um` of a nucleus, rebuild the alpha
+shape.
+
+**It exists to get a better vessel surface out of an alpha shape over cell
+vertices. That is no longer how the vessel surface is built.**
+`alpha 3D solid -> poisson` ([I06](#i06)) fits the wall directly and is the
+first reconstruction to pass [P24](#p24)'s plateau test; the centerline graph
+([P27](#p27)) and `nuc_side` are built on the same solved field. The nucleus-
+derived alpha shape is a proxy that has been superseded.
+
+**Why it is worth actively removing rather than leaving:**
+
+- It is the **only** consumer of the Cadherin tab's centroids/normals, which
+  [P34](#p34) has just had to make lazy to keep that tab usable. Remove it and
+  `label_centroids_normals` can leave the cadherin path entirely.
+- The mesh it refines (`mesh_cache`) is also what gates adhesions by distance
+  (`gui/clover.py`'s `gate_by_mesh`/`d_max_um`, and the RF post-process gate).
+  **That gate should measure against the reconstructed vessel surface**, for
+  which there is now an exact signed nearest-*triangle* distance in
+  `pipeline/nuc_side.py`, rather than against an alpha shape over nucleus
+  centroids. Doing so would share machinery with `docs/DIRECTION.md` §8C.4
+  instead of maintaining a second, weaker surface.
+- It is not in `batch.py`'s `_RUN_STEPS`, so nothing headless exercises it and
+  it is not covered by any check.
+
+**Recorded on the user's judgement, 2026-08-24:** the project should be
+clearing dead ends rather than adding to them. This is the first one named.
+Removal is not done here — it touches the cell-mesh tab, the clover gate and
+`mesh_cache`, and the replacement gate is a design decision in its own right.
+
+**Related:** [P34](#p34), [I06](#i06), [P09](#p09), `docs/DIRECTION.md` §8C.
 
 ---
 

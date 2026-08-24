@@ -196,9 +196,16 @@ def sauvola_mask(vol: np.ndarray, window_xy: int, k: float, voxel_zyx_um) -> np.
     if window_xy % 2 == 0:
         window_xy += 1
     win = aniso_size(window_xy, voxel_zyx_um)
-    v = vol.astype(np.float32, copy=False)
-    r = max(0.5 * float(v.max() - v.min()), 1e-6)
-    m, s = _mean_std(v, win)
+    # Hand `vol` to `_mean_std` in its NATIVE dtype, not cast to float32 first.
+    # `gpu.local_mean_std` transfers the volume as-is and casts on the device
+    # precisely so a uint16 stack crosses PCIe at half the bytes — casting here
+    # doubled the transfer and defeated that. On a 324x1024x1024 stack it is
+    # 680 MB vs 1.36 GB, and the larger one exceeds the pinned-memory pool, so
+    # the copy silently degraded to a synchronous transfer (and to a full CPU
+    # fallback beyond that). Bit-identical either way: the first thing
+    # `local_mean_std` does is `.astype(float32)`.
+    r = max(0.5 * float(vol.max() - vol.min()), 1e-6)
+    m, s = _mean_std(vol, win)
     thr = m * (1.0 + float(k) * (s / r - 1.0))
     return (vol > thr).astype(np.uint8)
 
@@ -226,3 +233,66 @@ def bernsen_mask(vol: np.ndarray, window_xy: int, contrast_frac: float, voxel_zy
     global_thr = threshold_otsu(v) if v.max() > v.min() else float(v.max())
     fg = np.where(contrast >= contrast_thresh, v > midgray, midgray > global_thr)
     return fg.astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Threshold + label + size-suggest, as a single dispatch point.
+# ---------------------------------------------------------------------------
+#
+# This exists for the same reason `vessel_mesh.build_mesh` does: two callers
+# needed the identical computation and each had written it out.
+# `gui/clover.py::_compute` and `gui/adhesion_rf.py`'s gate fallback both did
+# `otsu_mask` -> `label_and_sizes` -> `auto_min_size_otsu`, so the clover mask
+# the user tuned in one tab and the one the RF gated on could differ without
+# anything saying so. Both now call `build_mask`; do not write the third copy.
+
+METHOD_OTSU = "otsu"
+METHOD_NIBLACK = "niblack"
+METHOD_SAUVOLA = "sauvola"
+METHOD_BERNSEN = "bernsen"
+MASK_METHODS = (METHOD_OTSU, METHOD_NIBLACK, METHOD_SAUVOLA, METHOD_BERNSEN)
+
+# Which knobs each method actually reads. The rest are inert for that method
+# and must be recorded as inert rather than logged as if they had an effect —
+# the same contract as `vessel_mesh.LIVE_PARAMS`.
+MASK_LIVE_PARAMS = {
+    METHOD_OTSU: (),
+    METHOD_NIBLACK: ("window_xy", "niblack_k"),
+    METHOD_SAUVOLA: ("window_xy", "sauvola_k"),
+    METHOD_BERNSEN: ("window_xy", "bernsen_contrast"),
+}
+
+
+def build_mask(vol: np.ndarray, voxel_zyx_um, method: str = METHOD_OTSU,
+               window_xy: int = 50, niblack_k: float = 3.0,
+               sauvola_k: float = 0.2, bernsen_contrast: float = 0.15,
+               min_size: int | None = None):
+    """Threshold `vol`, label components, and suggest a size cutoff.
+
+    Returns ``(labels, sizes, suggested_min_size, mask)`` — always four, so a
+    caller needing only three cannot drift from one needing four.
+
+    `min_size=None` filters at `suggested_min_size`; pass a number to override.
+    The returned `mask` is size-filtered, `labels`/`sizes` are not, so a caller
+    can re-filter at a different cutoff without re-thresholding.
+
+    **`method` is validated.** An unknown string raises rather than silently
+    falling through to Otsu — [P30](../docs/ISSUES.md#p30) records that exact
+    bug in `build_mesh` and there is no reason to reproduce it here.
+    """
+    if method not in MASK_METHODS:
+        raise ValueError(
+            f"unknown method {method!r}; expected one of {MASK_METHODS}")
+    if method == METHOD_OTSU:
+        mask = otsu_mask(vol)
+    elif method == METHOD_NIBLACK:
+        mask = niblack_mask(vol, int(window_xy), float(niblack_k), voxel_zyx_um)
+    elif method == METHOD_SAUVOLA:
+        mask = sauvola_mask(vol, int(window_xy), float(sauvola_k), voxel_zyx_um)
+    else:
+        mask = bernsen_mask(vol, int(window_xy), float(bernsen_contrast),
+                            voxel_zyx_um)
+    labels, sizes = label_and_sizes(mask)
+    suggested = auto_min_size_otsu(sizes)
+    cutoff = suggested if min_size is None else int(min_size)
+    return labels, sizes, suggested, filter_by_size(labels, sizes, cutoff)

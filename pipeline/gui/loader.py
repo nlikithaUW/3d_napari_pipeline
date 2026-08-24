@@ -308,7 +308,7 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
         ("Vessel mesh", "run_vessel_mesh"),
         ("Surface curvature", "run_vessel_curvature"),
         ("3D centerline graph", "run_vessel_path_curvature"),
-        ("Clover Otsu", "run_clover"),
+        ("Clover threshold", "run_clover"),
         ("RF predict", "run_rf_predict"),
         ("RF post-process (split-merged)", "run_rf_postprocess"),
         ("Measure + export CSV", "run_measure"),

@@ -361,10 +361,14 @@ def build(state, viewer) -> Container:
             print("Build DAPI cell mesh first.", flush=True)
             return
         cs = state.get("cadh_state") or {}
-        cadh_cents_all = cs.get("centroids")
-        cadh_norms_all = cs.get("normals")
-        keep_mask = cs.get("keep_mask")
-        if cadh_cents_all is None or keep_mask is None or len(cadh_cents_all) == 0:
+        # The Cadherin tab computes centroids/normals lazily — they are the
+        # expensive half of that tab and this button is their only consumer, so
+        # they are no longer built on every run. Fetch through the accessor,
+        # inside the worker below, so a first-use computation does not freeze
+        # the GUI. `cadh_vertices` materialises centroids, normals and
+        # keep_mask together.
+        _cadh_vertices = state.get("cadh_vertices")
+        if cs.get("labels") is None:
             print("Run the Cadherin tab first.", flush=True)
             return
 
@@ -409,6 +413,15 @@ def build(state, viewer) -> Container:
                 dapi_cents = centroids_all
                 dapi_norms = normals_all
 
+            if callable(_cadh_vertices):
+                cadh_cents_all, cadh_norms_all, keep_mask = _cadh_vertices()
+            else:                                    # pre-lazy fallback
+                cadh_cents_all = cs.get("centroids")
+                cadh_norms_all = cs.get("normals")
+                keep_mask = cs.get("keep_mask")
+            if (cadh_cents_all is None or keep_mask is None
+                    or len(cadh_cents_all) == 0):
+                return None
             cadh_cents = cadh_cents_all[keep_mask]
             cadh_norms = cadh_norms_all[keep_mask]
 
@@ -447,6 +460,10 @@ def build(state, viewer) -> Container:
             return centroids, normals, faces, offset_centroids, outward, cadh_cents
 
         def _done(result):
+            if result is None:
+                print("Refine with cadherin: no cadherin vertices available — "
+                      "run the Cadherin tab first.", flush=True)
+                return
             centroids, normals, faces, offset_centroids, outward, cadh_pts = result
             n_cadh = len(cadh_pts)
             cadh_disp = (offset_centroids[-n_cadh:] if n_cadh else None)

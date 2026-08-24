@@ -24,7 +24,7 @@ from magicgui.widgets import (
 )
 from napari.qt.threading import thread_worker
 
-from ..denoise import auto_min_size_otsu, filter_by_size, label_and_sizes, otsu_mask
+from ..denoise import build_mask
 from ..fret import background_subtract
 from ..rf import AdhesionRF, instance_labels_3d
 from .widgets import (
@@ -252,26 +252,29 @@ def build(state, viewer) -> Container:
             w.start()
 
         if gate_clover and state["clover_state"]["labels"] is None:
-            print("gate_by_clover: clover mask not computed — running Otsu first ...",
-                  flush=True)
+            # Build it with the Clover tab's own settings, not a hard-coded
+            # Otsu. This used to be a second copy of that tab's threshold, so
+            # the mask the user tuned there and the mask the RF gated on could
+            # differ silently; both now go through `denoise.build_mask`.
+            get_params = state.get("clover_threshold_params")
+            cl_params = get_params() if callable(get_params) else {}
+            cl_method = cl_params.get("method", "otsu")
+            print(f"gate_by_clover: clover mask not computed — running "
+                  f"{cl_method} first ...", flush=True)
 
             @thread_worker
             def _run_otsu():
-                mask = otsu_mask(clover_raw)
-                labels, sizes = label_and_sizes(mask)
-                suggested = auto_min_size_otsu(sizes)
-                filtered = filter_by_size(labels, sizes, suggested)
-                return labels, sizes, suggested, filtered
+                return build_mask(clover_raw, state["scale"], **cl_params)
 
             def _otsu_done(result):
                 labels, sizes, suggested, filtered = result
                 state["clover_state"]["labels"] = labels
                 state["clover_state"]["sizes"] = sizes
-                state["clover_state"]["method"] = "Otsu"
+                state["clover_state"]["method"] = cl_method
                 clover_mask_layer = state.get("clover_mask_layer")
                 if clover_mask_layer is not None:
                     clover_mask_layer.data = pyramid_views(filtered, levels)
-                print(f"Clover Otsu done: {sizes.size} components, "
+                print(f"Clover {cl_method} done: {sizes.size} components, "
                       f"min_size={suggested}.", flush=True)
                 # _start_rf() launches the RF worker, which owns the `after`
                 # hand-off from here — hence `after_on_error` below, so the
@@ -279,11 +282,11 @@ def build(state, viewer) -> Container:
                 _start_rf()
 
             def _otsu_err(exc):
-                print(f"Clover Otsu error: {exc}", flush=True)
+                print(f"Clover threshold error: {exc}", flush=True)
 
             w = _run_otsu()
-            w.returned.connect(after_on_error(_otsu_done, after, "Clover Otsu"))
-            w.errored.connect(with_after(_otsu_err, after, "Clover Otsu"))
+            w.returned.connect(after_on_error(_otsu_done, after, "Clover threshold"))
+            w.errored.connect(with_after(_otsu_err, after, "Clover threshold"))
             w.start()
         else:
             _start_rf()

@@ -56,7 +56,7 @@ def after_on_error(handler, after=None, label: str = "step"):
     """Like ``with_after``, but fires ``after`` *only* when ``handler`` raises.
 
     For a handler whose success path launches a further worker that owns the
-    hand-off (e.g. auto-running Clover Otsu, then RF predict). Calling ``after``
+    hand-off (e.g. auto-running the Clover threshold, then RF predict). Calling ``after``
     unconditionally there would advance the chain the moment the second worker
     *started*, not when it finished. Calling it never would stall the chain if
     the handler died before launching that worker — hence this middle ground.

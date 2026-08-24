@@ -89,7 +89,7 @@ true of the code and data on that date and may not be true now.
 | [P25](#p25) | `fibroblast_count` never cleared — a failed image inherits the previous one's counts | S1 | **fixed** |
 | [P26](#p26) | Batch builds vessel meshes at widget defaults; the five new images do not match the reference | S2 | open |
 | [P27](#p27) | The centerline is a point set in raster order, not a traced path | S3 | **fixed** — the graph carries arc length by construction |
-| [P28](#p28) | The cadherin threshold discards real wall — the gaps have signal in them | S2 | open — replicated 5/6 2026-08-21; **the local threshold is innocent, the floor + `min_size` are not**; the continuous-field fix is measured and **does not work** |
+| [P28](#p28) | The cadherin threshold discards real wall — the gaps have signal in them | S2 | open — **downgraded 2026-08-24: nice-to-have for reconstruction, see History** — replicated 5/6 2026-08-21; **the local threshold is innocent, the floor + `min_size` are not**; the continuous-field fix is measured and **does not work** |
 | [P29](#p29) | A field-of-view notch fabricates a branch node; `dist_branch_um` is wrong for 18% of rows | S2 | **superseded** — no projection, no `fill_holes`; image 1 now reports its one junction |
 | [P30](#p30) | `build_mesh` silently treats an unknown method string as alpha 3D | S3 | open |
 | [P31](#p31) | `mesh_curvature` has no boundary gate — curvature biased near an open edge | S2 | open — **7.1% of vertices at `radius_um` 5.0** |
@@ -104,6 +104,7 @@ true of the code and data on that date and may not be true now.
 | [P32](#p32) | The fitted lumen leaks through the z faces on images 4 and 5, wrecking the graph topology | S2 | open — **diagnosed and warned, not fixed** |
 | [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
 | [P34](#p34) | Cadherin tab computed per-component centroids eagerly for an off-path consumer | S3 | **fixed** — 34.45 s -> 0 at `floor_k` 3.0 |
+| [P35](#p35) | `alpha 3D` hangs forever on a permissive mask, with no warning | S3 | open — **needs a point-count guard; `min_size` 12 is the workaround** |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -3617,6 +3618,50 @@ neighbourhood-aware recovery is untried.
   unrecorded: it is not a default, it is a measurement of each volume. No new
   entry is opened for this — the finding is that there is no defect here.
 
+- 2026-08-24 — **priority downgraded: for reconstruction this is a
+  nice-to-have, not a defect to fix.** Recorded on the user's judgement, and it
+  reframes what this entry is for.
+
+  Reconstruction is **asymmetric in precision vs recall**, and the two errors
+  are not comparable:
+
+  - a **false positive** (lumen speckle) *actively moves the surface* — it
+    pulls the level set toward itself, adds bumps, and can break orientation
+    outright by destroying the distance-transform contrast `lumen_core` rests
+    on;
+  - a **false negative** (dropped dim wall) leaves a patch locally
+    unconstrained, and Poisson **approximates** rather than interpolates, so it
+    bridges smoothly. The surface is still there — it is *inferred* at that
+    spot rather than *measured*.
+
+  So getting rid of signal far from the surface matters more than keeping
+  signal near it. Recovering the dim wall would not produce a different
+  surface, it would produce a **better-evidenced** one. That is worth having
+  and is not a prerequisite for anything.
+
+  This is why `min_size` deleting 59–85% of the dim wall is defensible rather
+  than scandalous, and it is consistent with every measurement on this entry:
+  the more permissive input collapsed Poisson coverage 61.6% → 7.8% and alpha
+  3D's 77.0% → 4.2%. **A user-side confirmation, 2026-08-24:** re-running with
+  a deliberately permissive cadherin filter (`sauvola_k` 0.43, `floor_k` 2.4)
+  produces a *worse* Poisson surface, exactly as this entry predicts — and
+  hangs alpha 3D outright, because 94% of the volume's 5 µm bins end up
+  occupied ([P35](#p35)).
+
+  **Two caveats keep it from being purely optional.**
+
+  1. **The missing wall is not random — it is depth-systematic.** Attenuation
+     means what is dropped is preferentially the *deep* wall
+     ([P03](#p03)). "Poisson bridges a missing patch" is fair for scattered
+     gaps; "Poisson bridges the entire far side" is a weaker claim. The far
+     wall is the least-evidenced part of every reconstruction and it will not
+     average out across images.
+  2. **Past a certain hole size the level set escapes**, and then it is not a
+     confidence question at all — it is [P32](#p32): on images 4 and 5 the
+     lumen leaks through the z faces, the graph invents junctions and 44–56% of
+     cross-sections clip. That is the one place recovering the wall would be
+     *necessary* rather than nice.
+
 - 2026-08-24 — **the floor's 15–41% and [P19](#p19)'s 59–85% are not
   independent: the first partly *causes* the second.** Ordering, in
   `gui/cadherin.py::_run`: the floor is ANDed in **before** `label_and_sizes`,
@@ -5226,6 +5271,75 @@ measured 1.44 s looped against 0.33 s batched for 200k 3x3 matrices, a free
 
 **Related:** [I08](#i08) (the sole consumer is itself a candidate for removal),
 [P19](#p19), [P28](#p28).
+
+---
+
+<a id="p35"></a>
+## P35 — `alpha 3D` hangs forever on a permissive mask, with no warning
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S3 (no wrong number — it never returns one) |
+| **Opened** | 2026-08-24 |
+| **Last verified** | 2026-08-24 (reference image) |
+| **Where** | `vessel_mesh.py::build_mesh` — `Delaunay(voxel_subsample(mask_to_points_um(...)))` |
+| **Affects** | `alpha 3D (points)` **and** `alpha 3D solid -> poisson` — `rasterize_alpha_solid` Delaunays the same cloud |
+
+`alpha 3D` does not see components; it sees **points**, one per occupied
+`subsample_um` bin. `voxel_subsample`'s docstring states the design range:
+"caps the count to ~1e4–5e4". A permissive cadherin mask blows straight through
+it, because speckle is spread over the whole volume rather than concentrated on
+a sheet — so the occupied-bin count saturates toward the *total* bin count
+instead of scaling with wall area.
+
+Reference image, extent 105.3 x 332.8 x 332.8 µm (~98,700 bins at
+`subsample_um` 5):
+
+| cadherin setting | voxels | components | points | % of all bins |
+|---|---|---|---|---|
+| `sauvola_k` 0.2, `floor_k` 5.0 (working) | 1,508,959 | 170,236 | **19,426** | 19.7% |
+| `sauvola_k` 0.2, `floor_k` 3.0 | 5,157,789 | 1,335,402 | 85,500 | 86.6% |
+| `sauvola_k` 0.43, `floor_k` 2.4 | 9,693,371 | 3,364,112 | **92,894** | **94.1%** |
+
+At 94% occupancy the input is **not a surface** — it is a solid block filling
+the field of view — so alpha shape has nothing to extract even in principle,
+and any `alpha3d_um` above the bin spacing bridges everything to everything.
+The points also sit on the 0.325 µm voxel lattice (`voxel_subsample` keeps an
+original voxel, not a bin centre), and a regular lattice is near worst-case
+input for Qhull: massively cospherical, so degeneracy handling degrades badly.
+Together: it hangs, indefinitely, with no output.
+
+**`min_size` is the lever, and it is dramatic**, because the offending material
+is 3.35M specks that contribute little mass but occupy most of the bins:
+
+| `min_size` | voxels | components | points | % of bins |
+|---|---|---|---|---|
+| 0 | 9,693,371 | 3,364,112 | 92,894 | 94.1% |
+| **12** | 5,147,101 | 10,262 | **14,906** | **15.1%** |
+| 200 | 4,870,230 | 458 | 13,353 | 13.5% |
+| 2000 | 4,654,348 | 59 | 12,148 | 12.3% |
+
+Wide plateau from 12 upward — [P19](#p19)'s point, visible directly.
+`gui/cadherin.py`'s `MIN_SIZE_FLOOR = 12` exists precisely for this and its
+comment already says the auto value "wrecks the downstream vessel alpha shape".
+
+**A second defect surfaced by the same run:** `auto_min_size_otsu` returns **2**
+at these settings, against the ~5 its comment records at stricter ones. **The
+auto-seed falls as the mask gets more permissive** — it degrades exactly when
+it is needed most, because speckle comes to dominate the log-size distribution
+it is cutting. It cannot be relied on to protect this path.
+
+**The fix wanted here is a guard, not a parameter.** `build_mesh` should refuse,
+or warn loudly, when the subsampled point count exceeds the documented range,
+instead of hanging silently. Turning an unbounded hang into a message naming
+`min_size` is cheap and is the whole of the defect.
+
+Note this does **not** argue for a permissive mask plus aggressive despeckling:
+[P28](#p28)'s 2026-08-24 History records that the permissive input produces a
+worse *surface* regardless, for reasons `min_size` does not touch.
+
+**Related:** [P19](#p19), [P28](#p28), [P20](#p20), [I06](#i06).
 
 ---
 

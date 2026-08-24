@@ -198,13 +198,33 @@ def build(state, viewer) -> Container:
     )
     def threshold_controls(
         method: str = METHOD_NIBLACK,
-        window_xy: int = 50,
-        niblack_k: float = 3.0,
+        window_xy: int = 53,
+        niblack_k: float = 2.0,
         sauvola_k: float = 0.2,
         bernsen_contrast: float = 0.15,
-        floor_k: float = 3.0,
+        floor_k: float = 1.0,
     ):
+        # This body is the "Apply threshold + label" button action. Visibility
+        # is driven separately off the `method` widget's `changed` signal, so
+        # switching method re-lays-out the panel WITHOUT launching a build.
         _run_cadherin()
+
+    # Which knob each method actually reads. `floor_k` is deliberately absent:
+    # it is ANDed in for EVERY method (see `_run`), so it is always live and
+    # always shown.
+    _METHOD_KNOBS = {
+        METHOD_NIBLACK: ("window_xy", "niblack_k"),
+        METHOD_SAUVOLA: ("window_xy", "sauvola_k"),
+        METHOD_BERNSEN: ("window_xy", "bernsen_contrast"),
+    }
+
+    def _sync_method_visibility(*_):
+        live = _METHOD_KNOBS.get(threshold_controls["method"].value, ())
+        for name in ("window_xy", "niblack_k", "sauvola_k", "bernsen_contrast"):
+            threshold_controls[name].visible = name in live
+
+    threshold_controls["method"].changed.connect(_sync_method_visibility)
+    _sync_method_visibility()
 
     def _run_cadherin(after=None):
         cadh_raw = state.get("cadh_raw")
@@ -376,7 +396,15 @@ def build(state, viewer) -> Container:
 
     # Chainable "Run all" step: force Sauvola, compute, save, then `after`.
     def _run_cadherin_step(after=None):
-        threshold_controls["method"].value = METHOD_SAUVOLA
+        # **Does NOT override `method` any more.** This forced METHOD_SAUVOLA,
+        # so every saved artifact was built with Sauvola while the tab's
+        # interactive default was Niblack — you tuned one method and shipped
+        # another. P36 then measured that Sauvola is *inert* here (its global
+        # normaliser makes the threshold fall below background, so `sauvola AND
+        # floor` is bit-identical to `floor` alone), which made the drift a
+        # correctness problem rather than an inconsistency: the shipped mask had
+        # no local adaptivity at all. The batch path now runs whatever the tab
+        # is set to, which is the `build_mesh` doctrine applied here.
         _run_cadherin(after=lambda: call_all(_save_cadh, after,
                                              label="run_cadherin"))
     state["run_cadherin"] = _run_cadherin_step

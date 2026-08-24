@@ -495,14 +495,10 @@ def parameter_warnings(params: dict) -> list[str]:
         notes.append(
             "WARN: --score-window-xy / --score-k-lo were given but "
             "--cadherin-field is 'mask', so neither is read.")
-    if method == METHOD_ALPHA3D:
-        a3, sub = float(mesh["alpha3d_um"]), float(mesh["subsample_um"])
-        if sub > 0 and a3 < 3.0 * sub:
-            notes.append(
-                f"WARN: alpha3d_um={a3} is below 3x subsample_um={sub}. Alpha "
-                f"has to exceed the point spacing simply to connect neighbours "
-                f"(docs/ISSUES.md P20), and this is the commonest route to "
-                f"'N verts, 0 faces'.")
+    if method in (METHOD_ALPHA3D, METHOD_ALPHA_POISSON):
+        # One implementation, in the core, shared with the napari tab.
+        notes.extend(check_alpha_vs_spacing(float(mesh["alpha3d_um"]),
+                                            float(mesh["subsample_um"])))
     return notes
 
 

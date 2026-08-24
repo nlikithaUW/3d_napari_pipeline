@@ -34,8 +34,11 @@ from ..saved_check import curvature_notes
 # parameters. Re-exported here (the ComboBox choices below read them, and other
 # modules import them from this one).
 from ..vessel_mesh import (  # noqa: F401  (re-export)
+    LIVE_PARAMS,
+    check_alpha_vs_spacing,
     METHOD_ALPHA2D,
     METHOD_ALPHA3D,
+    METHOD_ALPHA_POISSON,
     METHOD_POISSON,
     METHOD_POLAR,
     METHODS,
@@ -87,7 +90,7 @@ def build(state, viewer) -> Container:
         alpha_raster_um={"widget_type": "FloatSlider", "min": 0.325, "max": 6.0, "step": 0.325},
     )
     def controls(
-        method: str = METHOD_ALPHA3D,
+        method: str = METHOD_ALPHA_POISSON,
         orientation: str = "both (OR)",
         n_bins: int = 180,
         r_smooth_bins: int = 3,
@@ -103,6 +106,24 @@ def build(state, viewer) -> Container:
         alpha_raster_um: float = 2.0,
     ):
         _run_build()
+
+    # Every knob the build reads, in widget order. `LIVE_PARAMS` in the core is
+    # the authority for which of them a given method actually uses; anything
+    # else is inert for that method and is hidden rather than left on screen
+    # looking operative. Same contract as the Clover tab.
+    _BUILD_KNOBS = ("orientation", "n_bins", "r_smooth_bins", "alpha2d_um",
+                    "subsample_um", "alpha3d_um", "fill_lumen", "close_um",
+                    "min_component_um", "poisson_grid_um", "poisson_smooth_um",
+                    "poisson_iso_pct", "alpha_raster_um")
+
+    def _sync_method_visibility(*_):
+        live = LIVE_PARAMS.get(controls["method"].value, _BUILD_KNOBS)
+        for name in _BUILD_KNOBS:
+            controls[name].visible = name in live
+        # "Suggest alpha_um" only means anything where alpha3d_um is live.
+        suggest_w.visible = "alpha3d_um" in live
+
+    controls["method"].changed.connect(_sync_method_visibility)
 
     def _run_build(after=None):
         arr = _cadh_mask_array(state)
@@ -139,6 +160,12 @@ def build(state, viewer) -> Container:
             "poisson_iso_pct": poisson_iso_pct,
             "alpha_raster_um": alpha_raster_um}
 
+        # The same alpha-vs-spacing rule `batch_mesh` applies. It lived only
+        # in the headless path, so the rule was enforced there and silent here
+        # — the drift this project keeps paying for.
+        for n in check_alpha_vs_spacing(alpha3d_um, subsample_um):
+            print(f"  {n}", flush=True)
+
         @thread_worker
         def _run():
             # One call into the core module — the identical build the headless
@@ -172,27 +199,49 @@ def build(state, viewer) -> Container:
                       f"volume's subsample bins.", flush=True)
             for n in (extras.get("info") or {}).get("notes", []):
                 print(f"  {n}", flush=True)
-            if LAYER_NAME in viewer.layers:
-                viewer.layers.remove(LAYER_NAME)
+            # **The old layer is NOT removed until we know we can replace
+            # it.** It used to be dropped before these checks, so a failed
+            # build blanked the previous mesh and put nothing back — you lost
+            # the result you had and got no picture of why.
+            def _fail(msg, keep_verts=None):
+                print(msg, flush=True)
+                state["vessel_mesh_cache"] = {"verts": keep_verts,
+                                              "faces": None}
+
             if kind == "empty":
-                print("The cadherin mask is empty — run the Cadherin tab and "
-                      "tune its filter first.", flush=True)
-                state["vessel_mesh_cache"] = {"verts": None, "faces": None}
+                # Do not blame the cadherin mask unconditionally: on the
+                # alpha->poisson path `rasterize_alpha_solid` also returns an
+                # empty solid when `alpha3d_um` is too small for the point
+                # spacing, and the old message sent you to the wrong tab.
+                if method in (METHOD_ALPHA3D, METHOD_ALPHA_POISSON):
+                    n_pts = extras.get("n_points")
+                    _fail(f"Nothing to mesh: the alpha complex came out empty "
+                          f"at alpha3d_um={alpha3d_um:g}"
+                          + (f" over {n_pts:,} points" if n_pts else "")
+                          + f". Raise alpha3d_um — it must exceed the point "
+                            f"spacing, and ~3x subsample_um "
+                            f"(={3 * subsample_um:g}) is the working rule — or "
+                            f"check the Cadherin tab's mask.")
+                else:
+                    _fail("The cadherin mask is empty — run the Cadherin tab "
+                          "and tune its filter first.")
                 return
             if verts is None or len(verts) == 0:
-                print("No points/vertices to mesh.", flush=True)
-                state["vessel_mesh_cache"] = {"verts": None, "faces": None}
+                _fail("No points/vertices to mesh.")
                 return
             if faces is None or len(faces) == 0:
-                if method == METHOD_ALPHA3D:
-                    hint = "increase alpha3d_um"
+                if method in (METHOD_ALPHA3D, METHOD_ALPHA_POISSON):
+                    hint = (f"increase alpha3d_um (now {alpha3d_um:g}; it must "
+                            f"exceed the point spacing, ~3x subsample_um "
+                            f"= {3 * subsample_um:g})")
                 elif method == METHOD_POISSON:
                     hint = "lower poisson_iso_pct or raise poisson_smooth_um"
                 else:
                     hint = "loosen the fill / orientation"
-                print(f"{len(verts)} vertices but 0 faces — {hint}.", flush=True)
-                state["vessel_mesh_cache"] = {"verts": verts, "faces": None}
+                _fail(f"{len(verts)} vertices but 0 faces — {hint}.", verts)
                 return
+            if LAYER_NAME in viewer.layers:
+                viewer.layers.remove(LAYER_NAME)
             viewer.add_surface(
                 finite_surface(verts, faces, vals), name=LAYER_NAME,
                 colormap="viridis", blending="translucent", opacity=0.6,
@@ -698,6 +747,9 @@ def build(state, viewer) -> Container:
     state["run_vessel_path_curvature"] = lambda after=None: _compute_graph(
         after=lambda: call_all(_save_path_curv, after,
                                label="run_vessel_path_curvature"))
+
+    # Apply the visibility rule once at build time (`suggest_w` exists by now).
+    _sync_method_visibility()
 
     return (Container(widgets=[controls, suggest_w,
                               mesh_path_w, save_mesh_w, load_mesh_w,

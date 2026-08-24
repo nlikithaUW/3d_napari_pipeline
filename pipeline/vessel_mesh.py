@@ -82,6 +82,22 @@ _POINTS_SOFT = 50_000
 _OCCUPANCY_REFUSE = 0.5
 
 
+# Alpha must exceed the point spacing simply to connect neighbours. Lives here,
+# not in `batch_mesh`, because the GUI needs the identical check — it had none,
+# so the rule was enforced headlessly and silent interactively.
+ALPHA_SPACING_FACTOR = 3.0
+
+
+def check_alpha_vs_spacing(alpha_um: float, subsample_um: float) -> list[str]:
+    """Warn if `alpha3d_um` is too small for the point spacing. Pure."""
+    if subsample_um <= 0 or alpha_um >= ALPHA_SPACING_FACTOR * subsample_um:
+        return []
+    return [f"WARN: alpha3d_um={alpha_um:g} is below {ALPHA_SPACING_FACTOR:g}x "
+            f"subsample_um={subsample_um:g}. Alpha has to exceed the point "
+            f"spacing simply to connect neighbours (docs/ISSUES.md P20), and "
+            f"this is the commonest route to 'N verts, 0 faces'."]
+
+
 def check_point_cloud(n_points: int, mask_shape, scale, bin_um: float):
     """Is this cloud usable as an alpha-shape input? Pure; returns notes.
 

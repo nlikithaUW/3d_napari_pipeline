@@ -57,6 +57,78 @@ def mask_to_points_um(mask, voxel_zyx_um) -> np.ndarray:
     return coords * np.asarray(voxel_zyx_um, dtype=np.float64)
 
 
+class PointCloudTooDense(ValueError):
+    """The subsampled cloud is not a surface, so the alpha shape cannot run.
+
+    Raised rather than warned because the failure it replaces is an **unbounded
+    hang**, not a wrong number — a warning printed alongside a process that
+    never returns is no help (`docs/ISSUES.md` P35).
+    """
+
+
+# `voxel_subsample`'s docstring states the design range: "caps the count to
+# ~1e4-5e4". Above that Delaunay slows sharply; the points also sit on the
+# 0.325 µm voxel lattice (an original voxel is kept, not a bin centre), and a
+# regular lattice is near worst-case for Qhull — massively cospherical.
+_POINTS_SOFT = 50_000
+
+# The refusal is on **bin occupancy**, not on the count, because that is the
+# quantity that says *what went wrong* rather than merely how big it got. A
+# surface should touch a small fraction of the volume's bins; if it touches
+# most of them the input is a solid block and no `alpha3d_um` can extract a
+# surface from it. Measured on the reference image: 19.7% works, 94.1% hangs
+# forever (P35). Half is well clear of any real sheet and well below the
+# observed failure.
+_OCCUPANCY_REFUSE = 0.5
+
+
+def check_point_cloud(n_points: int, mask_shape, scale, bin_um: float):
+    """Is this cloud usable as an alpha-shape input? Pure; returns notes.
+
+    Returns ``(ok, occupancy, notes)`` — `ok` False means refuse. Split out
+    from `build_mesh` so it can be tested against a count without building a
+    volume, the same doctrine as `saved_check.py`.
+    """
+    notes: list[str] = []
+    bins = 1
+    for n, s in zip(mask_shape, scale):
+        bins *= max(1, int(np.ceil(n * float(s) / max(float(bin_um), 1e-9))))
+    occ = n_points / bins if bins else 0.0
+    if occ > _OCCUPANCY_REFUSE:
+        notes.append(
+            f"the subsampled cloud fills {occ:.0%} of the volume's "
+            f"{bin_um:g} µm bins ({n_points:,} of {bins:,}). That is a solid "
+            f"block, not a surface, so the alpha shape has nothing to extract "
+            f"and Delaunay will not finish. Raise the Cadherin tab's min_size "
+            f"(12 is the documented floor and is usually enough), or raise "
+            f"subsample_um. See docs/ISSUES.md P35.")
+        return False, occ, notes
+    if n_points > _POINTS_SOFT:
+        notes.append(
+            f"WARN: {n_points:,} points is above voxel_subsample's design "
+            f"range (~1e4-5e4); Delaunay may be very slow. Raise min_size or "
+            f"subsample_um if it does not return.")
+    return True, occ, notes
+
+
+def _guard_points(pts, mask_shape, scale, bin_um, extras=None):
+    """Refuse on `pts`, and record the check in `extras`.
+
+    **This module never prints** — notes go into `extras` for the caller to
+    format, the same contract as `measure_core` and `mesh_score`. The refusal
+    is the exception, and it carries its reason in the message, so a caller
+    that passes no `extras` still sees why it stopped.
+    """
+    ok, occ, notes = check_point_cloud(len(pts), mask_shape, scale, bin_um)
+    if extras is not None:
+        extras.setdefault("notes", []).extend(notes)
+        extras["point_cloud_occupancy"] = occ
+        extras["n_points"] = int(len(pts))
+    if not ok:
+        raise PointCloudTooDense(notes[0])
+    return pts
+
+
 def voxel_subsample(points_um, bin_um) -> np.ndarray:
     """Quantize points to a `bin_um` grid and keep one representative per cell.
 
@@ -523,8 +595,10 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
         # Still not adjudicated here: `mesh_score` returns a vector and never a
         # total, and the selection rule belongs to whoever runs the sweep
         # (`docs/ISSUES.md` I03). Alpha 3D remains the default.
-        pts = voxel_subsample(mask_to_points_um(field > 0, scale),
-                              float(subsample_um))
+        pts = _guard_points(
+            voxel_subsample(mask_to_points_um(field > 0, scale),
+                            float(subsample_um)),
+            field.shape, scale, float(subsample_um), extras)
         solid = rasterize_alpha_solid(pts, float(alpha3d_um), field.shape,
                                       scale, float(alpha_raster_um))
         if not solid.any():
@@ -548,8 +622,10 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
     # what an existing caller silently gets.
     # `mask_to_points_um` is `np.argwhere`, which on a float field would take
     # every nonzero voxel — the `> 0` is what stops that.
-    pts = voxel_subsample(mask_to_points_um(field > 0, scale),
-                          float(subsample_um))
+    pts = _guard_points(
+        voxel_subsample(mask_to_points_um(field > 0, scale),
+                        float(subsample_um)),
+        field.shape, scale, float(subsample_um), extras)
     faces = alpha_shape_faces(pts, float(alpha3d_um))
     faces = filter_faces_by_extent(pts, faces, float(min_component_um))
     vals = (np.linalg.norm(pts - pts.mean(0), axis=1)

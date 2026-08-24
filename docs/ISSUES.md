@@ -104,7 +104,7 @@ true of the code and data on that date and may not be true now.
 | [P32](#p32) | The fitted lumen leaks through the z faces on images 4 and 5, wrecking the graph topology | S2 | open — **diagnosed and warned, not fixed** |
 | [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
 | [P34](#p34) | Cadherin tab computed per-component centroids eagerly for an off-path consumer | S3 | **fixed** — 34.45 s -> 0 at `floor_k` 3.0 |
-| [P35](#p35) | `alpha 3D` hangs forever on a permissive mask, with no warning | S3 | open — **needs a point-count guard; `min_size` 12 is the workaround** |
+| [P35](#p35) | `alpha 3D` hangs forever on a permissive mask, with no warning | S3 | **mitigated** — guard landed 2026-08-24; it refuses instead of hanging |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -5334,6 +5334,24 @@ it is cutting. It cannot be relied on to protect this path.
 or warn loudly, when the subsampled point count exceeds the documented range,
 instead of hanging silently. Turning an unbounded hang into a message naming
 `min_size` is cheap and is the whole of the defect.
+
+> **Guard landed 2026-08-24.** `vessel_mesh.check_point_cloud` (pure, testable
+> against a count with no volume built) plus `_guard_points` at **both**
+> `Delaunay` entry points — `alpha 3D` and `alpha 3D solid -> poisson`, which
+> share the cloud. It raises `PointCloudTooDense`.
+>
+> **The refusal is on bin occupancy, not on the count**, because occupancy says
+> *what* went wrong rather than merely how big it got: a surface touches a small
+> fraction of the volume's bins, and something touching most of them is a solid
+> block from which no `alpha3d_um` can extract a surface. Threshold 50%, against
+> 19.7% measured working and 94.1% measured hanging. The count keeps a separate
+> soft **warning** at 50,000, `voxel_subsample`'s documented ceiling.
+>
+> Verified both ways on synthetic volumes: a hollow spherical shell passes at
+> 8.9% occupancy and meshes normally; a solid block is refused at 100%. The
+> module stays **print-free** — notes go into `extras` for the caller, the
+> `measure_core`/`mesh_score` contract — and the refusal carries its reason in
+> the exception, so a caller passing no `extras` still learns why.
 
 Note this does **not** argue for a permissive mask plus aggressive despeckling:
 [P28](#p28)'s 2026-08-24 History records that the permissive input produces a

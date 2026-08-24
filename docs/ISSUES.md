@@ -105,7 +105,7 @@ true of the code and data on that date and may not be true now.
 | [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
 | [P34](#p34) | Cadherin tab computed per-component centroids eagerly for an off-path consumer | S3 | **fixed** — 34.45 s -> 0 at `floor_k` 3.0 |
 | [P35](#p35) | `alpha 3D` hangs forever on a permissive mask, with no warning | S3 | **mitigated** — guard landed 2026-08-24; it refuses instead of hanging |
-| [P36](#p36) | The cadherin "local threshold" is inert: the mask is a global threshold | **S2** | open — **`sauvola AND floor` is bit-identical to `floor`; `sauvola_k` is a dead knob** |
+| [P36](#p36) | The cadherin "local threshold" is inert: the mask is a global threshold | **S2** | open — **Sauvola is inert and the batch path forces it; Niblack works and is only the interactive default** |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -5535,6 +5535,51 @@ change it silently**: every cadherin mask, every vessel surface and every
 geometry column on disk was built through the current behaviour, so a change
 invalidates them, and `sauvola_k` becoming live means the recorded 0.2 stops
 meaning what it meant.
+
+**Niblack is NOT inert — only Sauvola is**, and the batch path uses the broken
+one. `niblack_mask` is ``vol > m + k·s`` with **no global normaliser at all**,
+so nothing degenerates:
+
+| method | k | passes alone | % of volume |
+|---|---|---|---|
+| sauvola | 0.20 | 339,738,527 | **100.0000%** |
+| sauvola | 0.43 | 339,738,623 | **100.0000%** |
+| niblack | 1.00 | 46,503,236 | 13.69% |
+| niblack | 2.00 | 9,443,248 | 2.78% |
+| niblack | 3.00 | 2,034,588 | 0.60% |
+| niblack | 4.00 | 639,401 | 0.19% |
+
+ANDed with the floor, Niblack does substantial work where Sauvola does none:
+at `floor_k` 5.0 it takes 1,508,959 → 980,683, and at `floor_k` 3.0
+**5,157,789 → 1,605,014 (69% removed)**.
+
+**The drift makes this worse than a dead knob.** `gui/cadherin.py:200` sets the
+tab's interactive default to **Niblack**, but `:379` — `_run_cadherin_step`,
+which is what `state["run_cadherin"]` and therefore `batch.py`'s pipeline step
+call — **forces Sauvola**. So the method you tune with works and the method that
+builds every saved artifact does not. `denoise.py`'s own docstring records the
+consequence without drawing it: "every cadherin mask in this project was built
+with Sauvola". This was noticed earlier as a tidy-up; it is not one.
+
+**A lead worth testing, and the first in this area not already measured to
+fail.** Two compositions reach almost the same voxel count by opposite routes:
+
+| | voxels |
+|---|---|
+| shipped: `floor_k` 5.0 + inert Sauvola | 1,508,959 |
+| alternative: `floor_k` 3.0 + Niblack k=3.0 | 1,605,014 |
+
+The shipped mask is a strict global cut with no local suppression. The
+alternative admits far more — including the dim wall [P28](#p28) is about — and
+strips speckle **locally**. That is structurally the same fix [I07](#i07)
+applied to the clover gate. **Every previous attempt at a more permissive
+cadherin mask was made with the local threshold switched off**, which is why
+they all degraded the reconstruction.
+
+**This is not a claim that it is better.** Equal counts say nothing about
+*which* voxels, and by [P28](#p28)'s precision-over-recall asymmetry only the
+surface can judge. The test is `mesh_score`'s four numbers on a reconstruction
+from each composition, plus the shallow/deep acceptance ratio.
 
 **Related:** [P28](#p28), [P19](#p19), [P03](#p03), [I07](#i07), [P26](#p26).
 

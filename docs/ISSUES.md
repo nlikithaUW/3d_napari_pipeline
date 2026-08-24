@@ -3475,6 +3475,52 @@ robust signature so far is **positional**: it sits 0–1 µm from the wall radiu
 its neighbours report. Nothing in the pipeline currently uses that, and a
 neighbourhood-aware recovery is untried.
 
+**A second untried candidate, recorded 2026-08-24: sheetness.** Note what the
+three failed discriminators have in common — **all three are intensity or
+size**. The wall's remaining distinguishing property is its *shape*: it is a
+**sheet**, and lumen speckle is an isotropic **blob**. That is local geometry,
+and it is neither of the axes already ruled out.
+
+The repo already computes it. `vessel_poisson.sheet_normals` builds the
+structure tensor ``J_ab = G_σ * (∂_a d)(∂_b d)`` and returns
+``sheetness = (λ3 − λ2)/λ3`` in [0, 1] — large when the density varies in one
+direction only (a sheet), near zero when it varies equally in all (a speck).
+Same family as the Frangi/Sato "plate-like" measures; standard technique, not a
+new invention.
+
+**It needs no surface, and that is the point** — it is gradients and a
+smoothing kernel, nothing else. It *looks* like it needs one only because it
+currently lives inside `reconstruct`, on the coarse occupancy grid, after
+masking; that is where it happened to be needed (it supplies the normals the
+Poisson solve orients, with sheetness as their confidence weight), not a
+dependency. **The place to compute it for this purpose is upstream of the
+threshold, on the raw intensity**, which also removes any dependence on the
+mask being right.
+
+**Two reasons it may fail, both empirical:**
+
+- **Scale.** The structure tensor needs a neighbourhood to see planarity. The
+  existing call uses σ = `poisson_smooth_um` = 5 µm on a 2 µm grid; a 1–2 voxel
+  speck at 0.325 µm is far below that and may simply vanish into the smoothing
+  rather than be classified isotropic. A σ small enough to resolve specks may
+  be too small to read the wall as a plane. **There may be no σ where both
+  hold.**
+- Computed on the *mask* it inherits the mask's errors, which is the argument
+  for computing it on the raw channel instead.
+
+**The test is cheap and needs no reconstruction**, and it is the same test this
+entry already ran for brightness and for component size: take the gap-wall
+peaks recorded here as real wall and the speckle `min_size` drops, compute
+sheetness on the raw channel, and ask whether those two populations separate.
+Brightness overlapped; size overlapped; this is one number on existing data.
+
+**Priority: low, and deliberately so.** Under the precision-over-recall
+asymmetry recorded in this entry's 2026-08-24 History, recovering the dim wall
+buys a better-*evidenced* surface rather than a different one. This is the
+candidate to reach for **if** the far wall's evidence ever becomes load-bearing
+— e.g. for [P32](#p32), where missing wall stops being a confidence question
+and lets the level set escape.
+
 **History**
 - 2026-08-13 — opened. Found while checking a claim made earlier the same day
   that the bean-shaped cross-section at a branch end was "missing wall". It is

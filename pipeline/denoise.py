@@ -114,8 +114,11 @@ def niblack_mask(vol: np.ndarray, window_xy: int, k: float, voxel_zyx_um) -> np.
     ``m + k·s`` so that it and `local_contrast_score` are the same statistic by
     construction. The two forms are algebraically identical and differ in
     float32 only at the boundary; no saved artifact is affected either way,
-    because every cadherin mask in this project was built with Sauvola
-    (`batch.py`, `gui/cadherin.py::_run_cadherin_step`).
+    because every cadherin mask in this project **up to 2026-08-24** was built
+    with Sauvola: `_run_cadherin_step` forced it, overriding the tab's Niblack
+    default, for both `batch.py` and the GUI's "Run all". That override is gone
+    (P36 measured Sauvola as *inert* here), so masks built after that date use
+    whatever the tab is set to.
     """
     z = _local_zscore(vol, window_xy, voxel_zyx_um)
     return (z > np.float32(k)).astype(np.uint8)

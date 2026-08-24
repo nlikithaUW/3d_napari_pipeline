@@ -59,7 +59,7 @@ DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
 _RUN_STEPS = [
     ("DAPI + components", "run_dapi"),
     ("Fibroblast count", "run_fibroblasts"),
-    ("VE-Cadherin (Sauvola)", "run_cadherin"),
+    ("VE-Cadherin threshold", "run_cadherin"),
     ("Vessel mesh", "run_vessel_mesh"),
     ("Surface curvature", "run_vessel_curvature"),
     ("3D centerline graph", "run_vessel_path_curvature"),

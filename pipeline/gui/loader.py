@@ -304,7 +304,7 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
     _RUN_STEPS = [
         ("DAPI + components", "run_dapi"),
         ("Fibroblast count", "run_fibroblasts"),
-        ("VE-Cadherin (Sauvola)", "run_cadherin"),
+        ("VE-Cadherin threshold", "run_cadherin"),
         ("Vessel mesh", "run_vessel_mesh"),
         ("Surface curvature", "run_vessel_curvature"),
         ("3D centerline graph", "run_vessel_path_curvature"),

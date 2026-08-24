@@ -131,8 +131,17 @@ MESH_DEFAULTS = {
     "n_bins": 180,
     "r_smooth_bins": 3,
     "alpha2d_um": 8.0,
-    "subsample_um": 1.0,
-    "alpha3d_um": 10.0,
+    # 5.0, not 1.0 — the value every mesh on disk was built at. At 1.0 the
+    # cloud is ~25x denser, which is how a routine build reaches 330k points
+    # and 2.2M tets: far outside `voxel_subsample`'s stated 1e4-5e4 range, and
+    # the regime where the circumradius distribution degenerates (P35).
+    "subsample_um": 5.0,
+    # 15.0, not 10.0: every mesh on disk was built at 15.0, and `batch_mesh`
+    # runs at these defaults, so a mismatch is the [P26] hazard — the shipped
+    # default silently producing something other than the recorded result. It
+    # is also the smallest value satisfying the >=3x subsample_um rule checked
+    # in `mesh_notes` at the recorded subsample_um of 5.0.
+    "alpha3d_um": 15.0,
     "fill_lumen": True,
     "close_um": 1.0,
     "min_component_um": 50.0,

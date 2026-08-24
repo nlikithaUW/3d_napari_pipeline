@@ -105,6 +105,7 @@ true of the code and data on that date and may not be true now.
 | [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
 | [P34](#p34) | Cadherin tab computed per-component centroids eagerly for an off-path consumer | S3 | **fixed** — 34.45 s -> 0 at `floor_k` 3.0 |
 | [P35](#p35) | `alpha 3D` hangs forever on a permissive mask, with no warning | S3 | **mitigated** — guard landed 2026-08-24; it refuses instead of hanging |
+| [P36](#p36) | The cadherin "local threshold" is inert: the mask is a global threshold | **S2** | open — **`sauvola AND floor` is bit-identical to `floor`; `sauvola_k` is a dead knob** |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -3457,6 +3458,13 @@ buys the same wall *and* the same speckle, which is exactly the trade the
 paragraph claimed it escaped. Built, measured, and it degrades every
 reconstruction. See the History.
 
+> **Reworded by [P36](#p36), 2026-08-24.** "The local threshold deletes none of
+> this wall" is numerically right and the *reading* is wrong: it deletes none of
+> it because it is **inert** — `sauvola AND floor` is bit-identical to `floor`
+> alone, and `sauvola_k` is a dead knob. "Correctly permissive" and "does
+> nothing" are different claims. The attribution to the floor and `min_size`
+> below is unaffected; it is now the whole story rather than most of it.
+
 **Related:** [P19](#p19) — this is a stronger charge than that entry makes. P19
 argues the size floor is an unjustified constant sitting on a wide plateau; this
 says the binarisation upstream of it is losing real wall regardless of where the
@@ -5446,6 +5454,89 @@ Note this does **not** argue for a permissive mask plus aggressive despeckling:
 worse *surface* regardless, for reasons `min_size` does not touch.
 
 **Related:** [P19](#p19), [P28](#p28), [P20](#p20), [I06](#i06).
+
+---
+
+<a id="p36"></a>
+## P36 — The cadherin "local threshold" is inert: the mask is a global threshold
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S2 (S1 if the depth bias below is confirmed) |
+| **Opened** | 2026-08-24 |
+| **Last verified** | 2026-08-24 (reference image, bit-identical over 6 parameter combinations) |
+| **Where** | `pipeline/denoise.py::sauvola_mask` — `r = max(0.5 * (vol.max() - vol.min()), 1e-6)` |
+| **Affects** | every cadherin mask, and therefore every vessel surface, centerline graph and geometry column derived from one |
+
+**`sauvola AND floor` is bit-identical to `floor` alone**, at every setting
+tested. The Sauvola local threshold contributes nothing:
+
+| `sauvola_k` | `floor_k` | floor only | Sauvola AND floor | identical |
+|---|---|---|---|---|
+| 0.20 | 5.0 | 1,508,959 | 1,508,959 | **True** |
+| 0.43 | 5.0 | 1,508,959 | 1,508,959 | **True** |
+| 0.20 | 3.0 | 5,157,789 | 5,157,789 | **True** |
+| 0.43 | 3.0 | 5,157,789 | 5,157,789 | **True** |
+| 0.20 | 2.4 | 9,693,371 | 9,693,371 | **True** |
+| 0.43 | 2.4 | 9,693,371 | 9,693,371 | **True** |
+
+`sauvola_k` is a **dead knob**: 0.2 and 0.43 give the same mask to the voxel.
+
+**The cause is the normaliser.** Classic Sauvola divides by `R`, the dynamic
+range of grey levels, so that `s/R` lands in [0, 1] and the adaptive term
+actually modulates. This uses **half the global intensity range**, set by the
+single brightest voxel in the stack:
+
+| | reference image |
+|---|---|
+| volume range | 170 – 7,725 → **R = 3,777.5** |
+| median local mean `m` | 493.4 |
+| median local std `s` | **16.1** |
+| median `s/R` | **0.0043** |
+
+The adaptive term therefore contributes 0.4% of `k`, and the formula collapses
+to ``thr ≈ m·(1 − k)`` — measured at 1.000 / 0.900 / 0.801 / 0.701 / 0.572 for
+k = 0 / 0.1 / 0.2 / 0.3 / 0.43. At the default k = 0.2 that is **0.8 × the local
+mean, which is below the background level itself**: background over the 51-voxel
+window is ~490 ± 16, so a voxel must fall ~6σ below its own neighbourhood mean
+to be rejected. **97 voxels out of 339,738,624 manage it.** At k ≥ 0.3 it passes
+all but one voxel in the volume.
+
+The brightest voxel is ~15x the typical local mean and alone sets `R`, so this
+is also not reproducible across images with different dynamic range — the same
+`k` means a different threshold depending on each volume's hottest pixel.
+
+**Two consequences.**
+
+1. **[P28](#p28)'s exoneration of the local threshold needs rewording, not
+   retracting.** It records that the local threshold deletes **0.000** of the
+   gap-wall peaks and concludes it is "innocent". The number is right; the
+   reading is not. It deletes 0.000 because it deletes *essentially nothing at
+   all*. "Correctly permissive" and "inert" are different claims and only the
+   second is true. P28's attribution of the loss to the floor and `min_size`
+   stands — indeed it is now the whole story.
+2. **The cadherin mask therefore has no local adaptivity, and inherits the
+   defect [P03](#p03) describes.** One scalar over a stack with a systematic
+   depth gradient necessarily over-accepts shallow and under-accepts deep. This
+   is exactly the position the clover gate was in before [I07](#i07), where the
+   measured acceptance ratio was **3.06** shallow-third to deep-third. **If it
+   holds here, a substantial part of P28's missing 59–85% of dim wall is not
+   "dim wall" at all but the deep wall, lost to a global cut.**
+
+**The test, not yet run**, is the one [I07](#i07) used: accepted fraction of the
+floor, shallow third vs deep third, on the substrate channel. It needs no
+reconstruction and takes minutes.
+
+**The fix** is to give `sauvola_mask` a normaliser on the scale of the local
+variation rather than half the global range — a robust range (e.g. 1st–99th
+percentile) at minimum, since a single hot voxel currently sets it. **Do not
+change it silently**: every cadherin mask, every vessel surface and every
+geometry column on disk was built through the current behaviour, so a change
+invalidates them, and `sauvola_k` becoming live means the recorded 0.2 stops
+meaning what it meant.
+
+**Related:** [P28](#p28), [P19](#p19), [P03](#p03), [I07](#i07), [P26](#p26).
 
 ---
 

@@ -159,6 +159,17 @@ def build(state, viewer) -> Container:
         def _done(result):
             (kind, verts, faces, vals), extras = result
             normals = extras.get("normals")
+            # `extras["notes"]` is build_mesh's own channel (the point-cloud
+            # guard, P35); `extras["info"]["notes"]` is vessel_poisson's. Both
+            # must be printed — the guard's soft warning went into a dict
+            # nothing read when it was first added, which is exactly the silent
+            # failure it exists to prevent.
+            for n in extras.get("notes", []):
+                print(f"  {n}", flush=True)
+            if extras.get("n_points") is not None:
+                print(f"  point cloud: {extras['n_points']:,} points, "
+                      f"{extras.get('point_cloud_occupancy', 0):.1%} of the "
+                      f"volume's subsample bins.", flush=True)
             for n in (extras.get("info") or {}).get("notes", []):
                 print(f"  {n}", flush=True)
             if LAYER_NAME in viewer.layers:

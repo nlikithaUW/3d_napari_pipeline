@@ -207,6 +207,13 @@ def build(state, viewer) -> Container:
                 print(msg, flush=True)
                 state["vessel_mesh_cache"] = {"verts": keep_verts,
                                               "faces": None}
+                # **Drop the lumen field too.** It is set below, after these
+                # early returns, so a failed build used to leave the PREVIOUS
+                # build's field in `state` — and the centerline graph reads it.
+                # In a batch that means one image's graph is built on another
+                # image's lumen and saved under the failed image's name, which
+                # is what happened on 2026-08-24 (P38).
+                state["vessel_lumen_field"] = None
 
             if kind == "empty":
                 # Do not blame the cadherin mask unconditionally: on the

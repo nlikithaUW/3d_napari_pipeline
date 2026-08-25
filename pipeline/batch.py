@@ -273,6 +273,9 @@ def main() -> None:
         for k in ("dapi_raw", "cadh_raw", "clover_raw", "ruby_raw",
                   "clover_raw_native", "ruby_raw_native", "force_vol",
                   "adhesion_proba", "clover_ruby_ratio", "vessel_graph",
+                  # Belt and braces with `_fail` above: nothing derived from
+                  # one image may survive into the next (P38).
+                  "vessel_lumen_field", "vessel_mesh_cache",
                   "measure_result", "dapi_mask_layer", "cadh_mask_layer",
                   "clover_mask_layer", "fibroblast_count"):
             state[k] = None

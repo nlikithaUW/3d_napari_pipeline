@@ -107,6 +107,7 @@ true of the code and data on that date and may not be true now.
 | [P35](#p35) | `alpha 3D` hangs forever on a permissive mask, with no warning | S3 | **mitigated** — guard landed 2026-08-24; it refuses instead of hanging |
 | [P36](#p36) | The cadherin "local threshold" is inert: the mask is a global threshold | **S2** | open — Sauvola inert; **the forcing override is fixed 2026-08-24**, Niblack is now the default everywhere |
 | [P37](#p37) | The loader overwrote `floor_k` on every load, so the tab default never ran | S2 | **fixed** 2026-08-24 |
+| [P38](#p38) | A failed mesh build left the previous image's lumen field; the graph used it | **S1** | **fixed** 2026-08-24 — one saved graph was from the wrong image |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -5625,6 +5626,66 @@ deliberate choice, so it is no longer imposed. `suggest_floor_k` remains, as an
 explicit **"Suggest floor_k"** button that prints what it set.
 
 **Related:** [P26](#p26), [P36](#p36), [P28](#p28).
+
+---
+
+<a id="p38"></a>
+## P38 — A failed vessel-mesh build left the previous image's lumen field in `state`, and the centerline graph used it
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-24 |
+| **Severity** | **S1** — a saved artifact was computed from a different image |
+| **Opened** | 2026-08-24 |
+| **Where** | `gui/vessel_mesh.py::_done` (the failure early-returns) and `batch.py::_free_image_memory` |
+| **Affects** | `vessel_graph.npz` for any image whose mesh build failed inside a multi-image batch |
+
+`state["vessel_lumen_field"]` is set in `_done` **after** the empty/no-faces
+early returns, and it was **not** in `batch.py`'s inter-image clear list. So a
+failed build left the *previous* build's field in `state`, and the centerline
+graph — which reads exactly that field — built on it and saved under the failed
+image's name.
+
+**Observed, not theorised.** In the 2026-08-24 six-image rebuild,
+`V3_..._09step_001`'s mesh refused:
+
+> `WARN: no lumen core found — 1 candidate region(s), none of which both avoided
+> the z faces and reached 20.0 µm from a wall. ... Refusing to guess an
+> orientation.` → `No points/vertices to mesh.`
+
+and the very next step reported `Centerline graph: 418 points on 1 edge(s), 0
+junction(s), ... 409 µm of vessel` and saved it. Those numbers are image 2's
+vessel. **Nothing in the output looks wrong** — that is the danger: a plausible
+graph, on the wrong image, under the right filename.
+
+`vessel_poisson.lumen_core`'s refusal did its job. The bug is that a refusal
+downstream of it was not propagated.
+
+**Fixed in both places**: `_fail` now clears `vessel_lumen_field`, and
+`batch.py` clears it (and `vessel_mesh_cache`) between images.
+
+The contaminated artifact is quarantined as
+`vessel_graph.npz.CONTAMINATED_P38` rather than deleted, so the failure stays
+inspectable.
+
+**Two things this exposes, both still open.**
+
+1. **The new cadherin defaults break `lumen_core` on image 3.**
+   `docs/DIRECTION.md` §8A.3 recorded that it "refuses on none of the six" —
+   that was with the old, stricter mask. With Niblack k=2.0 / floor_k=1.0 the
+   lumen no longer reaches 4 x `poisson_smooth_um` on `09step_001`. So the
+   rebuild produced 5 usable meshes, not 6. Either that image needs its own
+   `poisson_smooth_um`, or the defaults are wrong for it — and per
+   [P26](#p26) a per-image parameter has to be recorded, not eyeballed.
+2. **`batch.py`'s mesh step writes no `vessel_recon.json`.** Only
+   `batch_mesh.py` does. So a mesh built through `batch.py` is unprovenanced —
+   and worse, it can *inherit a stale JSON from an earlier `batch_mesh` run*,
+   which is what happened here: a 20:09 mesh sat beside a 12:38 JSON naming a
+   different method. `saved_check` warns when the JSON is **missing**, so this
+   case passes the check while lying. The stale file was deleted; the writer is
+   not yet fixed.
+
+**Related:** [P26](#p26), [P32](#p32), [I04](#i04).
 
 ---
 

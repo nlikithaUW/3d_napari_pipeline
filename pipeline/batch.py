@@ -56,17 +56,53 @@ DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
 # curvature, DAPI, cadherin, fibroblast count) in each <stem>_saved folder;
 # run Measure + export yourself per image in the GUI (Load all saved → Measure
 # → export), which works fine there.
+# (short name, label, state key). The short name is what `--steps` takes; it is
+# stable and is what appears in scripts and in `docs/ISSUES.md`, so renaming the
+# human label does not break a recorded invocation.
 _RUN_STEPS = [
-    ("DAPI + components", "run_dapi"),
-    ("Fibroblast count", "run_fibroblasts"),
-    ("VE-Cadherin threshold", "run_cadherin"),
-    ("Vessel mesh", "run_vessel_mesh"),
-    ("Surface curvature", "run_vessel_curvature"),
-    ("3D centerline graph", "run_vessel_path_curvature"),
-    ("Clover threshold", "run_clover"),
-    ("RF predict", "run_rf_predict"),
-    ("RF post-process (split-merged)", "run_rf_postprocess"),
+    ("dapi", "DAPI + components", "run_dapi"),
+    ("fibroblasts", "Fibroblast count", "run_fibroblasts"),
+    ("cadherin", "VE-Cadherin threshold", "run_cadherin"),
+    ("mesh", "Vessel mesh", "run_vessel_mesh"),
+    ("curvature", "Surface curvature", "run_vessel_curvature"),
+    ("graph", "3D centerline graph", "run_vessel_path_curvature"),
+    ("clover", "Clover threshold", "run_clover"),
+    ("rf", "RF predict", "run_rf_predict"),
+    ("postprocess", "RF post-process (split-merged)", "run_rf_postprocess"),
 ]
+STEP_NAMES = [s[0] for s in _RUN_STEPS]
+
+
+def resolve_steps(spec: str) -> list[str]:
+    """Parse a `--steps` spec into short names, in pipeline order.
+
+    Accepts "all", a comma-separated list, or a "first:last" range. Order is
+    always the pipeline's own, never the order given — a later step consuming
+    an earlier one's output cannot be run first by typo.
+
+    **Every step still reads the tab defaults**, so re-running one is only
+    reproducible if the defaults have not moved since (`docs/ISSUES.md` P26).
+    """
+    spec = (spec or "all").strip()
+    if spec in ("", "all"):
+        return list(STEP_NAMES)
+    if ":" in spec:
+        lo, _, hi = spec.partition(":")
+        lo, hi = lo.strip() or STEP_NAMES[0], hi.strip() or STEP_NAMES[-1]
+        for n in (lo, hi):
+            if n not in STEP_NAMES:
+                raise ValueError(f"unknown step {n!r}; expected one of "
+                                 f"{', '.join(STEP_NAMES)}")
+        i, j = STEP_NAMES.index(lo), STEP_NAMES.index(hi)
+        if i > j:
+            raise ValueError(f"empty range {spec!r}: {lo} comes after {hi}")
+        return STEP_NAMES[i:j + 1]
+    want = {s.strip() for s in spec.split(",") if s.strip()}
+    bad = want - set(STEP_NAMES)
+    if bad:
+        raise ValueError(f"unknown step(s) {', '.join(sorted(bad))}; expected "
+                         f"one of {', '.join(STEP_NAMES)}")
+    return [n for n in STEP_NAMES if n in want]
 
 
 def _fresh_state() -> dict:
@@ -114,11 +150,22 @@ def main() -> None:
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip images that already have a measurements CSV in "
                          "their <stem>_saved folder")
+    ap.add_argument("--steps", default="all",
+                    help="which pipeline steps to run: 'all' (default), a "
+                         "comma-separated list, or a 'first:last' range. "
+                         "Steps: " + ", ".join(STEP_NAMES) + ". Order is always "
+                         "the pipeline's own. NOTE: a step re-run alone still "
+                         "reads the tab defaults, so it reproduces an earlier "
+                         "run only if those have not changed (ISSUES.md P26).")
     ap.add_argument("--timeout", type=float, default=0.0,
                     help="per-image timeout in seconds; if an image takes longer "
                          "(hang), it is skipped and the batch continues. "
                          "0 = no timeout (default).")
     args = ap.parse_args()
+    try:
+        wanted_steps = resolve_steps(args.steps)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     images = sorted(Path(args.dir).glob(args.pattern))
     if args.skip_existing:
@@ -137,6 +184,9 @@ def main() -> None:
               f"(pattern={args.pattern}, skip_existing={args.skip_existing})",
               flush=True)
         sys.exit(1)
+    if wanted_steps != STEP_NAMES:
+        print(f"Batch: running {len(wanted_steps)}/{len(STEP_NAMES)} steps — "
+              f"{', '.join(wanted_steps)}", flush=True)
     print(f"Batch: {len(images)} image(s) in {args.dir}\n"
           f"  model={args.model}\n  params={args.params}\n  lut={args.lut}\n",
           flush=True)
@@ -293,8 +343,8 @@ def main() -> None:
             if not state.get("raw_layers"):
                 _advance(i, "load failed; skipped")
                 return
-            steps = [(label, state[key]) for label, key in _RUN_STEPS
-                     if state.get(key)]
+            steps = [(label, state[key]) for name, label, key in _RUN_STEPS
+                     if name in wanted_steps and state.get(key)]
 
             def _next(j: int):
                 if j >= len(steps):

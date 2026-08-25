@@ -316,12 +316,32 @@ def build(state, viewer) -> Container:
         w.start()
 
     def _seed_floor():
+        """Set `floor_k` from `suggest_floor_k` — **explicit, not automatic.**
+
+        This used to run from the loader on every image load, so it silently
+        overwrote whatever `floor_k` was set to: the tab's default never
+        survived to the build, and a value typed for the previous image was
+        replaced without a word. It is the P26 hazard in miniature — the
+        shipped default was not what ran (measured 2026-08-24: the default said
+        1.0, the build logged `floor_k=4.595517`).
+
+        Auto-seeding made sense while the floor was the *primary* gate, which
+        is what it was for as long as the local threshold was Sauvola and
+        therefore inert (P36). With Niblack live the floor is a weak backstop
+        and its value is a deliberate choice, so it is no longer imposed.
+        """
         raw = state.get("cadh_raw")
         if raw is None:
             return
         threshold_controls.floor_k.value = min(
             suggest_floor_k(raw), threshold_controls.floor_k.max
         )
+        print(f"Cadherin: floor_k seeded to "
+              f"{threshold_controls.floor_k.value:.2f} from suggest_floor_k.",
+              flush=True)
+
+    seed_floor_w = PushButton(text="Suggest floor_k")
+    seed_floor_w.changed.connect(lambda *_: _seed_floor())
     state["seed_cadh_floor"] = _seed_floor
 
     # ---- Save / load the cadherin components (mask + labels for re-tuning) ----
@@ -411,7 +431,8 @@ def build(state, viewer) -> Container:
     state.setdefault("save_path_widgets", []).append(
         (cadh_path_w, "cadherin_labels.npz"))
 
-    return (Container(widgets=[threshold_controls, filter_controls,
+    return (Container(widgets=[threshold_controls, seed_floor_w,
+                               filter_controls,
                               cadh_path_w, save_cadh_w, load_cadh_w],
                      labels=False),
             hist.canvas)

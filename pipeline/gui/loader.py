@@ -134,9 +134,11 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         ruby_raw = stack.data[:, role_to_c["ruby"]] if "ruby" in stack.roles else None
         state["dapi_raw"] = dapi_raw
         state["cadh_raw"] = cadh_raw
-        seed = state.get("seed_cadh_floor")
-        if seed is not None:
-            seed()
+        # `seed_cadh_floor` is NOT called here any more. It overwrote the
+        # Cadherin tab's `floor_k` on every load, so the tab default never
+        # reached the build and a headless run silently used a different value
+        # than the one recorded as the default (P26). It is a button on the
+        # Cadherin tab now — press it if you want the suggestion.
         state["clover_raw"] = clover_raw
         state["ruby_raw"] = ruby_raw
         state["clover_raw_native"] = clover_native

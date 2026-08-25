@@ -32,11 +32,28 @@ belongs to.** Separating them is **unsolved** — the current classifier is
 unvalidated, its output swings ~2× on one slider step, and across the six images
 the fibroblast fraction spans 5.0%–14.9% (`docs/ISSUES.md` P05). Never assume a
 nucleus count, or anything derived from one, is fibroblast-only.
+**As of 2026-08-25 the live hypothesis is that this classifier over-calls by
+roughly an order of magnitude** — the seeding density and the nucleus depth
+distribution independently suggest ~5–10 true fibroblasts per field against the
+classifier's 14–41 (`docs/DIRECTION.md` §8D). **Still unsettled, and as of
+2026-08-25 there is no cheap test left**: all three routes to a count have
+failed — by eye (the fibroblasts are not distinguishable in the sensor
+channels), by nucleus proximity (a Voronoi artifact, `docs/ISSUES.md` P42), and
+by endothelial subtraction (the en-face wall has no polygonal cells to segment,
+P41). See §8E. The open ask is CD31, an independent *per-cell* endothelial
+label.
 
 Since 2026-08-11 that classification is joinable per adhesion via the
 `nuc_is_fibroblast` column (`docs/ISSUES.md` P04). **Joinable is not validated** —
 the column inherits every P05 problem above, now attached to every row rather
 than to two image-level scalars. Do not stratify an analysis on it yet.
+**And joinable is not *correct*** (`docs/ISSUES.md` P42, 2026-08-25): `nuc_id`
+is the *nearest* nucleus, but nucleus spacing is 19–25 µm against a 50–100 µm
+spread-cell footprint, so a cell's peripheral adhesions are routinely assigned
+to someone else's nucleus. Per-nucleus adhesion groups have median radius
+16–17 µm — half the spacing, i.e. they are Voronoi cells, not cells. **Never
+aggregate adhesions by `nuc_id`**; one such result has already been produced and
+retracted.
 
 **There is now a second, independent handle on it — `pipeline/nuc_side.py`.**
 Fibroblasts are abluminal, so which *side of the wall* a nucleus sits on is a
@@ -44,6 +61,10 @@ physical statement about its cell type that shares no machinery with a marker
 intensity. The signed nucleus-to-surface distance agrees with the marker
 classifier on **5 of 6 images** (AUC 0.64–0.77), while the unsigned version is
 chance — see `docs/DIRECTION.md` §8C.4 and P05's 2026-08-22 History.
+**Read that agreement as weaker than it looks, not stronger** (§8D): under the
+corrected seeding picture, distance from the wall *ought* to separate the two
+cell types decisively, so AUC 0.64–0.77 on a test that should be easy is
+evidence against the thing it is agreeing with.
 
 Two cautions that matter more than the result:
 
@@ -97,12 +118,19 @@ lumen experiences high shear.
 
 Two things follow that are easy to get wrong:
 
-- **Fibroblasts are abluminal.** They were seeded onto an already-formed,
-  already-perfused vessel, so they feel no shear directly; the endothelium is
-  the sensor and the signal crosses the wall. The shear covariate for an
-  adhesion is therefore the shear at the **nearest luminal surface point**, not
-  at the adhesion's own position, and transmural distance is a covariate in its
-  own right.
+- **Fibroblasts are abluminal — and they are distributed through the bulk
+  matrix, not seeded onto the vessel.** Corrected 2026-08-25 from the
+  experimenter: the cardiac fibroblasts were **cast into the collagen before it
+  gelled** (0.5 × 10⁶ cells/mL, 6 mg/mL collagen, fixed after 7 days), so they
+  sit scattered through the gel at a **range** of distances from the wall —
+  mean spacing ~126 µm — rather than forming a layer on its outer surface.
+  Everything downstream of "abluminal" still holds: they feel no shear directly,
+  the endothelium is the sensor, the signal crosses the wall, so the shear
+  covariate for an adhesion is the shear at the **nearest luminal surface
+  point** and not at the adhesion's own position. What changes is that
+  transmural distance is not a roughly constant offset but a **wide covariate**,
+  and their adhesions are largely to collagen fibres rather than to the
+  endothelium. See `docs/DIRECTION.md` §8D.
 - **Geometry is a proxy, not the target.** A geometric descriptor is worth only
   what it predicts about shear. This reordered the plan in 2026-08-22:
   per-vertex surface curvature left the critical path, because Gaussian
@@ -261,7 +289,13 @@ where the fibroblasts are.
 `roi`, `measure`, plus `widgets.py` (shared helpers) and `logpanel.py`.
 
 **Scripts (`Scripts/`):** `nd2_to_ometiff.py`, `gputest.py`, `vecad_mip.py`,
-`fibroblast_cellpose.py`.
+`fibroblast_cellpose.py` — the last counts endothelial cells from VE-cadherin to
+get fibroblasts by subtraction. **It does not work on this data and further
+parameter tuning will not fix it** (`docs/ISSUES.md` P41): with its two real
+defects fixed (P40) it segments zero cells, because the en-face wall shows
+fibrous filaments rather than polygonal tiles. Its tissue mask now reuses the
+pipeline's saved `cadherin_labels.npz` rather than re-thresholding, so the
+endothelial count refers to the same wall as the mesh and the graph.
 
 ## Environment
 

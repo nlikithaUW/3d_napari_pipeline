@@ -35,8 +35,9 @@ The working hypothesis, as of 2026-08-22:
 > Fibroblasts attach preferentially, and/or adhere with different force, at
 > parts of the lumen that experience **high wall shear stress**.
 
-**Fibroblasts are abluminal** — outside the lumen, on top of an already-formed,
-already-perfused endothelial vessel. They therefore feel **no shear directly.**
+**Fibroblasts are abluminal** — outside the lumen, **distributed through the
+bulk collagen** rather than seeded onto the vessel (§3, corrected 2026-08-25).
+They therefore feel **no shear directly.**
 The causal chain has to be:
 
 > flow → wall shear stress → the **endothelium** senses it → signals across the
@@ -76,9 +77,10 @@ and that is the whole point of the current exploratory phase. See §8.
 | perfusion | **yes, steady** |
 | flow rate Q | **unknown now**, obtainable for future datasets |
 | flow direction | **unknown now**, obtainable — and possibly recoverable from the existing data (§8.5) |
-| fibroblast seeding | **after** the vessel existed and was perfused; **abluminal** |
-| flow during/after seeding | **unknown — ask the experimenter** |
-| pattern design file | **unknown whether it exists — ask** |
+| fibroblast placement | **cast into the collagen before it gelled** — 0.5 × 10⁶ cells/mL in 6 mg/mL collagen. Distributed through the bulk, **abluminal**, mean spacing ~126 µm. **Corrected 2026-08-25**; previously recorded here as "seeded onto an already-formed, already-perfused vessel", which was wrong |
+| culture duration | **7 days**, then fixed |
+| flow during/after seeding | **question retired** — there was no separate seeding event; the fibroblasts predate the endothelium. See §9 for what replaces it |
+| pattern design file | **unknown whether it exists — ask**; and it is a prior, not the lumen — §3.1 |
 
 **Why "patterned" matters more than it sounds.**
 
@@ -94,6 +96,69 @@ and that is the whole point of the current exploratory phase. See §8.
   which is what [I03](ISSUES.md#i03) has wanted all along and has so far only
   approximated with synthetic phantoms.
 - **It probably fixes the cross-section shape.** See §4.
+
+**What the corrected fibroblast placement changes.** "Abluminal" survives intact
+and so does the whole causal chain in §1 — the endothelium is still the sensor
+and the signal still crosses the wall. Three things do change:
+
+- **Transmural distance is a wide covariate, not an offset.** A layer seeded on
+  the outer wall would sit at a roughly constant small distance. Cells cast
+  through the gel sit at *every* distance out to the edge of the field. That is
+  the difference between a nuisance parameter and a primary axis — see §7.5,
+  where it also supplies an in-image control.
+- **Their adhesions are mostly to collagen, not to the endothelium.** The
+  tension proxy is therefore reading fibroblast-on-matrix grip for most cells.
+- **They compact the matrix.** Contracting collagen is what fibroblasts do, and
+  6 mg/mL is softer than the 7.5 mg/mL of the reference protocol. §3.1's
+  design-vs-actual gap is correspondingly larger here than in a
+  fibroblast-free system.
+
+## 3.1 The design file would be a prior, not the lumen
+
+*Added 2026-08-25, from `docs/papers/ncomms8858.pdf` (Zheng, Chen & Lopez, Nat
+Commun 6:7858, 2015) — the lab's own description of this microvessel system.*
+
+§3 treats the pattern design file as an external validation target. It is worth
+one, but it is **not** the lumen. The mould defines the *collagen* channel; the
+lumen is the space inside a confluent endothelium, and the two differ
+systematically rather than randomly:
+
+- **The monolayer is subtracted from both walls.** Endothelium a few µm thick,
+  nuclei bulging further, so the true lumen is **always smaller than the
+  design** by roughly a constant absolute amount — single-digit percent at our
+  ~90 µm heights, worse on image 6. The paper's only acknowledgement of any
+  mismatch is exactly this scale-dependence: strand deviations attributed to
+  "surface irregularities on the endothelial monolayer", "more prominent in
+  vessels <200 µm in diameter". It never compares an imaged lumen to a design.
+- **Corners round off.** A planar stamp gives a rectangular groove capped by a
+  flat second collagen layer, and cells do not sit in sharp corners. So the
+  low-shear corners a rigid rectangular-duct solve predicts are the first thing
+  that is not real — which matters, because "low shear, therefore no signal" is
+  read off precisely there.
+- **There is a seam** at the mid-plane where the two collagen layers are sealed.
+  No design geometry contains it.
+- **Cells compact the gel**, and **the gel is compliant** — the paper drives
+  10–1,000 Pa across collagen and solves on rigid walls. **This is worse in our
+  system than in the reference one**: ours contains a contractile fibroblast
+  population cast through the bulk (§3) and uses 6 mg/mL collagen against their
+  7.5, so there is more pulling on a softer matrix. Our 7 days is shorter than
+  their 1–2 weeks, which cuts the other way.
+
+**Our own six images argue both ways.** The perpendicular cross-sections (§8C.3)
+give aspect **2.02 / 1.91 / 1.89 / 1.80** on images 1, 2, 3 and 5 — four images
+within ±6%, which is more reproducibility than remodelling would leave, and an
+argument that the geometry *is* design-dominated. Against that, §8A.3's heights
+span **49–97 µm** and a lithographic process should not vary in height. One of
+those two readings is wrong and we do not know which, which is the sharpest
+current reason to ask for the file (§9 item 2) — not to treat it as the answer.
+
+**Which is the weaker link splits by image.** On images 1–3 (6–20% of sections
+clipped, image 1 agreeing with [P24](ISSUES.md#p24)(b)'s independent direct cut)
+the reconstruction is probably tighter than the design-vs-actual gap: solve on
+the measured lumen. On images 4 and 5 (44–56% clipped, widths are lower bounds)
+and image 6 (inscribed radius moved 60% between methods, §8C.3) the
+reconstruction is the larger error, and a design geometry would be worth more
+than a measurement.
 
 # 4. The physics, and the one number that decides the formula
 
@@ -127,6 +192,114 @@ shear profile along a vessel** is fully determined by the caliber profile, with
 no knowledge of Q at all. Absolute τ and cross-image comparison need Q; the
 within-image gradient does not. **Every result available today is a within-image
 relative-shear result**, and that is enough for a spatial hypothesis.
+
+## 4.2 At fixed Δp, wall shear is linear in hydraulic diameter
+
+§4's two formulas are both **fixed-Q** statements, and fixed Q is the regime
+where a caliber error is punishing. This system is not run at fixed Q. It is run
+at fixed pressure — a gravity head between reservoirs, and the matching COMSOL
+boundary conditions in `docs/papers/ncomms8858.pdf` are a constant-pressure inlet
+(10–1,000 Pa) and a zero-pressure outlet.
+
+For fully developed flow in a uniform duct, a force balance on the control volume
+gives τ_w·P·L = Δp·A, hence
+
+    τ_w = (Δp / L) · D_h / 4,    D_h = 4A / P
+
+**Wall shear is then linear in hydraulic diameter, and independent of Q and of
+viscosity entirely.** A 7% shrink of the lumen from the monolayer costs 7% in
+shear, not 23%. §7.3's warning that R⁻³ amplifies a caliber error is a fixed-Q
+warning and does not transfer to this regime.
+
+**The junction is where it does transfer.** In a network the per-segment Δp/L is
+not given — it is set by the resistance of every other segment, and
+rectangular-duct resistance goes as 1/(w·h³). So for a Y:
+
+- **absolute shear along one segment** is forgiving of caliber error (linear),
+  but
+- **the flow split between the two daughter branches** is not: it rides on h³.
+
+§4.1's "relative shear needs no flow rate" holds along an *unbranched* segment by
+conservation, and does **not** rescue the split at the crotch. The crotch is the
+structure this program cares about most, so that is where lumen accuracy has to
+be earned — see §3.1 for how far the design geometry can be trusted to supply it.
+
+Both results assume fully developed flow in a locally uniform duct. Turns, tapers
+and the junction itself violate that, which is why the paper solves numerically
+rather than algebraically.
+
+## 4.3 How to actually compute τ_w on this reconstruction
+
+*Added 2026-08-25.* §4 and §4.2 give the algebra for idealised ducts. This
+section says what to compute from the geometry we actually have.
+
+**The exact local statement.** For fully developed flow down a duct of arbitrary
+cross-section, the axial velocity `u` on the section solves
+
+    µ ∇²u = dp/ds,   u = 0 on the wall
+
+and the wall shear at each boundary point is `τ_w = µ|∇u|`. Everything in §4 and
+§4.2 is a special case of that one equation.
+
+**Solve it; do not look up a formula.** Two reasons, both material here:
+
+- **No shape correlation fits this data.** Every closed form in §4 assumes a
+  circle, a rectangle or parallel plates. `cross_section`'s own docstring
+  records that the measured sections are **D-shaped, not elliptical**
+  ([P24](ISSUES.md#p24)(b)) — which is also why it reports extents rather than
+  fitted semi-axes.
+- **It gives the circumferential distribution, and no closed form does.** A
+  single τ per section is an average around the perimeter, but an adhesion sits
+  at *one* circumferential position, and on an aspect-2 section the flat sides
+  and the ends differ severalfold. §7.4 already requires circumferential
+  position be preserved; collapsing to a per-section scalar throws away exactly
+  what the per-adhesion join needs.
+
+It is a 2D Poisson solve on a binary mask of a few thousand pixels, once per
+section. Cheap.
+
+**The normalisation — and why the result needs no unknowns.** Solve once per
+section with `dp/ds = -1`, `µ = 1`, giving `û` and `Q̂ = ∫û dA`. Along an
+**unbranched** segment Q is conserved (§4.1), so the true gradient at station
+`s` is `(dp/ds)(s) = -Q/Q̂(s)`, and
+
+    τ_w(s, θ) = |∇û(s, θ)| · Q / Q̂(s)
+
+**Q is a single unknown multiplying the entire profile.** So the *shape* of the
+shear map along a segment — which is the whole of the spatial hypothesis — is
+fixed by geometry alone, with no flow rate, no viscosity and no pressure.
+Normalised within a segment it is a measurement, not an assumption. This is
+§4.1's point made local and per-boundary-point.
+
+**What this needs that does not exist yet.** `cross_section` returns
+`area_um2`, `major_um`, `minor_um`, `aspect`, `clipped`, `touches_domain`, and
+builds the binary section internally and then discards it. Two additions:
+
+- **return the section mask** (or its contour) — that is what the solve runs on;
+- **perimeter**, which `D_h = 4A/P` needs before *any* of §4.2's algebra can be
+  evaluated numerically. It is not currently computed anywhere.
+
+Take the perimeter from a marching-squares contour, not a count of boundary
+pixels: the staircase estimate overestimates a smooth boundary by up to 4/π.
+
+**Where it stops being valid — flagged per section, not argued away:**
+
+- **`clipped` sections are unusable for this, more so than for area.** A clipped
+  boundary contributes a straight edge that is not a wall, and the solve would
+  impose no-slip on it. Images 4 and 5 clip 44–56% of their sections (§8C.3), so
+  they are out until [P32](ISSUES.md#p32) is fixed.
+- **Junctions are excluded, not approximated.** Q is conserved only along an
+  unbranched segment; the split at a Y rides on h³ (§4.2) and is not recoverable
+  from geometry alone.
+- **Fully developed flow fails at turns, tapers and the crotch** — §4.2's
+  closing caveat, and the reason the reference paper solves numerically. Treating
+  each section as locally uniform is a lubrication approximation whose error
+  grows with `dA/ds`, which is largest exactly at image 6's waist, i.e. at the
+  place the first result wants to read.
+
+**Recommended first result.** Image 6, one unbranched segment, τ along arc
+length, normalised within the segment. It is z-contained, clips only 5% of
+sections, and carries the largest caliber gradient in the set (§5).
 
 # 5. The dataset
 
@@ -361,6 +534,14 @@ local axis. Not optional.
 > to prune spurs against, and it is documented as the wrong thing to compute
 > shear from.
 
+> **Qualified, 2026-08-25.** The **27×** above is a *fixed-Q* number. This system
+> is pressure-driven, where τ_w is linear in hydraulic diameter and the same
+> threefold error costs 3×, not 27× (§4.2). The conclusion is unchanged — the
+> minor semi-axis is still the wrong caliber and area or width×height is still
+> required — but the amplification quoted here is an upper bound, and the regime
+> where it actually bites is the **flow split at the crotch**, not shear along a
+> segment.
+
 ## 7.4 The depth confound becomes testable
 
 In a non-circular duct wall shear is **not uniform around the circumference** —
@@ -391,6 +572,25 @@ preference disappears, it is shear. If it persists, it is geometry.
 
 This is a bench request with a long lead time and it is the single most valuable
 thing this exploratory phase can hand to the next experiment.
+
+> **A partial control may already be in the data — added 2026-08-25.** The
+> fibroblasts are cast through the bulk gel (§3), not layered onto the vessel, so
+> the ones sitting far from the wall cannot be responding to anything the vessel
+> is doing. That is a comparison group in the *same image*, with the same optics,
+> staining and threshold — no new experiment. If a tension or density measure
+> varies with distance from the vessel and then flattens beyond some range, the
+> flat part is the local null.
+>
+> **It does not replace the no-flow control**, because distance-from-vessel is
+> itself confounded with depth ([P03](ISSUES.md#p03)) and with the collagen
+> compaction gradient a contractile population creates around a stiff inclusion.
+> It is cheaper and available now, which the bench control is not.
+>
+> **It is also contingent on there being cells out there to compare against.**
+> §8D finds almost no nuclei more than 5 µm abluminal, which either means the
+> fibroblasts have migrated onto the vessel or means there are very few of them.
+> Settle §8D's count question first — this control is only real if the far
+> population exists.
 
 ## 7.6 `lumen_center_z`'s inscribed radius is gated on the filled footprint
 
@@ -459,6 +659,42 @@ is real and it is one more reason the 2D centerline is being replaced (§8B).
    available today, and it is now reachable: image 6 has a measured
    cross-section profile and is unbranched, clean and z-contained. This is the
    next substantive thing to do.
+   **Promoted above Tier 3A on 2026-08-25** (§8E.4): every route to the
+   fibroblast count is blocked, while the shear half is pure geometry and needs
+   no cell-type call. **Split it and do the geometry first** —
+   8a. **Build the shear map itself** (§4.3): return the section mask and
+   perimeter from `cross_section`, solve `∇²û = -1` per section, take
+   `|∇û|` on the boundary, normalise by `Q̂` along the segment. Image 6,
+   one segment, τ against arc length. Depends on nothing in Tier 3A.
+   8b. Join it to fibroblast density — which does need [P05](ISSUES.md#p05), so
+   it waits.
+
+## Tier 3A — the fibroblast count. **Blocked, moved below item 8 — 2026-08-25**
+
+Opened 2026-08-25 ahead of Tier 3 because it was an eye check that cost nothing.
+**All three routes to it have now failed** (§8E), so it no longer gates anything
+cheaply and no longer sits ahead of the shear work, which needs no cell-type call
+at all.
+
+0. ~~Count sensor-positive cell bodies on one image~~ — **cannot be done.** The
+   fibroblasts are not distinguishable by eye in the sensor channels; the premise
+   that they would be was wrong. §8E.1.
+0a. ~~Group adhesions by nucleus as a substitute~~ — **retracted.** A Voronoi
+   artifact, and it double-counts the clover photons. §8E.2.
+0c. ~~Endothelial count by Cellpose, fibroblasts by subtraction~~ — **fails.**
+   Two script defects fixed ([P40](ISSUES.md#p40)); with the method working it
+   finds zero cells, because the en-face wall shows no polygonal tiles
+   ([P41](ISSUES.md#p41)). §8E.3.
+0b. **Still live, and now the only cheap items left:** cross-tab
+   `nuc_is_fibroblast` × `nuc_side` signed distance, and fibroblast fraction vs
+   per-image clover noise statistics — §8D.5 items 2 and 3. Both run on data
+   already exported. Neither validates the classifier; both bound how wrong it
+   is.
+0d. **Compute the CSR null for `dist_nuc_um`** (§8E.2). Cheap, robust to the
+   misassignment that killed 0a, and it audits the *adhesion detector* rather
+   than the classifier — which is upstream of more of the program.
+0e. **Ask for CD31** — §9 item 4, now the main bench ask rather than a
+   nice-to-have.
 
 ## Tier 3 — validation that needs no phantom
 
@@ -1065,20 +1301,283 @@ silently carrying a mixture of two reconstructions.
 
 ---
 
+# 8D. The fibroblast population is smaller than the classifier says — 2026-08-25
+
+Opened by a protocol correction, not by new code. The experimenter supplied
+three numbers this project did not have: the cardiac fibroblasts were **cast
+into the collagen before gelation** at **0.5 × 10⁶ cells/mL** in **6 mg/mL**
+collagen, and the construct was fixed after **7 days**. §3 previously recorded
+the opposite arrangement — cells seeded onto a finished, perfused vessel — and
+every downstream expectation about where fibroblast nuclei should sit was built
+on it.
+
+**Nothing here is measured from new code, and nothing here is settled.** It is
+arithmetic over existing numbers plus a re-reading of §8A.1, assembled because
+it points at [P05](ISSUES.md#p05) hard enough to be worth writing down.
+
+## 8D.1 What the casting density predicts
+
+0.5 × 10⁶ cells/mL is one cell per 2 × 10⁶ µm³ — **mean spacing ~126 µm**,
+comparable to the vessel caliber itself and to a third of the field of view. The
+imaged volume is 1024 × 1024 px at 0.325 µm and 128–293 z-slices:
+
+| # | image | depth µm | FOV volume µm³ | expected CF, whole FOV | expected CF, gel only (~60%) |
+|---|---|---|---|---|---|
+| 1 | V3_04step_002 | 105.2 | 1.17e7 | 5.8 | 3.5 |
+| 2 | V3_04step_003 | 98.4 | 1.09e7 | 5.4 | 3.3 |
+| 3 | V3_09step_001 | 115.2 | 1.28e7 | 6.4 | 3.8 |
+| 4 | V3b_04step_001 | 80.4 | 8.9e6 | 4.5 | 2.7 |
+| 5 | V3b_04step_002 | 117.2 | 1.30e7 | 6.5 | 3.9 |
+| 6 | V3b_04step_003 | 94.0 | 1.04e7 | 5.2 | 3.1 |
+
+The gel-only column removes the ~40% of the field the vessel itself occupies, on
+image 1's 13,836 µm² cross-section (§8C.3). So **~3–4 fibroblasts per field at
+casting density**, against [P05](ISSUES.md#p05)'s classifier calling **14–41**.
+
+## 8D.2 The count check does not survive 7 days — state that plainly
+
+Starting from 3.4 cells and dividing for 7 days:
+
+| doubling time | fold | CF per field |
+|---|---|---|
+| quiescent | 1× | 3.4 |
+| 96 h | 3.4× | 11 |
+| 72 h | 5× | 17 |
+| 60 h | 7× | 24 |
+| 48 h | 11× | 39 |
+
+The classifier's 14–41 corresponds to doubling times of **47–82 h**, which is an
+unremarkable rate for fibroblasts in dense 3D collagen. **The count discrepancy
+is therefore not evidence of anything on its own** — 7 days is exactly long
+enough to make "the classifier is right and the cells expanded ~8×"
+indistinguishable from "the classifier over-calls and they barely divided."
+
+An endothelial budget does not break the tie either. Image 1's perimeter (447 µm
+for a 185.8 × 90.1 µm section) over a Y-branch's worth of vessel in a 333 µm
+field gives ~2.7e5 µm² of wall, which at 1,000–2,000 µm² per spread cell is
+**134–267 endothelial cells** against 276 nuclei observed. Suggestive that the
+endothelium nearly accounts for every nucleus, but the per-cell area is a
+literature guess and the range is too wide to conclude from.
+
+## 8D.3 The depth distribution is what actually discriminates
+
+This is the part that is not arithmetic. §8A.1 measured signed
+nucleus-to-surface distance on image 1 and recorded:
+
+- the distribution is **unimodal, one peak spanning −2.4 to +2.2 µm**
+- **29 of 276 (10.5%)** sit more than 2 µm abluminal
+- **7 of 276 (2.5%)** sit more than 5 µm abluminal
+
+Under the old seeding picture that was unremarkable. Under casting, it is the
+finding: cells distributed through a gel at 126 µm spacing should appear at
+*every* distance, many of them tens of µm out into the collagen and well inside
+a 333 µm field. **There is no such population.** A unimodal peak at zero with
+±2.4 µm width is what a monolayer looks like — one cell type tiling a surface,
+spread over its own thickness.
+
+Note also that **71.4% of the 7 most-abluminal nuclei are classifier-called
+fibroblasts** — the classifier's hit rate climbs steeply with distance, which is
+what you would expect if a small true population sits out in the gel and the
+rest of its calls are noise on wall-bound nuclei.
+
+## 8D.4 The reading that makes the pieces consistent
+
+Assembled, not measured. **There may be only ~5–10 fibroblasts per field**, they
+are the ones sitting well abluminal, and most of the classifier's remaining ~20
+calls per image are noise on endothelial nuclei. That number is close to the
+*no-proliferation* casting estimate, which would mean little division in a dense
+6 mg/mL gel — plausible, but read backwards from the conclusion and therefore
+weak.
+
+**It explains [P05](ISSUES.md#p05)'s instability without appealing to a bad
+marker.** `pipeline/gui/nuclei.py` records that perinuclear mClover is "only
+~1.4× background and essentially unimodal", and that was read as the measurement
+being too poor to resolve two groups. But **a 2–4% minority cannot produce a
+second mode no matter how good the marker is** — unimodality is the expected
+appearance, not a defect. Cutting a single smooth distribution at
+background × 1.5 then returns whatever share of the tail lies above the cut,
+which is a property of the noise rather than of the cells. A 9.8% median with a
+5.0–14.9% spread is consistent with that and with nothing biological.
+
+**It also weakens §8C.4 rather than strengthening it.** [P05](ISSUES.md#p05)'s
+2026-08-22 History justified the signed-distance corroboration by saying
+fibroblasts "were seeded onto an existing vessel and are abluminal, so the
+geometric measure has a physical reason to work." The premise is wrong, and the
+corrected one cuts the other way: cells scattered through the gel should be
+separated by distance-from-wall **decisively**, not at AUC 0.64–0.77. Weak
+agreement on a test that ought to be easy is evidence against the measure being
+agreed with.
+
+## 8D.5 Three tests, all cheap, none affected by the proliferation confound
+
+1. **Count sensor-positive cell bodies by eye.** The fibroblasts carry the VnTs
+   sensor, so they are directly visible in the clover/ruby channels as whole
+   spread cells — and at 126 µm spacing they are isolated and unmistakable. This
+   needs no threshold and no code. **~5–10 per field confirms §8D.4; ~27 refutes
+   it.** Do this one first; it settles the rest.
+2. **Cross-tabulate `nuc_is_fibroblast` against `nuc_side`'s signed distance.**
+   Both exist and are joinable per nucleus. A cell cast in bulk gel has no
+   business sitting *inside* the endothelial monolayer, so classifier-called
+   fibroblasts at ≈0 distance bound the false-positive rate from below, without
+   validating anything else. Caveat: fibroblasts are motile and 7 days is long
+   enough for some to reach and wrap the vessel, so "at the wall" is not
+   automatically wrong — "inside the monolayer" still is.
+3. **Check whether the fibroblast fraction tracks image noise rather than
+   biology.** If 9.8% is a tail fraction, it should correlate with per-image
+   brightness and noise statistics of the clover channel. Six images, both
+   quantities already in hand.
+
+## 8D.6 Also from this session
+
+- **The 2 µm perinuclear shell is *not* inconsistent across images.** Suspected
+  and checked: `nuclei.py` computes the dilation radius as
+  `round(2.0 / scale[0])`, and `scale[0]` is the z spacing, which would have
+  given the 0.9 µm `09step` file a 2.5× thinner in-plane shell than the rest.
+  It does not, because the loader calls `to_isotropic` first, so `scale` is
+  (0.325, 0.325, 0.325) on all six and the shell is ~1.95 µm everywhere.
+  **Recorded so it is not re-investigated.**
+- **7 days is short for the endothelium**, against the 1–2 weeks the reference
+  protocol uses to reach confluence. This opens
+  [P39](ISSUES.md#p39): some cadherin-mask gaps may be real holes in an
+  immature monolayer rather than dim wall lost to thresholding, which is an
+  alternative to [P28](ISSUES.md#p28)'s reading and is not currently on the
+  table.
+- **CD31 is a candidate independent endothelial label** for §8C.5's blocker —
+  the reference protocol runs it routinely, so it is a cheap ask. Caveat: CD31
+  is also junctional, so a "does this nucleus touch the CD31 network" test
+  inherits §8C.5's structural problem. It only helps if CD31 marks enough of the
+  cell body to ask whether a nucleus is *enclosed by* endothelial signal, which
+  is a per-cell rather than a per-junction question. Checkable on one test image
+  before committing to a restain.
+
+---
+
+# 8E. Three routes to the fibroblast count, all failed — 2026-08-25
+
+§8D queued one cheap test to settle whether [P05](ISSUES.md#p05) over-calls by an
+order of magnitude. It cannot be run, and the two substitutes tried in its place
+also fail. **All three failures are about attribution: nothing in this pipeline
+can currently say which cell an object belongs to.**
+
+## 8E.1 By eye — the premise was wrong
+
+§8D.5 item 1 assumed the fibroblasts would be "isolated and unmistakable" in the
+clover/ruby channels, being the only cells carrying the VnTs sensor. Reported by
+the experimenter, 2026-08-25: **they are not distinguishable by eye.**
+
+That is not a neutral null. It is consistent with `pipeline/gui/nuclei.py`'s
+record that perinuclear mClover sits at ~1.4× background and is essentially
+unimodal, and it cuts in §8D.4's favour: a marker that cannot resolve a cell body
+by eye is not going to resolve cell *type* by threshold.
+
+## 8E.2 By nucleus proximity — a Voronoi artifact, retracted
+
+`nuc_id` and `nuc_is_fibroblast` are exported per adhesion, so grouping
+adhesions by nucleus looked like a free substitute. It produced a clean result —
+classifier-called fibroblast nuclei owning **1.5–6× more adhesions** than
+endothelial ones, same direction in all six images — and **that result is
+withdrawn.** Two independent reasons:
+
+- **`nuc_id` is a nearest-neighbour join, not ownership.** Nucleus spacing is
+  **19–25 µm** on the wall (√(area/N), 174–315 nuclei over ~332×332 µm) against a
+  spread fibroblast footprint of 50–100 µm, so a cell's peripheral adhesions are
+  routinely nearer some other nucleus. The data shows it directly: per-nucleus
+  adhesion groups have **median radius 16–17 µm in every image**, which is half
+  the nucleus spacing — i.e. the groups are Voronoi cells, and their size is set
+  by nucleus density rather than by cells.
+- **It scores the same photons twice.** The classifier thresholds perinuclear
+  mClover; the adhesions are detected in that same channel. A nucleus with more
+  clover signal is called fibroblast *and* accumulates more clover-channel
+  detections. This is §8C.5's structural trap in a new place, and it would
+  produce the observed effect under the noise hypothesis too.
+
+**This qualifies [P04](ISSUES.md#p04).** That entry is closed as fixed because
+`nuc_id` made cell type joinable per adhesion. It is joinable; it is not
+*correct*. Opened as [P42](ISSUES.md#p42).
+
+One quantity survives and is worth pursuing: `dist_nuc_um` has median
+**4.5–6.2 µm** across the six, which looks *below* what chance would give at this
+nucleus density. It is robust to the misassignment above, since it does not
+depend on which nucleus is the right one. If it holds against a proper CSR null
+it says the detected objects are **perinuclear** — backwards for focal adhesions,
+and consistent with the detector fragmenting perinuclear cytoplasmic signal. The
+null has not been computed; the expectation was estimated by hand.
+
+## 8E.3 By endothelial subtraction — the monolayer has no cells to segment
+
+`Scripts/fibroblast_cellpose.py` counts endothelial cells from VE-cadherin and
+gets fibroblasts as `total nuclei − endothelial cells`. It had **never been
+run** and was cited in neither document. Run on image 6 it fails, and two real
+defects were found and fixed on the way ([P40](ISSUES.md#p40)):
+
+- default 2D+stitch segments **axial** slices, where the endothelium is edge-on
+  and there are no polygons to find — it returned 128 "cells" that were stitched
+  fragments of the wall line;
+- `--enface` degenerated because `_tissue_mask`'s Otsu marked **40% of the
+  volume** as tissue (it thresholds the noise — the same global-threshold failure
+  [P36](ISSUES.md#p36)/[P28](ISSUES.md#p28) record for this channel), flattening
+  the depth profile so the top/bottom split collapsed into a whole-stack MIP.
+
+Both are fixed — the tissue mask now reuses the pipeline's own
+`cadherin_labels.npz` (3.0% of volume), and the split guards against an endpoint
+minimum. **With the method working as designed, Cellpose returns zero objects**,
+and still zero at `--min-vox 0 --cellprob -2`.
+
+Two readings of the QC projection, and the second is the one that matters:
+
+- The depth split is **wrong for this geometry** — image 6's vessel curves
+  diagonally, so it has no top and bottom wall at separable depths. Doing this
+  properly means unwrapping the surface using the Poisson mesh the project
+  already has, not splitting by z.
+- **Where the wall *is* seen en-face, the texture is fibrous filaments and
+  speckle, with no closed polygonal tiles.** There is nothing cell-shaped to
+  segment. This is independent of the split problem, and it is consistent with
+  [P39](ISSUES.md#p39) (not confluent at 7 days) or with the junctions being too
+  dim and dashed ([P28](ISSUES.md#p28)).
+
+Recorded as [P41](ISSUES.md#p41). **Do not spend more time tuning this
+script** — the blocker is image content, not parameters.
+
+## 8E.4 What this changes
+
+- **§8D is unresolved and its test is gone.** Whether P05 over-calls ~10× is
+  still the gating question and now has no cheap answer in hand.
+- **Tier 2 item 5a hardens.** An independent endothelial label was the blocker;
+  the cheapest in-repo candidate has now been tried and failed. CD31 (§9 item 4)
+  moves from "worth asking" to **the main ask**, with §8D.6's caveat that it only
+  helps if it marks cell body rather than junction.
+- **The spatial half of the program does not depend on any of this.** §4.3's
+  shear map is pure geometry and needs no cell-type call. It should proceed
+  ahead of the count, not behind it — that reorders Tier 3A below Tier 2 item 8.
+
+---
+
 # 9. Open questions for the bench
 
 Send as one message, not three:
 
-1. **Was flow running during and after fibroblast seeding, or had it stopped?**
-   Decides whether shear is a live force on the endothelium or a fossil imprint.
+1. ~~**Was flow running during and after fibroblast seeding?**~~ **Retired
+   2026-08-25** — the premise was wrong. The fibroblasts were cast into the
+   collagen before gelation (§3), so they predate the endothelium and there was
+   no separate seeding event for flow to be running during. What replaces it:
+   **(a) how much flow ran, and for how long, over the 7 days?** — still decides
+   whether shear is a live force or a fossil imprint. **(b) Were the fibroblasts
+   counted or viability-checked at any point?** — §8D says the expected number
+   per field is ~3–4 before proliferation and the classifier reports 14–41, and
+   any independent count collapses that question.
 2. **Does the pattern design file exist, and can we get it?** Ground-truth
    caliber, inlet/outlet (→ flow direction), bifurcation vs confluence, flow
    split. Would also give [I03](ISSUES.md#i03) an external validation target.
 3. **Can a no-flow control be run** — identical chip and seeding, never perfused?
    §7.5. Long lead time, so ask now.
 
+4. **Is there a VE-cadherin-independent endothelial label available** — CD31
+   would do, and the reference protocol runs it routinely? §8C.5's blocker is
+   exactly this, and it is a far cheaper ask than item 3.
+
 Also worth confirming: flow rate Q and flow direction for future datasets, both
-of which the export should accept as optional inputs rather than assume.
+of which the export should accept as optional inputs rather than assume. And
+whether the endothelium was confluent at 7 days ([P39](ISSUES.md#p39)).
 
 ---
 
@@ -1103,7 +1602,99 @@ of which the export should accept as optional inputs rather than assume.
 
 # History
 
-- **2026-08-24** (latest) — **a session of defect-finding in the mask pipeline,
+- **2026-08-25b** (latest) — **every route to the fibroblast count failed, and
+  the shear half was promoted past it.** §8D queued an eye count to settle
+  [P05](ISSUES.md#p05); the experimenter reports the fibroblasts are not
+  distinguishable by eye, so the premise was wrong. Two substitutes were tried
+  and both fail: grouping adhesions by `nuc_id` is a Voronoi artifact that also
+  double-counts the clover photons (**retracted**, and it qualifies
+  [P04](ISSUES.md#p04) — new [P42](ISSUES.md#p42)), and Cellpose endothelial
+  subtraction finds zero cells because the en-face wall has no polygonal tiles
+  ([P41](ISSUES.md#p41)), after two real script defects were fixed
+  ([P40](ISSUES.md#p40)). New **§8E**.
+
+  **The reordering is the point.** §4.3 was added answering how τ_w is actually
+  computed on this reconstruction — a per-section Poisson solve, `µ∇²u = dp/ds`,
+  `τ_w = µ|∇u|`, normalised by conservation along an unbranched segment so **Q
+  drops out of the profile shape**. That is pure geometry and needs no cell-type
+  call, so queue item 8 was split: **8a (the shear map) now runs ahead of Tier
+  3A**, which is blocked. Two things §4.3 needs do not exist yet:
+  `cross_section` discards the section mask and never computes perimeter.
+
+  One quantity worth chasing survives §8E.2: `dist_nuc_um` median 4.5–6.2 µm
+  looks below chance for this nucleus density, which would mean the detected
+  adhesions are perinuclear. The null has not been computed.
+
+- **2026-08-25** — **a protocol correction that moves
+  [P05](ISSUES.md#p05), plus a paper read.** Two separate things, recorded
+  together because the second set up the first.
+
+  **Read `docs/papers/ncomms8858.pdf`** (Zheng, Chen & Lopez, Nat Commun 6:7858,
+  2015) — a *different lab*, whose in-vitro microvessel system this project's
+  method descends from but whose question is not ours: it has endothelium only,
+  no fibroblasts and no tension readout. New sections **§3.1** (a pattern design
+  file would be a prior, not the lumen — the mould defines the collagen channel
+  and the endothelium is subtracted from inside it) and **§4.2** (this system is
+  pressure-driven, so τ_w = (Δp/L)·D_h/4 and wall shear is *linear* in hydraulic
+  diameter; §7.3's R⁻³ amplification is a fixed-Q result, and the cubic
+  sensitivity reappears only at the crotch, where the flow split between
+  daughters goes as h³). §7.3 carries a qualifier block so it does not read as
+  contradicting §4.2.
+
+  **The correction, and it is a real one: the fibroblasts were cast into the
+  bulk collagen before gelation** — 0.5 × 10⁶ cells/mL, 6 mg/mL collagen, fixed
+  at 7 days. §3, §1 and `CLAUDE.md` all recorded them as *seeded onto an
+  already-formed, already-perfused vessel*, which was wrong. "Abluminal" and the
+  whole causal chain survive; what changes is that transmural distance is a wide
+  covariate rather than a small offset, their adhesions are largely to collagen
+  rather than to the endothelium, and a contractile population cast through a
+  6 mg/mL gel compacts the matrix more than §3.1's reference system would.
+
+  **§8D is new and follows from it.** Casting density predicts ~3–4 fibroblasts
+  per field; the classifier reports 14–41. That gap is **not** evidence by
+  itself — 7 days at a 47–82 h doubling time reproduces the classifier's numbers
+  exactly, and the check is stated as inconclusive. What does discriminate is
+  §8A.1's depth distribution: unimodal, ±2.4 µm, with only 2.5% of nuclei more
+  than 5 µm abluminal. Cells scattered through a gel at 126 µm spacing should
+  appear at every distance and do not. The assembled reading — ~5–10 real
+  fibroblasts per field, the rest of the calls noise — also explains why
+  perinuclear mClover is unimodal (a 2–4% minority cannot make a second mode)
+  and why the fraction swings 2× on a slider step (it is a tail fraction). It
+  **weakens** §8C.4 rather than strengthening it: distance-from-wall ought to
+  separate cast-in-gel cells decisively, so AUC 0.64–0.77 is a poor result on an
+  easy test.
+
+  Three cheap tests are queued as Tier 3A, the first of which is an eye count of
+  sensor-positive cell bodies and settles the rest. **Nothing in §8D is
+  measured** and P05's status is unchanged pending that count.
+
+  Also: §7.5 gains a partial in-image control (far-from-vessel fibroblasts, if
+  they exist), §9 item 1 is retired as unanswerable and replaced, CD31 is added
+  as a candidate independent endothelial label for §8C.5, and
+  [P39](ISSUES.md#p39) opens on 7 days being short for a confluent monolayer.
+
+- **2026-08-25** (latest) — **read `docs/papers/ncomms8858.pdf`** (Zheng, Chen &
+  Lopez, Nat Commun 6:7858, 2015), the lab's own account of this microvessel
+  system, and recorded two things it changes. **§3.1**: the pattern design file
+  §3 has been asking for is a *prior*, not the lumen — the mould defines the
+  collagen channel and the endothelium is subtracted from inside it, so the true
+  lumen is always smaller, and our aspect-ratio reproducibility and our 49–97 µm
+  height spread argue in opposite directions about how much the design would
+  settle. **§4.2**: this system is pressure-driven, not flow-driven, so
+  τ_w = (Δp/L)·D_h/4 and wall shear is *linear* in hydraulic diameter —
+  §7.3's R⁻³ amplification is a fixed-Q result and does not apply. The cubic
+  sensitivity reappears at the crotch, where the flow split between daughters
+  goes as h³. Nothing measured changed; what changed is how much a caliber error
+  is believed to cost, and where.
+
+  Also worth noting for the eventual methods section: the paper's grid
+  experiment is the template for the analysis §8 is heading toward — solve the
+  flow once, reduce it to one wall-shear number per vessel segment (312 of
+  them), and correlate against a per-segment imaging measurement. It has no
+  fibroblasts and no tension, so its thresholds are not transferable as
+  covariate cutoffs.
+
+- **2026-08-24** — **a session of defect-finding in the mask pipeline,
   and one adoption.** Nothing here changes the scientific program; it changes
   what the program has been running on.
 

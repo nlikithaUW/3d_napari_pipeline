@@ -65,8 +65,8 @@ true of the code and data on that date and may not be true now.
 | [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | **fixed** — part B has a principled replacement for [I06](#i06) |
 | [P02](#p02) | `ratio_clover_ruby` tracks the ruby noise floor, not tension | S1 | open |
 | [P03](#p03) | Adhesion detection is depth-truncated | S1 | open — **confirmed 6/6; confirmed optical not gravity 2026-08-24**, fix is [I07](#i07) |
-| [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | **fixed** |
-| [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open |
+| [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | **fixed** — but joinable is not correct: see [P42](#p42) |
+| [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open — **2026-08-25: likely over-calls ~10×**; all three routes to the count now failed ([P41](#p41), [P42](#p42), §8E) |
 | [P06](#p06) | Tension readout drifts with imaging depth | S2 | open — **sign flips 6 images** |
 | [P07](#p07) | `peak_local_max` drops border seeds, in two places | S2 | **fixed** |
 | [P08](#p08) | `path_curv_xy` — 20 µm fit window on a ~140 µm-wide vessel; contamination; unsigned | S1 | **superseded** — the 2D centerline is deleted (2026-08-22) |
@@ -108,6 +108,10 @@ true of the code and data on that date and may not be true now.
 | [P36](#p36) | The cadherin "local threshold" is inert: the mask is a global threshold | **S2** | open — Sauvola inert; **the forcing override is fixed 2026-08-24**, Niblack is now the default everywhere |
 | [P37](#p37) | The loader overwrote `floor_k` on every load, so the tab default never ran | S2 | **fixed** 2026-08-24 |
 | [P38](#p38) | A failed mesh build left the previous image's lumen field; the graph used it | **S1** | **fixed** 2026-08-24 — one saved graph was from the wrong image |
+| [P39](#p39) | 7 days may be short of a confluent monolayer, so some cadherin gaps may be real | S3 | open — hypothesis, untested |
+| [P40](#p40) | `fibroblast_cellpose.py` thresholded noise as tissue; wall split degenerated silently | S2 | **fixed** 2026-08-25 — sanity-gate half still open |
+| [P41](#p41) | The en-face VE-cadherin wall has no polygonal cells; endothelial segmentation returns nothing | S2 | open — **blocks the subtraction route to [P05](#p05)** |
+| [P42](#p42) | `nuc_id` is a nearest-neighbour join presented as ownership | **S1** | open — **a cross-tab was retracted on this**; qualifies [P04](#p04) |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -1199,6 +1203,12 @@ and no nucleus-map change can reach the adhesion instances.
   correct** — `nuc_is_fibroblast` inherits every problem in P05, including the
   ~2× swing across one slider step.
 
+- 2026-08-25 — **qualified, not reopened.** `nuc_id` is joinable, which is what
+  this entry claimed and fixed. It is not *correct*: it is a nearest-neighbour
+  join, and at 19–25 µm nucleus spacing against a 50–100 µm cell footprint it
+  misassigns a spread cell's peripheral adhesions. Opened as [P42](#p42); no
+  analysis should aggregate adhesions by nucleus until that is resolved.
+
 ---
 
 <a id="p05"></a>
@@ -1320,6 +1330,68 @@ entry that was retired).
 ---
 
 <a id="p06"></a>
+- 2026-08-25 — **the seeding premise in the entry above is wrong, and correcting
+  it points at this classifier over-calling by roughly an order of magnitude.**
+  Not measured; queued. Full argument in `docs/DIRECTION.md` §8D.
+
+  The experimenter states the cardiac fibroblasts were **cast into the collagen
+  before gelation** (0.5 × 10⁶ cells/mL, 6 mg/mL collagen, fixed at 7 days), not
+  seeded onto a finished vessel. Three consequences for this entry:
+
+  - **Casting density predicts ~3–4 fibroblasts per field** (one cell per
+    2 × 10⁶ µm³, mean spacing ~126 µm, minus the ~40% of the field the vessel
+    occupies) against the 14–41 tabulated above. **This is not evidence on its
+    own** — 7 days at a 47–82 h doubling time reproduces the classifier's range,
+    and that is an ordinary rate in dense 3D collagen. Recorded as inconclusive.
+  - **The depth distribution is the part that discriminates.**
+    `docs/DIRECTION.md` §8A.1 found the signed nucleus-to-surface distance
+    unimodal, spanning −2.4 to +2.2 µm, with only 2.5% of nuclei more than 5 µm
+    abluminal. Cells scattered through a gel at 126 µm spacing should appear at
+    every distance out to the edge of the field; there is no such population.
+    A single peak at zero of monolayer width is what one wall-bound cell type
+    looks like. And **71.4% of the 7 most-abluminal nuclei are called
+    fibroblast** — the hit rate climbs steeply with distance.
+  - **"Essentially unimodal" is no longer a criticism of the marker.** The code
+    comment justifying the background-relative threshold notes perinuclear
+    mClover is only ~1.4× background and unimodal. If the true fibroblast share
+    is 2–4%, **no marker however good would produce a second mode**, and cutting
+    a unimodal distribution at background × 1.5 returns whatever fraction of the
+    tail lies above the cut. That is a property of the noise, and it accounts
+    for both the ~2× slider swing and the 5.0–14.9% between-image spread without
+    requiring the marker itself to be bad.
+
+  **This also weakens the 2026-08-22 corroboration rather than strengthening
+  it.** That entry's stated reason for trusting the signed distance —
+  "fibroblasts were seeded onto an existing vessel and are abluminal, so the
+  geometric measure has a physical reason to work" — rests on the wrong premise.
+  The corrected one cuts the other way: cells cast through the gel should be
+  separated by distance-from-wall *decisively*, so AUC 0.644–0.773 is a weak
+  result on a test that ought to be easy.
+
+  **Status unchanged pending one cheap measurement.** The fibroblasts carry the
+  VnTs sensor, so they are directly visible in the clover/ruby channels as whole
+  spread cells, isolated at 126 µm spacing and needing no threshold. ~5–10 per
+  field confirms the above; ~27 refutes it. Queued as `DIRECTION.md` Tier 3A
+  along with a `nuc_is_fibroblast` × signed-distance cross-tab (bounds the
+  false-positive rate from below) and a check of whether the fibroblast fraction
+  tracks per-image clover noise instead of biology.
+
+  **Not a defect in the shell radius.** Suspected and checked: the dilation
+  radius is `round(2.0 / scale[0])` with `scale[0]` the z spacing, which would
+  give the 0.9 µm `09step` file a 2.5× thinner in-plane shell. It does not — the
+  loader calls `to_isotropic` first, so `scale` is 0.325 isotropic on all six and
+  the shell is ~1.95 µm everywhere. Recorded so it is not re-investigated.
+- 2026-08-25b — **all three routes to the count have now failed**, so this entry
+  is no longer one cheap check from an answer. The eye count assumed the
+  fibroblasts would be unmistakable in the sensor channels; the experimenter
+  reports they are not distinguishable by eye. Grouping adhesions by nucleus was
+  tried as a substitute and **retracted** — a Voronoi artifact that also scores
+  the clover photons twice ([P42](#p42)). Endothelial subtraction by Cellpose
+  finds zero cells, because the en-face wall has no polygonal tiles
+  ([P41](#p41)). See `docs/DIRECTION.md` §8E. What is left is CD31 (an
+  independent per-cell endothelial label) and two bounding checks that validate
+  nothing — §8D.5 items 2 and 3.
+
 ## P06 — Tension readout drifts with imaging depth
 
 | | |
@@ -6086,3 +6158,229 @@ is the honest best case.
   with axial vessel curvature."
 - **Not defensible, and will not be until FRET is calibrated:** any slope in pN
   per unit curvature.
+
+<a id="p39"></a>
+## P39 — 7 days may be short of a confluent monolayer, so some cadherin gaps may be real
+
+| | |
+|---|---|
+| **Status** | open — hypothesis, not yet tested |
+| **Severity** | S3 |
+| **Opened** | 2026-08-25 |
+| **Last verified** | — |
+| **Resolved** | — |
+| **Where** | the dataset, not the code; bears on `pipeline/denoise.py` mask tuning |
+| **Affects** | the interpretation of [P28](#p28) / [P19](#p19), and vessel-surface coverage |
+
+The construct was fixed after **7 days** (`docs/DIRECTION.md` §3). The reference
+protocol this method descends from cultures endothelialised microvessels for
+**1–2 weeks** to reach "a confluent and continuous endothelium"
+(`docs/papers/ncomms8858.pdf`, Methods). Seven days sits at or below the short
+end of that.
+
+[P28](#p28) and [P19](#p19) established that the cadherin wall's apparent gaps
+are mostly *not* holes — mask-gap directions show the same peak radius as
+mask-present ones at ~40% the brightness, and the global floor plus `min_size`
+delete 59–85% of the dim wall. That evidence stands and is not in question here.
+
+What is in question is whether it accounts for **all** of the gaps. If the
+monolayer was still filling in at fixation, some fraction of the missing wall is
+genuinely absent rather than dim, and no threshold change will recover it.
+Chasing those with a more permissive mask would add speckle for nothing.
+
+**Why it matters even though it is S3.** It is an alternative hypothesis that
+nobody is currently holding, and it bounds how much [P28](#p28) can be expected
+to buy. It also changes what a coverage score means: `mesh_score`'s `coverage`
+asks "is the surface everywhere the data is", which is the right question only
+if the data is everywhere the *vessel* is.
+
+**How to test it.** Cheapest first:
+
+- Ask the experimenter whether the endothelium was confluent at 7 days, and
+  whether that was checked (`DIRECTION.md` §9). One sentence closes this.
+- Look at whether the dim-wall directions in [P28](#p28)'s analysis have a
+  bimodal residual — dim-but-present versus genuinely empty — rather than a
+  single dim population.
+- A real hole should be **contiguous across z** and bounded by bright wall on
+  all sides; thresholding loss should be scattered and depth-correlated
+  ([P03](#p03)).
+
+**Related:** [P28](#p28) (the continuous field, and the 59–85% dim-wall loss),
+[P19](#p19), [P03](#p03) (depth bias, the competing explanation),
+[I03](#i03) (what coverage is validated against).
+
+**History**
+- 2026-08-25 — opened while recording `docs/papers/ncomms8858.pdf` against this
+  project's protocol. Hypothesis only; no measurement.
+
+---
+
+<a id="p40"></a>
+## P40 — `fibroblast_cellpose.py` thresholded noise as tissue, and the wall split degenerated silently
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-25 (both defects); the no-sanity-gate part is **open** |
+| **Severity** | S2 |
+| **Opened** | 2026-08-25 |
+| **Last verified** | 2026-08-25 |
+| **Resolved** | 2026-08-25 — `_saved_wall_mask`, `_voxel_zyx`, `_split_z` guard |
+| **Where** | `Scripts/fibroblast_cellpose.py` — `_tissue_mask`, `_split_z` |
+| **Affects** | every endothelial count the script could produce; nothing else in the pipeline |
+
+The script had **never been run** before 2026-08-25 and was cited in neither
+`DIRECTION.md` nor this file. Running it surfaced two defects.
+
+**(a) `_tissue_mask` thresholded the noise.** Otsu on a smoothed copy, then the
+largest connected component, marked **24,484,433 of 61,603,840 voxels — 40% of
+the volume** — as tissue on image 6. The per-z profile was consequently flat at
+~40% on every plane. This is the same global-threshold failure [P36](#p36) and
+[P28](#p28) record for this channel: the wall is a thin, dim minority of a
+speckly volume, and a global cut lands inside the noise. The pipeline's own
+Niblack mask on the same image is **2.7–3.0%** nonzero.
+
+**(b) `_split_z` degenerated without saying so.** The valley search returned the
+**endpoint** of the tissue range (`zs = 234` on a 235-plane stack — a legal
+index, which is why it did not crash). At lines 235–236 that sends the whole
+stack to one "wall" and a single plane to the other, so a **whole-volume MIP was
+reported and plotted as an en-face wall projection**. A flat profile from (a)
+guarantees this, but it can happen whenever the two walls are not resolved as two
+humps in depth.
+
+**The fix.** `_saved_wall_mask` reuses the pipeline's saved `cadherin_labels.npz`
+rather than re-thresholding — this is CLAUDE.md's "never write the second copy",
+and it also means the endothelial count refers to the *same* wall as the mesh and
+the graph. Nearest-neighbour resampling from the isotropic 0.325 µm grid to the
+script's grid (boolean masks must not be interpolated); voxel size read from the
+OME header via a new `_voxel_zyx`, never hard-coded, since `09step` is 0.9 µm in
+z. Otsu remains as a labelled fallback for an image with no saved mask.
+`_split_z` now warns and falls back to the tissue-range midpoint when the minimum
+lands on an endpoint.
+
+**Still open: no sanity gate on the output.** The script wrote
+`0 endothelial / 174 nuclei / 100% fibroblast` to `endothelial_counts.csv`
+without complaint. A count of zero, or a fibroblast fraction at 0% or 100%,
+should refuse to write — same class as [P25](#p25), a nonsense number reaching a
+file. The garbage CSV produced during this session was deleted.
+
+**Also cosmetic but misleading:** `_qc_overlay`'s title prints `int(m.max())`,
+the highest **label id**, not the object count. It read "68 cells on this slice"
+where there was one.
+
+**Related:** [P41](#p41) (what the fixed script then showed), [P36](#p36),
+[P28](#p28), [P25](#p25).
+
+**History**
+- 2026-08-25 — opened and both defects fixed in the same session, while trying to
+  answer `DIRECTION.md` §8D.5's fibroblast count. See §8E.3.
+
+---
+
+<a id="p41"></a>
+## P41 — the en-face VE-cadherin wall has no polygonal cells, so endothelial segmentation returns nothing
+
+| | |
+|---|---|
+| **Status** | open — measured, not explained |
+| **Severity** | S2 |
+| **Opened** | 2026-08-25 |
+| **Last verified** | 2026-08-25 (image 6 only) |
+| **Resolved** | — |
+| **Where** | the data; `Scripts/fibroblast_cellpose.py` is the tool that surfaced it |
+| **Affects** | the endothelial-subtraction route to [P05](#p05); `DIRECTION.md` Tier 2 item 5a |
+
+With [P40](#p40)'s defects fixed — tissue mask at 3.0% of volume, a genuine
+interior valley at Z=205, no warning — **Cellpose returns zero objects on both
+wall projections** of image 6. Still zero at `--min-vox 0 --cellprob -2`, so it is
+not a size or probability filter deleting them.
+
+Two separate observations from the QC projection:
+
+- **The depth split is wrong for this geometry.** Image 6's vessel curves
+  diagonally across the field, so it has no top and bottom wall at separable
+  depths; the vessel landed almost entirely in one half. Doing this properly
+  means **unwrapping the surface using the Poisson mesh the project already
+  has**, not splitting by z.
+- **Where the wall *is* seen en-face, the texture is fibrous filaments and
+  speckle, with no closed polygonal tiles.** There is nothing cell-shaped to
+  segment. This is independent of the split problem and is the reason the route
+  fails.
+
+**Two candidate explanations, neither tested.** [P39](#p39) — the monolayer was
+not confluent at 7 days, so there are no complete junctional polygons to find; or
+[P28](#p28) — the junctions are present but too dim and too dashed to close a
+contour. They are distinguishable, and the same evidence P39 lists would separate
+them.
+
+**Do not tune this script further.** The blocker is image content, not
+parameters, and eye-tuning a parameter that then has to be recorded is exactly
+what [P26](#p26) warns against.
+
+**One caveat not chased:** cellpose 4.x is the SAM rewrite and ignores
+`model_type=cyto3`; 3.x might behave differently. That is a dependency downgrade
+on speculation.
+
+**Related:** [P39](#p39), [P28](#p28), [P05](#p05), [P40](#p40),
+[I02](#i02).
+
+**History**
+- 2026-08-25 — opened. Image 6 only; the other five were not run, because the
+  failure is structural rather than image-specific.
+
+---
+
+<a id="p42"></a>
+## P42 — `nuc_id` is a nearest-neighbour join presented as ownership
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | **S1** |
+| **Opened** | 2026-08-25 |
+| **Last verified** | 2026-08-25 (all six images) |
+| **Resolved** | — |
+| **Where** | `pipeline/measure_core.py` — `nuc_assignment`, `dist_nuc_um` |
+| **Affects** | `nuc_id`, `nuc_is_fibroblast` per adhesion; any per-cell aggregation |
+
+[P04](#p04) is closed as fixed because cell type became **joinable** per adhesion
+via `nuc_id`. It is joinable. It is not **correct**, and the difference matters
+for any analysis that groups adhesions by cell.
+
+`nuc_id` is the nearest nucleus. Measured on all six images:
+
+- **Nucleus spacing is 19–25 µm** on the wall (√(area/N); 174–315 nuclei over a
+  ~332 × 332 µm field), ~34 µm volumetric.
+- A spread fibroblast footprint is **50–100 µm**, so its peripheral adhesions sit
+  25–50 µm from their own nucleus while two or three other nuclei are nearer.
+- The artifact is visible directly: per-nucleus adhesion groups have **median
+  radius 16–17 µm in every image** — half the nucleus spacing, i.e. the radius of
+  a Voronoi cell. The groups are a tessellation of the field, not cells.
+
+**What this invalidated.** A cross-tab showing classifier-called fibroblast
+nuclei owning 1.5–6× more adhesions than endothelial ones, consistent in
+direction across all six images, was withdrawn on these grounds. It is confounded
+a second way as well: the [P05](#p05) classifier thresholds perinuclear mClover
+while the adhesions are detected in that same channel, so it scores the same
+photons twice — §8C.5's structural trap in a new place.
+
+**What survives and is worth measuring.** `dist_nuc_um` has median **4.5–6.2 µm**
+across the six, which appears **below** what chance would give at this nucleus
+density. That statistic does not care which nucleus is the correct one, so it
+survives the defect. If it holds against a proper CSR null it says the detected
+adhesions are **perinuclear** — backwards for focal adhesions, and consistent
+with the detector fragmenting perinuclear cytoplasmic signal, which would reach
+[P03](#p03) and [P02](#p02). **The null has not been computed**; the expectation
+above was estimated by hand and must not be quoted as a result.
+
+**What a fix would need.** Ownership requires a segmented cell body — sensor
+signal grouped into cells, then adhesion-to-cell by containment rather than
+proximity. Whether that is possible on this data is open: the fibroblasts are not
+distinguishable by eye in the sensor channels (§8E.1). Until then, `nuc_id`
+should be documented as a proximity join and **no analysis should aggregate
+adhesions by nucleus**.
+
+**Related:** [P04](#p04) (which this qualifies), [P05](#p05), [P03](#p03),
+[P11](#p11), `DIRECTION.md` §8E.2.
+
+**History**
+- 2026-08-25 — opened after the adhesions-per-nucleus cross-tab was retracted.

@@ -96,7 +96,7 @@ true of the code and data on that date and may not be true now.
 | [I01](#i01) | Progress / completion bars for long-running operations | idea | open |
 | [I02](#i02) | Fibroblast / endothelial scatter diagnostic | idea | open |
 | [I03](#i03) | Objective-scored auto-calibration of the vessel mesh | idea | open — **scorer landed** (`mesh_score`); choosing still open; **2026-08-21: `slope_loglog` alone was gamed by a worthless mesh** |
-| [I04](#i04) | `batch.py` has no way to re-run one step | idea | open — **mesh/curvature/centerline done** |
+| [I04](#i04) | `batch.py` has no way to re-run one step | idea | **done** 2026-08-24 — `batch.py --steps` |
 | [I05](#i05) | Is the alpha shape the right reconstruction method at all? | idea | open |
 | [I06](#i06) | Oriented-point implicit reconstruction — the plan of record | idea | **in progress — `alpha 3D solid -> poisson` is the direction of record as of 2026-08-21**, visually confirmed; three refinements open (bumps, runtime, Open3D) |
 | [I07](#i07) | Local thresholding on the clover channel | idea | open — **root cause of [P03](#p03); tools exist, unused on this path** |
@@ -105,7 +105,8 @@ true of the code and data on that date and may not be true now.
 | [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
 | [P34](#p34) | Cadherin tab computed per-component centroids eagerly for an off-path consumer | S3 | **fixed** — 34.45 s -> 0 at `floor_k` 3.0 |
 | [P35](#p35) | `alpha 3D` hangs forever on a permissive mask, with no warning | S3 | **mitigated** — guard landed 2026-08-24; it refuses instead of hanging |
-| [P36](#p36) | The cadherin "local threshold" is inert: the mask is a global threshold | **S2** | open — **Sauvola is inert and the batch path forces it; Niblack works and is only the interactive default** |
+| [P36](#p36) | The cadherin "local threshold" is inert: the mask is a global threshold | **S2** | open — Sauvola inert; **the forcing override is fixed 2026-08-24**, Niblack is now the default everywhere |
+| [P37](#p37) | The loader overwrote `floor_k` on every load, so the tab default never ran | S2 | **fixed** 2026-08-24 |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -4448,6 +4449,17 @@ per image too.
   probability map remain all-or-nothing under `pipeline.batch`. Those are the
   steps that need the image pixels, which is exactly why they are the ones left.
 
+
+> **Done 2026-08-24.** `batch.py --steps` takes `all`, a comma-separated list,
+> or a `first:last` range over the stable short names `dapi, fibroblasts,
+> cadherin, mesh, curvature, graph, clover, rf, postprocess`. Order is always
+> the pipeline's own, never the order typed, so a later step consuming an
+> earlier one's output cannot be run first by typo; unknown names and empty
+> ranges are argparse errors, not silent no-ops.
+>
+> **The caveat is in the help text and matters:** a step re-run alone still
+> reads the tab defaults, so it reproduces an earlier run only if those have not
+> moved ([P26](#p26)) — which [P37](#p37) shows is not something to assume.
 ---
 
 <a id="i05"></a>
@@ -5582,6 +5594,37 @@ surface can judge. The test is `mesh_score`'s four numbers on a reconstruction
 from each composition, plus the shallow/deep acceptance ratio.
 
 **Related:** [P28](#p28), [P19](#p19), [P03](#p03), [I07](#i07), [P26](#p26).
+
+---
+
+<a id="p37"></a>
+## P37 — The loader overwrote `floor_k` on every image load, so the tab default never ran
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-24 |
+| **Severity** | S2 |
+| **Opened** | 2026-08-24 |
+| **Resolved** | 2026-08-24 — `gui/loader.py` no longer calls `seed_cadh_floor`; it is a button on the Cadherin tab |
+| **Where** | `gui/loader.py` (the load path) calling `gui/cadherin.py::_seed_floor` |
+
+Caught mid-rebuild: the Cadherin tab's `floor_k` default said **1.0** and the
+run logged **`floor_k=4.595517`**. `_seed_floor` ran from the loader on every
+image load and replaced whatever was there with `suggest_floor_k(raw)` — so the
+shipped default never reached a build, and a value typed for the previous image
+was silently overwritten when the next one loaded.
+
+Same shape as [P26](#p26): **the recorded default is not what runs.** It is
+worse than a stale default, because nothing in the settings JSON distinguishes
+"the user chose this" from "the loader imposed it".
+
+Auto-seeding was defensible while the floor was the **primary** gate — which it
+was for exactly as long as the local threshold was Sauvola and therefore inert
+([P36](#p36)). With Niblack live the floor is a weak backstop and its value is a
+deliberate choice, so it is no longer imposed. `suggest_floor_k` remains, as an
+explicit **"Suggest floor_k"** button that prints what it set.
+
+**Related:** [P26](#p26), [P36](#p36), [P28](#p28).
 
 ---
 

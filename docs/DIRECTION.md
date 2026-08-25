@@ -1028,7 +1028,30 @@ the repo, and [I02](ISSUES.md#i02) is still the entry for it.
   [P27](ISSUES.md#p27), [P29](ISSUES.md#p29) and §8A.3's defect A — because the
   code they describe is deleted.
 
-## 8C.7 The one decision left open, deliberately
+## 8C.7 The one decision left open, deliberately — **taken 2026-08-24**
+
+> **Resolved: `alpha 3D solid -> poisson` is adopted as the shipped
+> reconstruction**, on the user's explicit decision of 2026-08-24. The Vessel
+> mesh tab's default method is now `alpha 3D solid -> poisson`, so the untagged
+> `vessel_mesh.npz` holds it and the `__alphapoisson` tag stops being the only
+> place it lives.
+>
+> **Adopted by decision, not by a scored sweep.** [I03](ISSUES.md#i03)'s
+> selection rule is still unwritten, and `mesh_score`'s four numbers were not
+> used to choose. What the decision rests on is §6.2's table — it is the first
+> reconstruction to reach [P24](ISSUES.md#p24)'s plateau (`slope_loglog`
+> -0.024 against alpha 3D's -0.214), it is manifold and single-piece where
+> alpha 3D is 8.3% non-manifold across 42 pieces, and it does not lose on
+> coverage once read at 10 µm (98.2% vs 93.3%) — plus a visual confirmation on
+> the reference image. **It does not beat alpha 3D on coverage at 5 µm**
+> (91.3% vs 99.1%), and that remains true after adoption.
+>
+> Consequence: `batch_measure` will now find an untagged `vessel_graph.npz`, so
+> **the geometry columns stop exporting blank**. Every geometry column in a CSV
+> exported from here on is alpha->poisson, and every one in the
+> `20260812_011*` set is not — the two must not be pooled.
+
+## The original text, kept because the reasoning still applies to the next such decision
 
 The canonical `vessel_mesh.npz` is **still alpha 3D**. The graph is built on the
 Poisson lumen, so the new artifacts are tagged `__alphapoisson` and the
@@ -1080,7 +1103,56 @@ of which the export should accept as optional inputs rather than assume.
 
 # History
 
-- **2026-08-22** (latest) — **Tier 2 built and measured (§8C).** All six images
+- **2026-08-24** (latest) — **a session of defect-finding in the mask pipeline,
+  and one adoption.** Nothing here changes the scientific program; it changes
+  what the program has been running on.
+
+  **The finding that matters: the cadherin "local threshold" was inert**
+  ([P36](ISSUES.md#p36)). `sauvola AND floor` is bit-identical to `floor` alone
+  at every setting tested, because Sauvola's normaliser is half the *global*
+  intensity range — 3,777 against a median local σ of 16 — so the adaptive term
+  contributes 0.4% of `k` and the threshold falls below background. **Every
+  cadherin mask in this project was a pure global intensity cut**, and
+  therefore inherited [P03](ISSUES.md#p03)'s depth bias without anyone
+  accounting for it. Niblack is *not* inert and was the tab's interactive
+  default, but `_run_cadherin_step` forced Sauvola for both `batch.py` and the
+  GUI's "Run all" — so the method being tuned and the method being shipped were
+  different, and the shipped one did nothing.
+
+  This reframes [P28](ISSUES.md#p28) rather than overturning it. Its
+  attribution of the loss to `floor_k` and `min_size` stands and is now the
+  whole story; its conclusion that "the local threshold is innocent" was
+  numerically right and read wrong. It also means **every previous attempt at a
+  more permissive cadherin mask was made with the local threshold switched
+  off**, which is why they all degraded the reconstruction.
+
+  **[P28](ISSUES.md#p28) is downgraded to a nice-to-have for reconstruction**,
+  on the user's argument: a false positive (lumen speckle) *moves* the surface
+  and can break orientation outright, while a false negative (dropped dim wall)
+  only leaves a patch unconstrained, and Poisson approximates rather than
+  interpolates, so it bridges smoothly. Recovering the dim wall buys a
+  better-*evidenced* surface, not a different one. Two caveats keep it from
+  being optional: the missing wall is depth-systematic rather than random, and
+  past a certain hole size the level set escapes — which is
+  [P32](ISSUES.md#p32), not a confidence question.
+
+  **The clover gate's depth bias is fixed and the cause is confirmed optical**
+  ([I07](ISSUES.md#i07), [P03](ISSUES.md#p03)). Holding wall orientation fixed,
+  adhesion density still falls with absolute depth on 4 of 6 images — gravity,
+  the only rival explanation, cannot do that. The gate is now a local threshold:
+  acceptance shallow/deep goes **3.06 → 0.91** at 98.85% recall. **Not yet
+  demonstrated end-to-end** — that needs re-detection.
+
+  **§8C.7 is taken**: alpha->poisson is adopted as the shipped reconstruction.
+
+  Also: [P33](ISSUES.md#p33)–[P37](ISSUES.md#p37) opened (a Sauvola PCIe
+  transfer bug, an eager centroid loop costing 34 s a run, an unbounded alpha
+  3D hang, the inert threshold, and a loader that overwrote `floor_k` on every
+  load), [I04](ISSUES.md#i04) closed with `batch.py --steps`, and
+  [I08](ISSUES.md#i08) opened to remove "Refine with cadherin". Sliders in the
+  Cadherin and Vessel-mesh tabs are now scoped to the active dropdown.
+
+- **2026-08-22** — **Tier 2 built and measured (§8C).** All six images
   rebuilt with `alpha 3D solid -> poisson` at one recorded parameter set; the 2D
   centerline **deleted** and replaced by `lumen_graph`, a 3D graph on the
   Poisson lumen with arc length, scale-aware pruning, crop classification and

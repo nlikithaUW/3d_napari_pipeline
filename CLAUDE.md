@@ -134,7 +134,18 @@ where the fibroblasts are.
 - `gpu.py` — optional cupy shim for windowed ndimage ops. Falls back to CPU on
   genuine OOM only; any other CUDA error raises.
 - `denoise.py` — Otsu / Niblack / Sauvola / Bernsen thresholding, size filtering,
-  and `local_contrast_score` — the Niblack statistic as a **continuous rectified
+  and `build_mask` — the **single dispatch** for threshold + label +
+  size-suggest, shared by the Clover tab and `adhesion_rf`'s gate so the mask
+  you tune and the mask the RF gates on cannot differ (they each had their own
+  copy). **`sauvola_mask` is inert on this data and the reason is structural**
+  (`docs/ISSUES.md` P36): it normalises by half the *global* intensity range, so
+  the adaptive term contributes ~0.4% of `k` and the threshold falls below
+  background — `sauvola AND floor` is bit-identical to `floor` alone. Every
+  cadherin mask built before 2026-08-24 was therefore a pure global cut.
+  **Niblack is not inert** (`vol > m + k·s`, no global term) and is now the
+  default everywhere. Two sign conventions live side by side and run opposite
+  ways: Niblack's higher `k` is **stricter**, Sauvola's is **more permissive**.
+  Also `local_contrast_score` — the Niblack statistic as a **continuous rectified
   field** rather than a mask (`docs/ISSUES.md` P28). It and `niblack_mask` both
   call `_local_zscore`, so the threshold and the field are the same quantity by
   construction, not two copies that drift; the identity
@@ -220,7 +231,13 @@ where the fibroblasts are.
   drift apart. Also `describe_saved`, behind `batch_measure --check-only` and
   `batch_mesh --check-only`.
 - `batch.py`, `batch_measure.py`, `batch_mesh.py`, `batch_postprocess.py` —
-  headless runners. **`batch.py` writes no CSV** (stops before Measure);
+  headless runners. **`batch.py --steps`** re-runs part of the pipeline —
+  `all`, a comma-separated list, or a `first:last` range over
+  `dapi, fibroblasts, cadherin, mesh, curvature, graph, clover, rf,
+  postprocess`; order is always the pipeline's own, never the order typed. A
+  step re-run alone still reads the tab defaults, so it reproduces an earlier
+  run only if those have not moved (P26, and P37 for how that bites).
+  **`batch.py` writes no CSV** (stops before Measure);
   `batch_measure.py` does. `batch_mesh.py` rebuilds only the vessel geometry
   (mesh / surface curvature / centerline **graph**; `--steps graph` needs a
   Poisson-family method, since the graph is built on the solved lumen) from the saved cadherin mask plus the
@@ -270,7 +287,20 @@ Two machines, two separate environments that happen to share a name:
   not hard-coded defaults. The user wants to see and adjust.
 - **The GUI and the headless path must both work and must not drift.** When both
   need the same computation, extract it into the core package and have both call
-  it (`saved_check.py`, `vessel_mesh.build_mesh`). Never write the second copy.
+  it (`saved_check.py`, `vessel_mesh.build_mesh`, `denoise.build_mask`,
+  `vessel_mesh.check_alpha_vs_spacing`). Never write the second copy.
+  **This rule has been broken three times and each break cost real work**, so
+  it is worth stating what the breaks looked like: a headless runner *forcing a
+  different method* than the tab (`_run_cadherin_step` forced Sauvola for both
+  `batch.py` and "Run all", so the method being tuned was never the method
+  shipped — P36); a check that existed **only** in the headless path, so a rule
+  was enforced there and silent in the GUI (`alpha3d_um` vs `subsample_um`); and
+  a loader **overwriting a tab default on every image load**, so the recorded
+  default never reached a build (P37). None of these is a duplicated function —
+  they are all one path quietly deciding for the other.
+- **A default is a decision, because `batch.py` runs at widget defaults and has
+  no CLI for them.** Changing one changes every headless run and invalidates the
+  artifacts it produced; nothing may silently overwrite one.
   Headless equivalents of a slider are argparse flags with **no upper bound** —
   a slider ceiling is a widget limit, not a physical one, and hand-tuned values
   sitting exactly at one may have been truncated rather than converged.

@@ -117,6 +117,7 @@ true of the code and data on that date and may not be true now.
 | [P44](#p44) | The RF's training annotations were never saved; the model cannot be retrained | **S2** | open — **blocks [P03](#p03)'s hypothesis and its fix**; escalates [H02](#h02) |
 | [P45](#p45) | `batch_mesh` crashed on every invocation — two names used, never imported | S3 | **fixed** 2026-08-26 — every mesh artifact since `48b4f9d` came from the GUI |
 | [P46](#p46) | A digitized wall is longer than the wall it stands for, so absolute τ reads ~5% low | S3 | open — **quantified, common-mode**; cancels in the within-segment profile, not in Pa |
+| [P47](#p47) | Emptying the cell-mesh slice `Shapes` layer poisons its mesh with NaN and faults the GL draw | S3 | **fixed** 2026-08-26 — a second, unguarded `add_surface` fixed in the same change |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -6801,3 +6802,95 @@ nothing larger is hiding under it.
   wrong way; first-layer closed form, ±28% scatter on a digitized curve); the
   near-wall quadratic fit that shipped is what left this as the only bias
   standing.
+
+---
+
+## P47 — Emptying the cell-mesh slice `Shapes` layer poisons its mesh with NaN, and the GL draw faults
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-26 |
+| **Severity** | S3 |
+| **Opened** | 2026-08-26 |
+| **Last verified** | 2026-08-26 (`docs/scratch/p47/shapes_nan_check.py`) |
+| **Resolved** | 2026-08-26 |
+| **Where** | `pipeline/gui/cell_mesh.py` — `_update_section`, and the `add_surface` call in `_rebuild_layers` |
+| **Affects** | the napari GUI only — it crashes a draw. **No exported number is wrong because of this.** |
+
+Rebuilding the cell mesh with different parameters crashed the vispy draw:
+
+    OSError: exception: access violation reading 0x000000000000002C
+
+in `glDrawArrays(GL_TRIANGLES, 0, 3)`, under
+`ShapesVisual -> Mesh -> Visual.draw`. The app survived — the exception comes out
+through napari's excepthook, not a hard abort — so this reads as a nuisance
+rather than a fault, and that is exactly why it went unrecorded for as long as it
+did.
+
+**The cause is in napari's layer model, not in the geometry we hand it.**
+`_update_section` blanked the `Cell mesh (slice)` overlay by assigning an empty
+array:
+
+```python
+layer.data = segs if len(segs) else np.zeros((0, 2, 3), dtype=np.float32)
+```
+
+In napari 0.6.0 an empty assignment does **not** clear the layer's internal
+triangle mesh. Refilling it afterwards appends to what is still there, and the
+result carries non-finite vertices:
+
+| sequence | mesh vertices | triangles | non-finite |
+|---|---|---|---|
+| fill | 40 | 40 | 0 |
+| fill, empty, refill | 60 | 80 | **20** |
+| fill, fill (no empty) | 40 | 40 | 0 |
+
+So it is the **empty**, not the reassignment. A non-finite vertex coordinate is
+cause #2 in `gui/widgets.py::finite_surface`'s own docstring for this precise
+`OSError`, and the `_section_segments` comment at the top of `cell_mesh.py`
+records the project hitting the same crash once before, from genuinely
+degenerate segments. **That earlier fix sanitized our input, which cannot help
+here** — these NaNs are manufactured downstream of anything we pass in.
+
+**There is a second door into the same state.** A mesh rebuild removes the layer
+(`_done` and `_rebuild_layers` both do), and `_update_section` then re-creates
+it — with an empty array, if no triangle happens to cross the current z.
+`add_shapes` on a `(0, 2, 3)` array infers **ndim=2**, not 3, and the first real
+assignment produces the identical 20-of-60 poisoned mesh. That is the path the
+crash actually came in by: recompute with new parameters, at a z the new mesh
+does not reach.
+
+**Fix.** Never hand the layer an empty array. `_update_section` now hides the
+layer (`visible = False`) when there is nothing to draw, keeping its last good
+mesh, and creates it only once there are real 3D segments. Verified over a
+simulated z-scan with empty slices interleaved and a rebuild in the middle:
+worst-case non-finite vertices **20 -> 0**.
+
+The cost is that the overlay drives its own visibility checkbox, so toggling it
+by hand is overridden at the next z-step. The alternative — removing and
+re-adding the layer, which is what `vessel_mesh.py`'s graph path and `roi.py`
+already do and why neither has this bug — resets styling and layer order, and
+this callback fires on every z-step.
+
+**A second defect, found while reading and fixed in the same change.** This tab
+has two builders, and only one of them sanitized its surface: `_done` called
+`finite_surface(verts_disp, faces, vals)` before `add_surface`, while
+`_rebuild_layers` passed the raw tuple. `finite_surface` exists *because* an
+out-of-range face index or a non-finite vertex faults the GL draw, so the second
+path was one bad alpha away from the same crash on the `Cell mesh` surface.
+Both now call it. **This is the guard-in-one-path-only shape that CLAUDE.md's
+working agreement warns about**, in miniature: not a duplicated function, just
+one path quietly not doing what its sibling does.
+
+**Why nothing caught it.** The failure is a GL fault in a Qt paint callback, so
+no headless test could ever have reached it — but the *state* that causes it is
+in the layer model, upstream of vispy, and needs no GL at all to observe.
+`docs/scratch/p47/shapes_nan_check.py` pins it in about a second.
+
+**Related:** [P45](#p45) (the same "no smoke test on the path that broke"),
+[P38](#p38) (GUI state surviving a rebuild it should not have).
+
+**History**
+- 2026-08-26 — opened and fixed. Found from a user-reported traceback while
+  retuning cell-mesh parameters; reproduced headless, both defects fixed, repro
+  script added.

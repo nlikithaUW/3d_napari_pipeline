@@ -81,29 +81,48 @@ def build(state, viewer) -> Container:
 
     SECTION_NAME = "Cell mesh (slice)"
 
+    def _hide_section():
+        """Blank the slice overlay **without emptying it** ([P47]).
+
+        Never assign an empty array to the `Shapes` layer. napari 0.6.0 does not
+        clear the layer's triangle mesh on an empty assignment: refilling it
+        afterwards leaves NaN vertices in that mesh (20 of 60 for a two-segment
+        refill), and a non-finite vertex faults the GL draw with
+        `OSError: access violation` inside `glDrawArrays` — the same failure
+        `widgets.finite_surface` guards for on surfaces. Hiding the layer keeps
+        its last good mesh intact.
+        """
+        if SECTION_NAME in viewer.layers:
+            viewer.layers[SECTION_NAME].visible = False
+
     def _update_section(*_):
         mc = state.get("mesh_cache") or {}
         verts = mc.get("verts")
         faces = mc.get("faces")
         if verts is None or faces is None or len(faces) == 0:
-            if SECTION_NAME in viewer.layers:
-                viewer.layers[SECTION_NAME].data = np.zeros((0, 2, 3), dtype=np.float32)
+            _hide_section()
             return
         # World-z of current slice (mesh verts are in µm; image scale = µm/voxel).
         scale = state.get("scale", (1.0, 1.0, 1.0))
         step_z = int(viewer.dims.current_step[0])
         plane_z = step_z * float(scale[0])
         segs = _section_segments(verts, faces, plane_z)
+        if not len(segs):
+            _hide_section()
+            return
         if SECTION_NAME in viewer.layers:
             layer = viewer.layers[SECTION_NAME]
-            layer.data = segs if len(segs) else np.zeros((0, 2, 3), dtype=np.float32)
+            layer.data = segs
         else:
-            data = segs if len(segs) else np.zeros((0, 2, 3), dtype=np.float32)
-            viewer.add_shapes(
-                data, shape_type="line", name=SECTION_NAME,
+            # Create it only once there is real 3D data: `add_shapes` on a
+            # (0, 2, 3) array infers ndim=2, and the first non-empty assignment
+            # then produces the same NaN mesh ([P47]).
+            layer = viewer.add_shapes(
+                segs, shape_type="line", name=SECTION_NAME,
                 edge_color="cyan", edge_width=0.4,
                 blending="additive",
             )
+        layer.visible = True
 
     # Connect once; survives mesh rebuilds. Idempotent guard via state flag.
     if not state.get("_section_hooked"):
@@ -328,7 +347,7 @@ def build(state, viewer) -> Container:
         verts_disp = offset_centroids
         vals = np.linalg.norm(verts_disp - verts_disp.mean(0), axis=1)
         viewer.add_surface(
-            (verts_disp, faces, vals), name="Cell mesh",
+            finite_surface(verts_disp, faces, vals), name="Cell mesh",
             colormap="cividis", blending="translucent", opacity=0.6,
         )
         _update_section()

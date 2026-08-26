@@ -24,9 +24,32 @@ from magicgui.widgets import (
 )
 from napari.qt.threading import thread_worker
 
-from ..denoise import auto_min_size_otsu, filter_by_size, label_and_sizes, otsu_mask
+from ..denoise import build_mask
+from ..fret import background_subtract
 from ..rf import AdhesionRF, instance_labels_3d
-from .widgets import debounce, pyramid_views
+from .widgets import (
+    after_on_error,
+    call_all,
+    debounce,
+    pyramid_views,
+    with_after,
+)
+
+
+def _bs_per_z(vol: np.ndarray) -> np.ndarray:
+    """Per-Z-plane background subtraction, via the frozen ``fret`` routine.
+
+    Each plane's modal intensity is its own background (the mode shifts with
+    depth as the illumination attenuates), so this must be applied plane by
+    plane rather than once over the volume.
+    """
+    out = np.empty(vol.shape, dtype=np.float32)
+    for z in range(vol.shape[0]):
+        # background_subtract returns float64; write straight into the float32
+        # buffer so only one plane's worth of float64 exists at a time (np.stack
+        # of every plane would peak at 2x the volume in float64).
+        out[z] = background_subtract(vol[z])
+    return out
 
 
 def build(state, viewer) -> Container:
@@ -112,10 +135,21 @@ def build(state, viewer) -> Container:
     # Section 3 — RF predict (slow; run once, stores proba map)           #
     # ------------------------------------------------------------------ #
 
-    gate_by_clover_w = CheckBox(value=True, label="gate_by_clover")
+    # Default OFF as of 2026-08-25. The gate was only ever a compute shortcut,
+    # and it was a bad one: `predict_proba` chunks over *all* z regardless, and
+    # the dense Gaussian filtering that dominates the cost (feat≈80 s vs rf≈9 s
+    # per chunk) is paid per chunk whatever the gate selects. It therefore saved
+    # ~10% of runtime while deciding a priori which voxels were allowed to be
+    # positive — the bias [P03](../../docs/ISSUES.md#p03) is about.
+    #
+    # Measured on image 6 (`docs/ISSUES.md` I07): widening the gate from Otsu's
+    # ~3% of the volume to niblack's 93.4% left the proba ≥ 0.5 set
+    # **bit-identical** — 0 voxels differed. So the gate was never binding, and
+    # removing it costs correctness nothing and runtime ~12%.
+    gate_by_clover_w = CheckBox(value=False, label="gate_by_clover")
     clover_dilation_um_w = FloatSlider(value=1.0, min=0.0, max=10.0,
                                        label="clover_dilation_um")
-    clover_dilation_um_w.visible = True
+    clover_dilation_um_w.visible = False
 
     def _on_gate_clover(val):
         clover_dilation_um_w.visible = bool(val)
@@ -128,14 +162,12 @@ def build(state, viewer) -> Container:
         rf: AdhesionRF | None = state.get("adhesion_rf")
         if rf is None or not rf.is_trained:
             print("No trained RF. Train or load a model first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         clover_raw = state.get("clover_raw")
         if clover_raw is None:
             print("Load a stack first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
 
         voxel_um = state.get("scale", (1.0, 1.0, 1.0))
@@ -219,53 +251,53 @@ def build(state, viewer) -> Container:
                 )
                 print("Probability map stored. Adjust post-process and hit Apply.",
                       flush=True)
-                if after:
-                    after()
 
             def _err(exc):
                 print(f"Predict error: {exc}", flush=True)
-                if after:
-                    after()
 
             mode = f"gated by clover (dilation={dilation_um} µm)" if gate_clover else "full volume"
             print(f"Running RF predict ({mode}) ...", flush=True)
             w = _run()
-            w.returned.connect(_done)
-            w.errored.connect(_err)
+            w.returned.connect(with_after(_done, after, "RF predict"))
+            w.errored.connect(with_after(_err, after, "RF predict"))
             w.start()
 
         if gate_clover and state["clover_state"]["labels"] is None:
-            print("gate_by_clover: clover mask not computed — running Otsu first ...",
-                  flush=True)
+            # Build it with the Clover tab's own settings, not a hard-coded
+            # Otsu. This used to be a second copy of that tab's threshold, so
+            # the mask the user tuned there and the mask the RF gated on could
+            # differ silently; both now go through `denoise.build_mask`.
+            get_params = state.get("clover_threshold_params")
+            cl_params = get_params() if callable(get_params) else {}
+            cl_method = cl_params.get("method", "otsu")
+            print(f"gate_by_clover: clover mask not computed — running "
+                  f"{cl_method} first ...", flush=True)
 
             @thread_worker
             def _run_otsu():
-                mask = otsu_mask(clover_raw)
-                labels, sizes = label_and_sizes(mask)
-                suggested = auto_min_size_otsu(sizes)
-                filtered = filter_by_size(labels, sizes, suggested)
-                return labels, sizes, suggested, filtered
+                return build_mask(clover_raw, state["scale"], **cl_params)
 
             def _otsu_done(result):
                 labels, sizes, suggested, filtered = result
                 state["clover_state"]["labels"] = labels
                 state["clover_state"]["sizes"] = sizes
-                state["clover_state"]["method"] = "Otsu"
+                state["clover_state"]["method"] = cl_method
                 clover_mask_layer = state.get("clover_mask_layer")
                 if clover_mask_layer is not None:
                     clover_mask_layer.data = pyramid_views(filtered, levels)
-                print(f"Clover Otsu done: {sizes.size} components, "
+                print(f"Clover {cl_method} done: {sizes.size} components, "
                       f"min_size={suggested}.", flush=True)
+                # _start_rf() launches the RF worker, which owns the `after`
+                # hand-off from here — hence `after_on_error` below, so the
+                # chain isn't advanced the moment RF predict *starts*.
                 _start_rf()
 
             def _otsu_err(exc):
-                print(f"Clover Otsu error: {exc}", flush=True)
-                if after:
-                    after()
+                print(f"Clover threshold error: {exc}", flush=True)
 
             w = _run_otsu()
-            w.returned.connect(_otsu_done)
-            w.errored.connect(_otsu_err)
+            w.returned.connect(after_on_error(_otsu_done, after, "Clover threshold"))
+            w.errored.connect(with_after(_otsu_err, after, "Clover threshold"))
             w.start()
         else:
             _start_rf()
@@ -322,18 +354,14 @@ def build(state, viewer) -> Container:
             lyr.visible = visible
             print("Probability map loaded. Adjust post-process and hit Apply.",
                   flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Load proba error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Loading probability map from {path} ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Load proba"))
+        w.errored.connect(with_after(_err, after, "Load proba"))
         w.start()
 
     save_proba_w.changed.connect(_save_proba)
@@ -378,8 +406,7 @@ def build(state, viewer) -> Container:
         proba_vol = state.get("adhesion_proba")
         if proba_vol is None:
             print("No probability map. Run RF predict first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
 
         thresh = float(prob_threshold_w.value)
@@ -463,18 +490,14 @@ def build(state, viewer) -> Container:
             # flaky and can add a layer with no GPU visual, which then breaks
             # the canvas layer-reorder on the next visibility toggle.
             viewer.add_labels(labels, name=name, scale=scale)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Apply error: {exc}", flush=True)
-            if after:
-                after()
 
         print("Applying post-process ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Apply post-process"))
+        w.errored.connect(with_after(_err, after, "Apply post-process"))
         w.start()
 
     apply_w.changed.connect(_apply)
@@ -518,18 +541,14 @@ def build(state, viewer) -> Container:
             lyr.visible = visible
             print(f"Loaded instances <- {path} ({int(vol.max())} adhesions).",
                   flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Load instances error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Loading instances from {path} ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Load instances"))
+        w.errored.connect(with_after(_err, after, "Load instances"))
         w.start()
 
     save_inst_w.changed.connect(_save_inst)
@@ -539,20 +558,21 @@ def build(state, viewer) -> Container:
     # Chainable "Run all" steps: RF predict then save proba; post-process (with
     # split_merged on) then save instances; each calls `after` when done.
     state["run_rf_predict"] = lambda after=None: _predict(
-        after=(lambda: (_save_proba(), after() if after else None)))
+        after=lambda: call_all(_save_proba, after, label="run_rf_predict"))
 
     def _run_rf_postprocess(after=None):
         split_merged_w.value = True
-        _apply(after=(lambda: (_save_inst(), after() if after else None)))
+        _apply(after=lambda: call_all(_save_inst, after,
+                                      label="run_rf_postprocess"))
     state["run_rf_postprocess"] = _run_rf_postprocess
 
     # ------------------------------------------------------------------ #
     # Section 4b — Clover/Ruby ratio inside adhesions                      #
     # ------------------------------------------------------------------ #
     # Derived layer: clover / ruby per voxel, but only inside the "Adhesion
-    # instances" mask (0 outside, and 0 where ruby == 0). Also reports a
-    # per-adhesion mean ratio, averaged over that adhesion's ruby > 0 voxels,
-    # stored in state["clover_ruby_ratio"] for downstream use (e.g. Measure).
+    # instances" mask (0 outside, and 0 where ruby == 0) — display only. Also
+    # reports the per-adhesion ratio (Σclover/Σruby over background-subtracted
+    # voxels), stored in state["clover_ruby_ratio"] for downstream use.
 
     ratio_btn = PushButton(text="Clover/Ruby ratio (in adhesions)")
 
@@ -597,20 +617,35 @@ def build(state, viewer) -> Container:
             labels = labels_iso_a[iso_idx]           # (Zn, Y, X)
 
             # Per-voxel ratio on NATIVE Z, only inside adhesions and where
-            # ruby > 0 (0 elsewhere, matching the chosen zero policy).
+            # ruby > 0 (0 elsewhere, matching the chosen zero policy). This
+            # volume is DISPLAY ONLY — raw, unsubtracted, and per-voxel — so it
+            # keeps its own `ruby > 0` guard. The per-adhesion number below is
+            # computed separately and is the one that gets exported.
             inside = (labels > 0) & (ruby > 0)
             ratio = np.zeros(labels.shape, dtype=np.float32)
             ratio[inside] = clover[inside] / ruby[inside]
 
-            # Per-adhesion mean over that adhesion's valid (ruby > 0) native voxels.
-            lv = labels[inside]
-            rv = ratio[inside]
+            # Per-adhesion value: total clover / total ruby over the adhesion,
+            # both background-subtracted per Z plane first. Summing before
+            # dividing keeps one dim voxel from dominating (a mean of per-voxel
+            # ratios is driven by its smallest denominators), and the background
+            # subtraction stops dim (deep) adhesions from drifting toward a fixed
+            # offset ratio. Matches the Measure tab and measure_core.
+            clover_bs = _bs_per_z(clover_native)
+            ruby_bs = _bs_per_z(ruby_native)
+            in_adh = labels > 0
+            lv = labels[in_adh]
             n_lab = int(labels.max())
-            sums = np.bincount(lv, weights=rv, minlength=n_lab + 1)
+            c_sum = np.bincount(lv, weights=clover_bs[in_adh],
+                                minlength=n_lab + 1)
+            r_sum = np.bincount(lv, weights=ruby_bs[in_adh],
+                                minlength=n_lab + 1)
             counts = np.bincount(lv, minlength=n_lab + 1)
-            valid = counts[1:] > 0
+            # An adhesion with no voxels, or whose ruby is entirely at/below
+            # background, has no ratio — drop it rather than report a divide.
+            valid = (counts[1:] > 0) & (r_sum[1:] > 0)
             ids = np.arange(1, n_lab + 1)[valid]
-            mean_ratio = (sums[1:][valid] / counts[1:][valid]).astype(np.float32)
+            mean_ratio = (c_sum[1:][valid] / r_sum[1:][valid]).astype(np.float32)
             n_vox = counts[1:][valid].astype(np.int64)
             return ratio, ids, mean_ratio, n_vox
 
@@ -636,10 +671,11 @@ def build(state, viewer) -> Container:
                 print(f"Clover/Ruby ratio (native Z): {ids.size} adhesions  "
                       f"mean={mean_ratio.mean():.3f} ± {mean_ratio.std():.3f}  "
                       f"[min={mean_ratio.min():.3f} max={mean_ratio.max():.3f}]  "
-                      f"(per-adhesion mean over ruby>0 native voxels)", flush=True)
+                      f"(Σclover/Σruby per adhesion, background-subtracted)",
+                      flush=True)
             else:
-                print("Clover/Ruby ratio: no valid voxels (ruby == 0 everywhere "
-                      "inside adhesions).", flush=True)
+                print("Clover/Ruby ratio: no adhesion has ruby above background.",
+                      flush=True)
 
         def _err(exc):
             print(f"Clover/Ruby error: {exc}", flush=True)
@@ -699,18 +735,14 @@ def build(state, viewer) -> Container:
             )
             lyr.visible = visible
             print(f"Loaded ratio layer <- {path}.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Load ratio error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Loading ratio layer from {path} ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Load ratio"))
+        w.errored.connect(with_after(_err, after, "Load ratio"))
         w.start()
 
     save_ratio_w.changed.connect(_save_ratio)

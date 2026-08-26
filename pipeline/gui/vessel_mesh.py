@@ -10,6 +10,11 @@ slicing (ignored by 3D alpha):
   - alpha 2D (per-slice): one `alpha2d_um` knob; branch → two loops.
   - alpha 3D (points): reuses the tested `cell_mesh` alpha shape on the
     subsampled cadherin point cloud, with a Suggest button + histogram.
+  - poisson (oriented points): fits a smooth implicit function to the cadherin
+    sheet instead of interpolating it, so noise averages out rather than
+    becoming surface (`pipeline/vessel_poisson.py`, `docs/ISSUES.md` I06). Three
+    knobs, and the surface it returns is **open at the x/y edges of the volume
+    by design** — that is the Neumann boundary, not a hole.
 """
 
 from __future__ import annotations
@@ -17,34 +22,33 @@ from __future__ import annotations
 import numpy as np
 from magicgui import magicgui
 from magicgui.widgets import (
-    ComboBox, Container, FileEdit, FloatSlider, PushButton, Slider,
+    CheckBox, ComboBox, Container, FileEdit, FloatSlider, PushButton, Slider,
 )
 from napari.qt.threading import thread_worker
 
-from ..cell_mesh import (
-    alpha_shape_faces,
-    filter_faces_by_extent,
-    mesh_curvature,
-    suggest_alpha_um,
-    tet_circumradii,
-)
-from ..centerline import vessel_path_curvature_xy
-from ..vessel_mesh import (
-    alpha_fill_volume,
-    close_volume,
-    combine,
+from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
+from .. import lumen_graph
+from .. import shear
+from ..saved_check import curvature_notes
+# The method constants and the build itself live in the core module so the
+# headless `pipeline.batch_mesh` runner builds the *same* mesh from the same
+# parameters. Re-exported here (the ComboBox choices below read them, and other
+# modules import them from this one).
+from ..vessel_mesh import (  # noqa: F401  (re-export)
+    LIVE_PARAMS,
+    check_alpha_vs_spacing,
+    METHOD_ALPHA2D,
+    METHOD_ALPHA3D,
+    METHOD_ALPHA_POISSON,
+    METHOD_POISSON,
+    METHOD_POLAR,
+    METHODS,
+    ORIENTATIONS,
+    build_mesh,
     mask_to_points_um,
-    mesh_from_volume,
-    polar_fill_volume,
     voxel_subsample,
 )
-from .widgets import Histogram, finite_surface
-
-METHOD_POLAR = "polar (per-slice)"
-METHOD_ALPHA2D = "alpha 2D (per-slice)"
-METHOD_ALPHA3D = "alpha 3D (points)"
-METHODS = [METHOD_POLAR, METHOD_ALPHA2D, METHOD_ALPHA3D]
-ORIENTATIONS = ["xz", "yz", "both (AND)", "both (OR)"]
+from .widgets import Histogram, call_all, finite_surface, with_after
 
 LAYER_NAME = "Vessel mesh"
 
@@ -65,16 +69,6 @@ def _cadh_mask_array(state):
     return data[0] if layer.multiscale else data
 
 
-def _per_slice(fill_fn, mask, orientation) -> np.ndarray:
-    """Run a per-slice fill over the requested orientation(s) and combine."""
-    if orientation in ("xz", "yz"):
-        return fill_fn(mask, orientation)
-    a = fill_fn(mask, "xz")
-    b = fill_fn(mask, "yz")
-    mode = "and" if "AND" in orientation else "or"
-    return combine(a, b, mode)
-
-
 def build(state, viewer) -> Container:
     hist = Histogram("Cadherin tet circumradii (alpha_um)",
                      "log10(circumradius µm)", "darkorange")
@@ -91,27 +85,52 @@ def build(state, viewer) -> Container:
         alpha3d_um={"widget_type": "FloatSlider", "min": 1.0, "max": 80.0, "step": 0.5},
         close_um={"widget_type": "FloatSlider", "min": 0.0, "max": 5.0, "step": 0.25},
         min_component_um={"widget_type": "FloatSlider", "min": 0.0, "max": 500.0, "step": 5.0},
+        poisson_grid_um={"widget_type": "FloatSlider", "min": 0.65, "max": 6.0, "step": 0.325},
+        poisson_smooth_um={"widget_type": "FloatSlider", "min": 1.0, "max": 15.0, "step": 0.5},
+        poisson_iso_pct={"widget_type": "FloatSlider", "min": 5.0, "max": 95.0, "step": 1.0},
+        alpha_raster_um={"widget_type": "FloatSlider", "min": 0.325, "max": 6.0, "step": 0.325},
     )
     def controls(
-        method: str = METHOD_ALPHA3D,
+        method: str = METHOD_ALPHA_POISSON,
         orientation: str = "both (OR)",
         n_bins: int = 180,
         r_smooth_bins: int = 3,
         alpha2d_um: float = 8.0,
-        subsample_um: float = 1.0,
-        alpha3d_um: float = 10.0,
+        subsample_um: float = 5.0,
+        alpha3d_um: float = 15.0,
         fill_lumen: bool = True,
         close_um: float = 1.0,
         min_component_um: float = 50.0,
+        poisson_grid_um: float = 2.0,
+        poisson_smooth_um: float = 5.0,
+        poisson_iso_pct: float = 50.0,
+        alpha_raster_um: float = 2.0,
     ):
         _run_build()
+
+    # Every knob the build reads, in widget order. `LIVE_PARAMS` in the core is
+    # the authority for which of them a given method actually uses; anything
+    # else is inert for that method and is hidden rather than left on screen
+    # looking operative. Same contract as the Clover tab.
+    _BUILD_KNOBS = ("orientation", "n_bins", "r_smooth_bins", "alpha2d_um",
+                    "subsample_um", "alpha3d_um", "fill_lumen", "close_um",
+                    "min_component_um", "poisson_grid_um", "poisson_smooth_um",
+                    "poisson_iso_pct", "alpha_raster_um")
+
+    def _sync_method_visibility(*_):
+        live = LIVE_PARAMS.get(controls["method"].value, _BUILD_KNOBS)
+        for name in _BUILD_KNOBS:
+            controls[name].visible = name in live
+        # "Suggest alpha_um" only means anything where alpha3d_um is live.
+        suggest_w.visible = "alpha3d_um" in live
+
+    controls["method"].changed.connect(_sync_method_visibility)
 
     def _run_build(after=None):
         arr = _cadh_mask_array(state)
         if arr is None:
             print("Load a stack with a 'substrate' channel first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         scale = state["scale"]
         # Read the parameter widgets by name via item access. Attribute access
@@ -127,91 +146,134 @@ def build(state, viewer) -> Container:
         fill_lumen = bool(controls["fill_lumen"].value)
         close_um = float(controls["close_um"].value)
         min_component_um = float(controls["min_component_um"].value)
+        poisson_grid_um = float(controls["poisson_grid_um"].value)
+        poisson_smooth_um = float(controls["poisson_smooth_um"].value)
+        poisson_iso_pct = float(controls["poisson_iso_pct"].value)
+        alpha_raster_um = float(controls["alpha_raster_um"].value)
         state.setdefault("run_settings", {})["vessel_mesh"] = {
             "method": method, "orientation": orientation, "alpha3d_um": alpha3d_um,
             "alpha2d_um": alpha2d_um, "subsample_um": subsample_um,
             "close_um": close_um, "min_component_um": min_component_um,
             "fill_lumen": fill_lumen, "n_bins": n_bins,
-            "r_smooth_bins": r_smooth_bins}
+            "r_smooth_bins": r_smooth_bins,
+            "poisson_grid_um": poisson_grid_um,
+            "poisson_smooth_um": poisson_smooth_um,
+            "poisson_iso_pct": poisson_iso_pct,
+            "alpha_raster_um": alpha_raster_um}
+
+        # The same alpha-vs-spacing rule `batch_mesh` applies. It lived only
+        # in the headless path, so the rule was enforced there and silent here
+        # — the drift this project keeps paying for.
+        for n in check_alpha_vs_spacing(alpha3d_um, subsample_um):
+            print(f"  {n}", flush=True)
 
         @thread_worker
         def _run():
-            mask = np.asarray(arr) > 0
-            if not mask.any():
-                return ("empty", None, None, None)
-            if method == METHOD_POLAR:
-                filled = _per_slice(
-                    lambda m, ax: polar_fill_volume(
-                        m, ax, scale, int(n_bins), int(r_smooth_bins)),
-                    mask, orientation,
-                )
-                filled = close_volume(filled, scale[0], float(close_um))
-                verts, faces, vals = mesh_from_volume(filled, scale)
-                faces = filter_faces_by_extent(verts, faces, float(min_component_um))
-                return ("mesh", verts, faces, vals)
-            if method == METHOD_ALPHA2D:
-                filled = _per_slice(
-                    lambda m, ax: alpha_fill_volume(
-                        m, ax, scale, float(alpha2d_um), fill_lumen=fill_lumen),
-                    mask, orientation,
-                )
-                filled = close_volume(filled, scale[0], float(close_um))
-                verts, faces, vals = mesh_from_volume(filled, scale)
-                faces = filter_faces_by_extent(verts, faces, float(min_component_um))
-                return ("mesh", verts, faces, vals)
-            # 3D alpha on the subsampled cadherin point cloud.
-            pts = voxel_subsample(mask_to_points_um(mask, scale), float(subsample_um))
-            faces = alpha_shape_faces(pts, float(alpha3d_um))
-            faces = filter_faces_by_extent(pts, faces, float(min_component_um))
-            vals = (np.linalg.norm(pts - pts.mean(0), axis=1)
-                    if len(pts) else np.zeros((0,)))
-            return ("points", pts, faces, vals)
+            # One call into the core module — the identical build the headless
+            # `pipeline.batch_mesh` runs, so the two paths cannot diverge.
+            extras = {}
+            out = build_mesh(
+                arr, scale, method=method, orientation=orientation,
+                n_bins=n_bins, r_smooth_bins=r_smooth_bins,
+                alpha2d_um=alpha2d_um, subsample_um=subsample_um,
+                alpha3d_um=alpha3d_um, fill_lumen=fill_lumen,
+                close_um=close_um, min_component_um=min_component_um,
+                poisson_grid_um=poisson_grid_um,
+                poisson_smooth_um=poisson_smooth_um,
+                poisson_iso_pct=poisson_iso_pct,
+                alpha_raster_um=alpha_raster_um, extras=extras)
+            return out, extras
 
         def _done(result):
-            kind, verts, faces, vals = result
-            if LAYER_NAME in viewer.layers:
-                viewer.layers.remove(LAYER_NAME)
+            (kind, verts, faces, vals), extras = result
+            normals = extras.get("normals")
+            # `extras["notes"]` is build_mesh's own channel (the point-cloud
+            # guard, P35); `extras["info"]["notes"]` is vessel_poisson's. Both
+            # must be printed — the guard's soft warning went into a dict
+            # nothing read when it was first added, which is exactly the silent
+            # failure it exists to prevent.
+            for n in extras.get("notes", []):
+                print(f"  {n}", flush=True)
+            if extras.get("n_points") is not None:
+                print(f"  point cloud: {extras['n_points']:,} points, "
+                      f"{extras.get('point_cloud_occupancy', 0):.1%} of the "
+                      f"volume's subsample bins.", flush=True)
+            for n in (extras.get("info") or {}).get("notes", []):
+                print(f"  {n}", flush=True)
+            # **The old layer is NOT removed until we know we can replace
+            # it.** It used to be dropped before these checks, so a failed
+            # build blanked the previous mesh and put nothing back — you lost
+            # the result you had and got no picture of why.
+            def _fail(msg, keep_verts=None):
+                print(msg, flush=True)
+                state["vessel_mesh_cache"] = {"verts": keep_verts,
+                                              "faces": None}
+                _drop_shear()
+                # **Drop the lumen field too.** It is set below, after these
+                # early returns, so a failed build used to leave the PREVIOUS
+                # build's field in `state` — and the centerline graph reads it.
+                # In a batch that means one image's graph is built on another
+                # image's lumen and saved under the failed image's name, which
+                # is what happened on 2026-08-24 (P38).
+                state["vessel_lumen_field"] = None
+
             if kind == "empty":
-                print("The cadherin mask is empty — run the Cadherin tab and "
-                      "tune its filter first.", flush=True)
-                state["vessel_mesh_cache"] = {"verts": None, "faces": None}
-                if after:
-                    after()
+                # Do not blame the cadherin mask unconditionally: on the
+                # alpha->poisson path `rasterize_alpha_solid` also returns an
+                # empty solid when `alpha3d_um` is too small for the point
+                # spacing, and the old message sent you to the wrong tab.
+                if method in (METHOD_ALPHA3D, METHOD_ALPHA_POISSON):
+                    n_pts = extras.get("n_points")
+                    _fail(f"Nothing to mesh: the alpha complex came out empty "
+                          f"at alpha3d_um={alpha3d_um:g}"
+                          + (f" over {n_pts:,} points" if n_pts else "")
+                          + f". Raise alpha3d_um — it must exceed the point "
+                            f"spacing, and ~3x subsample_um "
+                            f"(={3 * subsample_um:g}) is the working rule — or "
+                            f"check the Cadherin tab's mask.")
+                else:
+                    _fail("The cadherin mask is empty — run the Cadherin tab "
+                          "and tune its filter first.")
                 return
             if verts is None or len(verts) == 0:
-                print("No points/vertices to mesh.", flush=True)
-                state["vessel_mesh_cache"] = {"verts": None, "faces": None}
-                if after:
-                    after()
+                _fail("No points/vertices to mesh.")
                 return
             if faces is None or len(faces) == 0:
-                hint = ("increase alpha3d_um" if method == METHOD_ALPHA3D
-                        else "loosen the fill / orientation")
-                print(f"{len(verts)} vertices but 0 faces — {hint}.", flush=True)
-                state["vessel_mesh_cache"] = {"verts": verts, "faces": None}
-                if after:
-                    after()
+                if method in (METHOD_ALPHA3D, METHOD_ALPHA_POISSON):
+                    hint = (f"increase alpha3d_um (now {alpha3d_um:g}; it must "
+                            f"exceed the point spacing, ~3x subsample_um "
+                            f"= {3 * subsample_um:g})")
+                elif method == METHOD_POISSON:
+                    hint = "lower poisson_iso_pct or raise poisson_smooth_um"
+                else:
+                    hint = "loosen the fill / orientation"
+                _fail(f"{len(verts)} vertices but 0 faces — {hint}.", verts)
                 return
+            if LAYER_NAME in viewer.layers:
+                viewer.layers.remove(LAYER_NAME)
             viewer.add_surface(
                 finite_surface(verts, faces, vals), name=LAYER_NAME,
                 colormap="viridis", blending="translucent", opacity=0.6,
             )
-            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces}
+            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
+                                          "normals": normals}
+            _drop_shear()
+            # The solved lumen field, for the 3D centerline graph below. Only
+            # the Poisson family produces one; the interpolating methods leave
+            # it absent and the graph button then says so rather than falling
+            # back to something that looks like a centerline and is not.
+            state["vessel_lumen_field"] = extras.get("lumen") or None
             print(f"Vessel mesh ({method}, orientation={orientation}): "
                   f"{len(verts)} verts, {len(faces)} faces.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Vessel mesh error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Building vessel mesh ({method}, "
               f"orientation={orientation}) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Vessel mesh"))
+        w.errored.connect(with_after(_err, after, "Vessel mesh"))
         w.start()
 
     suggest_w = PushButton(text="Suggest alpha_um (3D)")
@@ -273,7 +335,15 @@ def build(state, viewer) -> Container:
             print("No vessel mesh to save — build it first.", flush=True)
             return
         path = str(mesh_path_w.value)
-        np.savez(path, verts=np.asarray(verts), faces=np.asarray(faces))
+        arrays = {"verts": np.asarray(verts), "faces": np.asarray(faces)}
+        # An extra key only, the same additive pattern `z_um` uses in
+        # `vessel_path_curvature.npz`: an older reader that names verts/faces is
+        # unaffected, and a Poisson mesh keeps the normals it cannot re-derive
+        # (it is open at the volume edges, so `vertex_outward_normals` has no
+        # enclosed volume to read the global sign from).
+        if cache.get("normals") is not None:
+            arrays["normals"] = np.asarray(cache["normals"])
+        np.savez(path, **arrays)
         print(f"Saved vessel mesh -> {path} "
               f"({len(verts)} verts, {len(faces)} faces).", flush=True)
 
@@ -283,36 +353,46 @@ def build(state, viewer) -> Container:
             d = np.load(path)
             verts = d["verts"]
             faces = d["faces"]
+            normals = d["normals"] if "normals" in d.files else None
+            if len(verts) == 0 or len(faces) == 0:
+                print("Loaded vessel mesh is empty.", flush=True)
+                return
+            # `values` (centroid distance, for the colormap) derives from verts.
+            vals = np.linalg.norm(verts - verts.mean(0), axis=1)
+            if LAYER_NAME in viewer.layers:
+                viewer.layers.remove(LAYER_NAME)
+            lyr = viewer.add_surface(
+                finite_surface(verts, faces, vals), name=LAYER_NAME,
+                colormap="viridis", blending="translucent", opacity=0.6,
+            )
+            lyr.visible = visible
+            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
+                                          "normals": normals}
+            _drop_shear()
+            print(f"Loaded vessel mesh <- {path} "
+                  f"({len(verts)} verts, {len(faces)} faces).", flush=True)
         except Exception as exc:
             print(f"Load vessel mesh error: {exc}", flush=True)
-            if after:
-                after()
-            return
-        if len(verts) == 0 or len(faces) == 0:
-            print("Loaded vessel mesh is empty.", flush=True)
-            if after:
-                after()
-            return
-        # `values` (centroid distance, for the colormap) is derived from verts.
-        vals = np.linalg.norm(verts - verts.mean(0), axis=1)
-        if LAYER_NAME in viewer.layers:
-            viewer.layers.remove(LAYER_NAME)
-        lyr = viewer.add_surface(
-            finite_surface(verts, faces, vals), name=LAYER_NAME,
-            colormap="viridis", blending="translucent", opacity=0.6,
-        )
-        lyr.visible = visible
-        state["vessel_mesh_cache"] = {"verts": verts, "faces": faces}
-        print(f"Loaded vessel mesh <- {path} "
-              f"({len(verts)} verts, {len(faces)} faces).", flush=True)
-        if after:
-            after()
+        finally:
+            call_all(after, label="Load vessel mesh")
 
     save_mesh_w.changed.connect(_save_mesh)
     load_mesh_w.changed.connect(_load_mesh)
     state["load_vessel_mesh"] = _load_mesh
     state.setdefault("save_path_widgets", []).append(
         (mesh_path_w, "vessel_mesh.npz"))
+
+    # A new mesh invalidates the wall-shear field: the shear was measured on
+    # the lumen of the *previous* build, and `vertex_field` would happily map it
+    # onto whatever vertices it is now handed. That is [P38](docs/ISSUES.md#p38)
+    # exactly — one build's geometry surviving into another's — so the cloud and
+    # its layer are dropped here rather than left to look plausible.
+    SHEAR_LAYER = "Vessel wall shear"
+
+    def _drop_shear():
+        state["vessel_shear"] = None
+        if SHEAR_LAYER in viewer.layers:
+            viewer.layers.remove(SHEAR_LAYER)
 
     # ---- Per-vertex curvature (local quadric fit at a physical radius) ----
     CURV_CHOICES = {"mean (H)": "mean", "κ1 max": "k1",
@@ -358,9 +438,12 @@ def build(state, viewer) -> Container:
         if verts is None or faces is None or len(verts) == 0 or len(faces) == 0:
             print("Compute curvature: build or load the vessel mesh first.",
                   flush=True)
-            if after:
-                after()
+            call_all(after)
             return
+        # Carried through to `mesh_curvature`: on the Poisson surface the sign
+        # of kappa2 is not recoverable from the mesh itself, so these are not
+        # optional there (P01(B)).
+        normals = cache.get("normals")
         radius = float(curv_radius_w.value)
         smooth_iter = int(curv_smooth_w.value)
         state.setdefault("run_settings", {})["surface_curvature"] = {
@@ -368,7 +451,8 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            return mesh_curvature(verts, faces, radius, smooth_iter=smooth_iter)
+            return mesh_curvature(verts, faces, radius,
+                                  smooth_iter=smooth_iter, normals=normals)
 
         def _done(curv):
             state["vessel_mesh_cache"]["curvature"] = curv
@@ -387,19 +471,15 @@ def build(state, viewer) -> Container:
             _show_curvature()
             print(f"Curvature computed (radius={radius} µm, smooth={smooth_iter}) "
                   f"on {n_surf} surface vertices.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Curvature error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Computing vessel curvature (radius={radius} µm, "
               f"smooth={smooth_iter}) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Surface curvature"))
+        w.errored.connect(with_after(_err, after, "Surface curvature"))
         w.start()
 
     curv_btn.changed.connect(_compute_curv)
@@ -410,87 +490,307 @@ def build(state, viewer) -> Container:
     # plane — the "straight vs curved vs branched" geometry — ignoring caliber
     # and the noisy Z axis. Built from the cadherin mask (the vessel mesh point
     # cloud is too rough to skeletonize cleanly). ----
-    path_smooth_w = FloatSlider(value=20.0, min=5.0, max=60.0, step=1.0,
-                                label="path_smooth_um")
-    path_btn = PushButton(text="Compute in-plane path curvature (X-Y)")
-    PATH_LAYER = "Vessel path curvature (X-Y)"
+    # ---- the 3D centerline graph (docs/DIRECTION.md §8B) --------------------
+    # Replaces the in-plane centerline entirely. The old one skeletonized a max
+    # projection of the cadherin mask; this one is built on the Poisson lumen,
+    # so it has arc length, a real graph, per-point caliber and — the thing the
+    # projection could never give — cross-sections cut perpendicular to the
+    # axis.
+    #
+    # Every knob is a **ratio or a window**, not an absolute length. The old
+    # `open_um` / `prune_um` were absolute and [P23] records them amputating
+    # exactly the tapering, high-shear regions the program is about.
+    spur_ratio_w = FloatSlider(value=lumen_graph.DEFAULT_SPUR_RATIO,
+                               min=0.0, max=4.0, step=0.1, label="spur_ratio")
+    crop_ratio_w = FloatSlider(value=lumen_graph.DEFAULT_CROP_RATIO,
+                               min=0.0, max=6.0, step=0.25, label="crop_ratio")
+    kappa_win_w = FloatSlider(value=lumen_graph.DEFAULT_KAPPA_WINDOW_UM,
+                              min=5.0, max=120.0, step=5.0,
+                              label="kappa_window_um")
+    sec_every_w = FloatSlider(value=lumen_graph.DEFAULT_SECTION_EVERY_UM,
+                              min=1.0, max=40.0, step=1.0,
+                              label="section_every_um")
+    sec_span_w = FloatSlider(value=lumen_graph.DEFAULT_SECTION_SPAN,
+                             min=1.0, max=8.0, step=0.25, label="section_span")
+    # §4.3's wall-shear solve, matching `batch_mesh --shear`. Present here for
+    # the standing rule that the GUI and the headless path must not drift: a
+    # check that exists in only one of them is how P36 and the alpha3d_um case
+    # happened. Off by default in both.
+    shear_w = CheckBox(value=False, text="wall shear (sec 4.3)")
+    graph_color_w = ComboBox(
+        choices=["caliber_um", "kappa_1_um", "kappa_xy_1_um", "tau_rel_1_um3",
+                 "tau_hat_mean_um", "hydraulic_diam_um", "lumen_area_um2",
+                 "lumen_major_um", "lumen_minor_um", "lumen_aspect",
+                 "dist_junction_um", "dist_crop_um", "censored"],
+        value="caliber_um", label="colour by")
+    graph_btn = PushButton(text="Compute 3D centerline graph (lumen)")
 
-    def _show_path(res, visible=True):
-        """Overlay the centerline (points at the vessel's mean Z, coloured by κ)."""
-        pts = np.asarray(res["pts_yx_um"])
-        kap = np.asarray(res["kappa"])
-        if len(pts) == 0:
+    GRAPH_LAYER = "Vessel centerline (3D graph)"
+    GRAPH_PATH_LAYER = "Vessel centerline path"
+    GRAPH_NODE_LAYER = "Centerline nodes"
+
+    _COLOR_KEY = {"lumen_area_um2": "area_um2", "lumen_major_um": "major_um",
+                  "lumen_minor_um": "minor_um", "lumen_aspect": "aspect"}
+
+    def _show_graph(g, visible=True):
+        """Draw the graph: the path as lines, the points coloured, nodes marked.
+
+        **Drawing it as a path is new and is the point of [P27] closing.** The
+        old centerline was a raster-order point set, so connecting consecutive
+        points produced a scribble and it had to be drawn as loose dots. These
+        points are ordered along each edge, so a `Shapes` polyline is exactly
+        the vessel.
+        """
+        for name in (GRAPH_LAYER, GRAPH_PATH_LAYER, GRAPH_NODE_LAYER):
+            if name in viewer.layers:
+                viewer.layers.remove(name)
+        pts = np.asarray(g.get("points_zyx_um", []))
+        if not len(pts):
             return
-        zc = 0.0
-        cache = state.get("vessel_mesh_cache") or {}
-        vv = cache.get("verts")
-        if vv is not None and len(vv):
-            zc = float(np.mean(np.asarray(vv)[:, 0]))
-        pts3 = np.column_stack([np.full(len(pts), zc), pts[:, 0], pts[:, 1]])
-        if PATH_LAYER in viewer.layers:
-            viewer.layers.remove(PATH_LAYER)
-        lyr = viewer.add_points(
-            pts3, name=PATH_LAYER, size=3.0, face_color=kap,
-            face_colormap="turbo", border_width=0.0)
-        hi = float(np.percentile(kap, 98)) if kap.size else 1.0
-        try:
-            lyr.face_contrast_limits = (0.0, max(hi, 1e-4))
-        except Exception:
-            pass
-        lyr.visible = visible
 
-    def _compute_path(*_, after=None):
+        key = _COLOR_KEY.get(graph_color_w.value, graph_color_w.value)
+        vals = np.asarray(g.get(key, np.zeros(len(pts))), dtype=np.float64)
+        if vals.shape[0] != len(pts):
+            vals = np.zeros(len(pts))
+        finite = np.isfinite(vals)
+        # NaN is a real answer here — sections are cut every few µm and the
+        # gaps are deliberately not interpolated — so it is drawn at the low
+        # end rather than dropped, which would make the path look broken.
+        fill = float(np.nanmin(vals)) if finite.any() else 0.0
+        shown = np.where(finite, vals, fill)
+
+        eid = np.asarray(g.get("edge_id", np.zeros(len(pts), int)))
+        paths = [pts[eid == e] for e in np.unique(eid)]
+        paths = [q for q in paths if len(q) >= 2]
+        if paths:
+            lyr = viewer.add_shapes(paths, shape_type="path", name=GRAPH_PATH_LAYER,
+                                    edge_color="white", edge_width=1.2,
+                                    opacity=0.7)
+            lyr.visible = visible
+
+        pl = viewer.add_points(pts, name=GRAPH_LAYER, size=3.0,
+                               face_color=shown, face_colormap="turbo",
+                               border_width=0.0)
+        if finite.any():
+            lo = float(np.percentile(shown[finite], 2))
+            hi = float(np.percentile(shown[finite], 98))
+            try:
+                pl.face_contrast_limits = (lo, max(hi, lo + 1e-6))
+            except Exception:
+                pass
+        pl.visible = visible
+
+        # Junctions and crop endpoints, which are what you check by eye: a
+        # junction that is not a real Y, or a "terminus" that is really the
+        # edge of the frame, is visible immediately and invisible in a table.
+        nodes = np.asarray(g.get("nodes_zyx_um", []))
+        if len(nodes):
+            kind = np.asarray(g.get("node_kind", []))
+            ek = np.asarray(g.get("node_endpoint_kind", []))
+            col = np.where(kind == "junction", "red",
+                           np.where(ek == "crop", "deepskyblue", "yellow"))
+            nl = viewer.add_points(nodes, name=GRAPH_NODE_LAYER, size=9.0,
+                                   face_color=list(col), border_width=0.0)
+            nl.opacity = 0.85
+            nl.visible = visible
+
+    def _graph_params():
+        return {"spur_ratio": float(spur_ratio_w.value),
+                "crop_ratio": float(crop_ratio_w.value),
+                "kappa_window_um": float(kappa_win_w.value),
+                "section_every_um": float(sec_every_w.value),
+                "section_span": float(sec_span_w.value),
+                "compute_shear": bool(shear_w.value)}
+
+    def _compute_graph(*_, after=None):
+        lum = state.get("vessel_lumen_field")
+        if not lum or lum.get("chi") is None:
+            print("Centerline graph: build the mesh first with a Poisson "
+                  "method ('poisson (oriented points)' or 'alpha 3D solid -> "
+                  "poisson'). The graph is built on the solved lumen, and the "
+                  "interpolating methods never solve for one.", flush=True)
+            call_all(after)
+            return
         mask = _cadh_mask_array(state)
-        if mask is None:
-            print("Path curvature: compute or load the cadherin mask first "
-                  "(Cadherin tab).", flush=True)
-            if after:
-                after()
-            return
         scale = state.get("scale", (1.0, 1.0, 1.0))
-        smooth_um = float(path_smooth_w.value)
-        state.setdefault("run_settings", {})["path_curvature"] = {
-            "smooth_um": smooth_um}
+        gp = _graph_params()
+        state.setdefault("run_settings", {})["centerline_graph"] = dict(gp)
+        dom = (np.asarray(np.asarray(mask).shape) * float(scale[0])
+               if mask is not None else None)
 
         @thread_worker
         def _run():
-            m = np.asarray(mask)
-            return vessel_path_curvature_xy(m > 0, scale, smooth_um=smooth_um)
+            ex: dict = {}
+            g = lumen_graph.build_graph(
+                lum["chi"], lum["iso_level"], lum["h_um"], lum["origin_um"],
+                core=lum.get("core"), domain_shape_um=dom, extras=ex, **gp)
+            return g, ex
 
-        def _done(res):
-            state["vessel_centerline"] = res
-            pts = res["pts_yx_um"]
-            kap = res["kappa"]
-            nbr = len(res["branch_yx_um"])
-            if len(pts) == 0:
-                print("Path curvature: no centerline found.", flush=True)
-                if after:
-                    after()
+        def _done(result):
+            g, ex = result
+            state["vessel_graph"] = g
+            # The wall point cloud, when the shear box is ticked. Cleared
+            # otherwise, so an untick cannot leave the previous build's shear
+            # painted on a new mesh — that is [P38](docs/ISSUES.md#p38)'s
+            # failure mode, one image's field surviving into another's build.
+            state["vessel_shear"] = ex.get("wall")
+            _show_shear()
+            for n in g.get("notes", []):
+                print(f"  {n}", flush=True)
+            if not len(g.get("points_zyx_um", [])):
+                print("Centerline graph: nothing found.", flush=True)
                 return
-            _show_path(res)
-            med = float(np.median(kap))
-            print(f"In-plane path curvature: {len(pts)} centerline points, "
-                  f"median κ = {med:.4f} 1/µm "
-                  f"(radius ~ {1.0/med:.0f} µm)" if med > 0 else
-                  f"In-plane path curvature: {len(pts)} centerline points, "
-                  f"median κ = 0 (straight); {nbr} branch node(s).", flush=True)
-            if med > 0:
-                print(f"  {nbr} branch node(s) detected.", flush=True)
-            if after:
-                after()
+            _show_graph(g)
+            def med(k):
+                a = np.asarray(g.get(k, []), float)
+                a = a[np.isfinite(a)]
+                return float(np.median(a)) if a.size else float("nan")
+            print(f"Centerline graph: {len(g['points_zyx_um'])} points on "
+                  f"{len(g['edge_len_um'])} edge(s), {g['n_junctions']} "
+                  f"junction(s), {g['n_endpoints']} endpoint(s) "
+                  f"({g['n_crop_endpoints']} cropped, "
+                  f"{g['n_terminus_endpoints']} terminating inside), "
+                  f"{g['total_length_um']:.0f} µm of vessel.", flush=True)
+            print(f"  inscribed radius median {med('caliber_um'):.1f} µm; "
+                  f"cross-section {med('area_um2'):.0f} µm², "
+                  f"{med('major_um'):.0f} x {med('minor_um'):.0f} µm, "
+                  f"aspect {med('aspect'):.2f}.", flush=True)
 
         def _err(exc):
-            print(f"Path curvature error: {exc}", flush=True)
-            if after:
-                after()
+            print(f"Centerline graph error: {exc}", flush=True)
 
-        print("Computing in-plane vessel path curvature (X-Y) ...", flush=True)
+        print("Building the 3D centerline graph on the lumen ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "Centerline graph"))
+        w.errored.connect(with_after(_err, after, "Centerline graph"))
         w.start()
 
-    path_btn.changed.connect(_compute_path)
+    graph_color_w.changed.connect(
+        lambda *_: (state.get("vessel_graph")
+                    and _show_graph(state["vessel_graph"])))
+    graph_btn.changed.connect(_compute_graph)
+
+    # ---- Wall shear on the vessel surface -----------------------------------
+    # The same read as `curvature` above: a per-vertex scalar on the mesh, drawn
+    # with `add_surface`. Two deliberate differences, both because shear is
+    # measured on **part** of the surface rather than defined on all of it:
+    #
+    #  - **nearest measured wall point, never interpolated.** The colour under
+    #    the cursor is a number that was solved for, not a blend of two. Where
+    #    the banding along the axis is visible, the honest fix is a smaller
+    #    `section_every_um` — a real measurement that costs seconds — not a
+    #    smoother that would make a 5 µm sampling look like a continuous field.
+    #  - **un-measured wall is not drawn.** `curvature` fills its NaN vertices
+    #    with the median, which is fine for a field defined on every vertex and
+    #    actively misleading here: it would paint wall that was never sectioned
+    #    in a mid-range colour that reads as a measurement.
+    #
+    # This is a view of `extras["wall"]` and nothing else — the same array
+    # `batch_mesh` writes to `vessel_shear.npz` and the same one an adhesion
+    # will join to. Nothing here feeds a calculation.
+    SHEAR_CHOICES = {"τ / µQ (relative)": "tau_rel_1_um3",
+                     "τ̂ (shape function, µm)": "tau_hat_um"}
+    shear_measure_w = ComboBox(choices=list(SHEAR_CHOICES.keys()),
+                               value="τ / µQ (relative)", label="wall shear")
+    shear_drop_w = CheckBox(value=True,
+                            text="drop clipped / censored sections")
+
+    def _show_shear():
+        wall = state.get("vessel_shear")
+        cache = state.get("vessel_mesh_cache") or {}
+        verts, faces = cache.get("verts"), cache.get("faces")
+        if SHEAR_LAYER in viewer.layers:
+            viewer.layers.remove(SHEAR_LAYER)
+        if not wall or verts is None or faces is None:
+            return
+        pts = np.asarray(wall["points_zyx_um"], float)
+        vals = np.asarray(wall[SHEAR_CHOICES[shear_measure_w.value]], float)
+        if shear_drop_w.value:
+            keep = ~(np.asarray(wall["section_clipped"], bool)
+                     | np.asarray(wall["censored"], bool))
+            pts, vals = pts[keep], vals[keep]
+        if not len(pts):
+            print("Wall shear: no usable wall points — every section is "
+                  "clipped or censored. Untick the filter to see them "
+                  "anyway; they are measured against a wall that is not "
+                  "there.", flush=True)
+            return
+        per_vertex = shear.vertex_field(verts, pts, vals,
+                                        float(wall["max_dist_um"]))
+        keep_faces = shear.covered_faces(faces, per_vertex)
+        if not len(keep_faces):
+            print("Wall shear: no mesh face has a measurement on all three "
+                  "vertices.", flush=True)
+            return
+        finite = per_vertex[np.isfinite(per_vertex)]
+        lo, hi = np.percentile(finite, [2, 98])
+        fill = float(finite.min())
+        vv = np.where(np.isfinite(per_vertex), per_vertex, fill)
+        lyr = viewer.add_surface((verts, keep_faces, vv), name=SHEAR_LAYER,
+                                 colormap="turbo", blending="translucent",
+                                 opacity=0.95)
+        try:
+            lyr.contrast_limits = (float(lo), float(hi))
+        except Exception:
+            pass
+        cov = float(np.isfinite(per_vertex).mean())
+        print(f"Wall shear: {len(pts):,} wall points -> "
+              f"{int(np.isfinite(per_vertex).sum()):,} of {len(verts):,} "
+              f"vertices ({100 * cov:.0f}%), {len(keep_faces):,} of "
+              f"{len(faces):,} faces drawn. Nearest measured point within "
+              f"{wall['max_dist_um']:g} µm; the rest is not drawn because it "
+              f"was not measured.", flush=True)
+
+    shear_measure_w.changed.connect(lambda *_: _show_shear())
+    shear_drop_w.changed.connect(lambda *_: _show_shear())
+
+    shear_path_w = FileEdit(value="vessel_shear.npz", label="shear_path",
+                            mode="w")
+    save_shear_w = PushButton(text="Save wall shear")
+    load_shear_w = PushButton(text="Load wall shear")
+
+    def _save_shear(*_):
+        wall = state.get("vessel_shear")
+        if not wall:
+            print("No wall shear to save — tick 'wall shear (sec 4.3)' and "
+                  "rebuild the centerline graph.", flush=True)
+            return
+        path = str(shear_path_w.value)
+        np.savez_compressed(
+            path, **{k: v for k, v in wall.items()
+                     if isinstance(v, np.ndarray)},
+            max_dist_um=np.float64(wall["max_dist_um"]))
+        print(f"Saved wall shear -> {path}.", flush=True)
+
+    def _load_shear(*_, after=None, visible=True):
+        path = str(shear_path_w.value)
+        try:
+            with np.load(path, allow_pickle=False) as d:
+                wall = {k: d[k] for k in d.files}
+            wall["max_dist_um"] = float(wall["max_dist_um"])
+            state["vessel_shear"] = wall
+            if visible:
+                _show_shear()
+            print(f"Loaded wall shear <- {path} "
+                  f"({len(wall['points_zyx_um']):,} wall points).", flush=True)
+        except Exception as exc:
+            print(f"Load wall shear error: {exc}", flush=True)
+        finally:
+            call_all(after, label="Load wall shear")
+
+    def _save_shear_if_any(*_):
+        """Save only if the shear box was ticked — silent when it was not.
+
+        `_save_shear` prints a complaint when there is nothing to save, which is
+        right for the button and wrong for the "Run all" chain, where not
+        computing shear is the default and not an error.
+        """
+        if state.get("vessel_shear"):
+            _save_shear()
+
+    save_shear_w.changed.connect(_save_shear)
+    load_shear_w.changed.connect(_load_shear)
+    state["load_vessel_shear"] = _load_shear
 
     # ---- Save / load the computed curvature so it need not be recomputed each
     # session (only the mesh geometry is saved with the mesh; curvature and the
@@ -517,57 +817,76 @@ def build(state, viewer) -> Container:
         try:
             d = np.load(path)
             curv = {k: d[k] for k in ("mean", "k1", "k2", "gaussian")}
+            cache = state.get("vessel_mesh_cache") or {"verts": None,
+                                                       "faces": None,
+                                                       "normals": None}
+            cache["curvature"] = curv
+            state["vessel_mesh_cache"] = cache
+            verts = cache.get("verts")
+            # Curvature is per-vertex, so it is only meaningful against the mesh
+            # it was computed on. A length mismatch means this file belongs to a
+            # different (or re-built) mesh: Measure silently drops every
+            # curvature column to NaN in that case, so say so here instead.
+            # Delegated to saved_check so this warning and the headless one are
+            # the same string rather than two that drift apart (P12).
+            if verts is not None:
+                for n in curvature_notes(curv, len(verts)):
+                    print(f"  {n}", flush=True)
+            if verts is not None and cache.get("faces") is not None:
+                _show_curvature()
+                if not visible and CURV_LAYER in viewer.layers:
+                    viewer.layers[CURV_LAYER].visible = False
+            print(f"Loaded surface curvature <- {path}.", flush=True)
         except Exception as exc:
             print(f"Load curvature error: {exc}", flush=True)
-            if after:
-                after()
-            return
-        cache = state.get("vessel_mesh_cache") or {"verts": None, "faces": None}
-        cache["curvature"] = curv
-        state["vessel_mesh_cache"] = cache
-        if cache.get("verts") is not None and cache.get("faces") is not None:
-            _show_curvature()
-            if not visible and CURV_LAYER in viewer.layers:
-                viewer.layers[CURV_LAYER].visible = False
-        print(f"Loaded surface curvature <- {path}.", flush=True)
-        if after:
-            after()
+        finally:
+            call_all(after, label="Load curvature")
 
-    path_curv_path_w = FileEdit(value="vessel_path_curvature.npz",
-                                label="path_curv_path", mode="w")
-    save_path_curv_w = PushButton(text="Save path curvature")
-    load_path_curv_w = PushButton(text="Load path curvature")
+    path_curv_path_w = FileEdit(value="vessel_graph.npz",
+                                label="graph_path", mode="w")
+    save_path_curv_w = PushButton(text="Save centerline graph")
+    load_path_curv_w = PushButton(text="Load centerline graph")
 
     def _save_path_curv(*_):
-        cl = state.get("vessel_centerline")
-        if not cl or not len(cl.get("pts_yx_um", [])):
-            print("No path curvature to save — click 'Compute in-plane path "
-                  "curvature' first.", flush=True)
+        g = state.get("vessel_graph")
+        if not g or not len(g.get("points_zyx_um", [])):
+            print("No centerline graph to save — click 'Compute 3D centerline "
+                  "graph' first.", flush=True)
             return
         path = str(path_curv_path_w.value)
-        np.savez_compressed(path, pts_yx_um=np.asarray(cl["pts_yx_um"]),
-                            kappa=np.asarray(cl["kappa"]),
-                            branch_yx_um=np.asarray(cl["branch_yx_um"]))
-        print(f"Saved path curvature -> {path}.", flush=True)
+        # Arrays only. The notes and the nested info dicts are provenance and
+        # belong in vessel_recon.json, which is where provenance already lives.
+        np.savez_compressed(path, **{k: v for k, v in g.items()
+                                     if isinstance(v, np.ndarray)})
+        print(f"Saved centerline graph -> {path}: "
+              f"{len(g['points_zyx_um'])} points, "
+              f"{len(g['edge_len_um'])} edge(s).", flush=True)
 
     def _load_path_curv(*_, after=None, visible=True):
         path = str(path_curv_path_w.value)
         try:
-            d = np.load(path)
-            cl = {"pts_yx_um": d["pts_yx_um"], "kappa": d["kappa"],
-                  "branch_yx_um": d["branch_yx_um"]}
+            d = np.load(path, allow_pickle=False)
+            g = {k: d[k] for k in d.files}
+            if "points_zyx_um" not in g:
+                print(f"Load centerline graph: {path} is an old in-plane "
+                      f"`vessel_path_curvature.npz`, which this build no "
+                      f"longer reads — the 2D centerline was replaced by the "
+                      f"3D lumen graph (docs/DIRECTION.md §8B). Rebuild the "
+                      f"mesh with a Poisson method and click 'Compute 3D "
+                      f"centerline graph'.", flush=True)
+                return
+            for k in ("n_junctions", "n_endpoints", "n_crop_endpoints",
+                      "n_terminus_endpoints", "total_length_um"):
+                g.setdefault(k, 0)
+            state["vessel_graph"] = g
+            _show_graph(g, visible=visible)
+            print(f"Loaded centerline graph <- {path}: "
+                  f"{len(g['points_zyx_um'])} points, "
+                  f"{len(g.get('edge_len_um', []))} edge(s).", flush=True)
         except Exception as exc:
-            print(f"Load path curvature error: {exc}", flush=True)
-            if after:
-                after()
-            return
-        state["vessel_centerline"] = cl
-        _show_path(cl, visible=visible)
-        print(f"Loaded path curvature <- {path}: {len(cl['pts_yx_um'])} "
-              f"centerline points, {len(cl['branch_yx_um'])} branch node(s).",
-              flush=True)
-        if after:
-            after()
+            print(f"Load centerline graph error: {exc}", flush=True)
+        finally:
+            call_all(after, label="Load centerline graph")
 
     save_curv_w.changed.connect(_save_curv)
     load_curv_w.changed.connect(_load_curv)
@@ -577,22 +896,33 @@ def build(state, viewer) -> Container:
     state["load_vessel_path_curvature"] = _load_path_curv
     state.setdefault("save_path_widgets", []).extend([
         (curv_path_w, "vessel_curvature.npz"),
-        (path_curv_path_w, "vessel_path_curvature.npz"),
+        (path_curv_path_w, "vessel_graph.npz"),
+        (shear_path_w, "vessel_shear.npz"),
     ])
 
     # Chainable "Run all" steps: compute then save, then call `after`.
     state["run_vessel_mesh"] = lambda after=None: _run_build(
-        after=(lambda: (_save_mesh(), after() if after else None)))
+        after=lambda: call_all(_save_mesh, after, label="run_vessel_mesh"))
     state["run_vessel_curvature"] = lambda after=None: _compute_curv(
-        after=(lambda: (_save_curv(), after() if after else None)))
-    state["run_vessel_path_curvature"] = lambda after=None: _compute_path(
-        after=(lambda: (_save_path_curv(), after() if after else None)))
+        after=lambda: call_all(_save_curv, after,
+                               label="run_vessel_curvature"))
+    state["run_vessel_path_curvature"] = lambda after=None: _compute_graph(
+        after=lambda: call_all(_save_path_curv, _save_shear_if_any, after,
+                               label="run_vessel_path_curvature"))
+
+    # Apply the visibility rule once at build time (`suggest_w` exists by now).
+    _sync_method_visibility()
 
     return (Container(widgets=[controls, suggest_w,
                               mesh_path_w, save_mesh_w, load_mesh_w,
                               curv_measure_w, curv_radius_w, curv_smooth_w,
                               curv_btn, curv_path_w, save_curv_w, load_curv_w,
-                              path_smooth_w, path_btn,
+                              spur_ratio_w, crop_ratio_w, kappa_win_w,
+                              sec_every_w, sec_span_w, shear_w,
+                              graph_color_w,
+                              graph_btn,
+                              shear_measure_w, shear_drop_w,
+                              shear_path_w, save_shear_w, load_shear_w,
                               path_curv_path_w, save_path_curv_w,
                               load_path_curv_w],
                      labels=False),

@@ -16,6 +16,12 @@ Thumbs.db
 # Claude Code local config
 .claude/
 
+# Scratch analysis: test plots, one-off scripts, intermediate output.
+# The tracked docs are docs/ISSUES.md and docs/audit.md — do NOT ignore docs/
+# itself, the public README links into it.
+docs/scratch/*
+!docs/scratch/.gitkeep
+
 # Archives
 *.7z
 *.zip

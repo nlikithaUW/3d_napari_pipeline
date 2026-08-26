@@ -109,13 +109,83 @@ def niblack_mask(vol: np.ndarray, window_xy: int, k: float, voxel_zyx_um) -> np.
     m - k*s (built for dark-text binarization); we negate k so this follows
     the "+ k*s" convention that matches fluorescence intuition (higher k →
     stricter → less foreground).
+
+    Implemented as a comparison against `_local_zscore` rather than against
+    ``m + k·s`` so that it and `local_contrast_score` are the same statistic by
+    construction. The two forms are algebraically identical and differ in
+    float32 only at the boundary; no saved artifact is affected either way,
+    because every cadherin mask in this project **up to 2026-08-24** was built
+    with Sauvola: `_run_cadherin_step` forced it, overriding the tab's Niblack
+    default, for both `batch.py` and the GUI's "Run all". That override is gone
+    (P36 measured Sauvola as *inert* here), so masks built after that date use
+    whatever the tab is set to.
+    """
+    z = _local_zscore(vol, window_xy, voxel_zyx_um)
+    return (z > np.float32(k)).astype(np.uint8)
+
+
+# The floor on the local std. Two jobs: it stops a divide-by-zero where the
+# neighbourhood is perfectly flat (saturated or clipped background), and it caps
+# how loud a single count of variation is allowed to be. In camera counts a
+# standard deviation below this is quantisation, not signal.
+_STD_FLOOR = 1e-3
+
+
+def _local_zscore(vol: np.ndarray, window_xy: int, voxel_zyx_um) -> np.ndarray:
+    """``(vol - m) / s`` over the anisotropy-corrected `window_xy` footprint.
+
+    The single implementation of the Niblack statistic. `niblack_mask` and
+    `local_contrast_score` both call it, so the threshold and the continuous
+    field cannot be the same quantity computed two slightly different ways —
+    they were, and the two disagreed on ~1e-6 of voxels purely from evaluating
+    ``vol > m + k·s`` against ``(vol - m)/s > k`` in float32.
     """
     if window_xy % 2 == 0:
         window_xy += 1
     win = aniso_size(window_xy, voxel_zyx_um)
     m, s = _mean_std(vol, win)
-    thr = m + float(k) * s
-    return (vol > thr).astype(np.uint8)
+    return (vol.astype(np.float32, copy=False) - m) / np.maximum(s, _STD_FLOOR)
+
+
+def local_contrast_score(vol: np.ndarray, window_xy: int, voxel_zyx_um,
+                         k_lo: float = 0.0) -> np.ndarray:
+    """Niblack's statistic as a *continuous, rectified* field, not a mask.
+
+    ``max((vol - m) / s - k_lo, 0)`` — how far each voxel stands above its own
+    neighbourhood, in units of local variation, hinged to exactly zero below
+    ``k_lo``. Returns float32.
+
+    This is the same ``m``/``s`` `niblack_mask` computes, and it holds the
+    identity that pins the two together::
+
+        niblack_mask(vol, w, k) == (local_contrast_score(vol, w, vx, 0) > k)
+
+    for ``k >= 0`` (see `docs/scratch/p28/score_check.py`). One implementation,
+    two callers — the no-drift rule in `CLAUDE.md`.
+
+    **Why continuous.** `docs/ISSUES.md` [P28] measured that the "gaps" in the
+    cadherin wall mostly are not holes: the raw channel carries wall at the same
+    radius, dimmer, and the threshold deletes it. A score keeps dim-but-real
+    wall alive with a small positive value instead, and stays depth-corrected
+    because ``m`` and ``s`` adapt with depth.
+
+    **Why rectified.** `vessel_poisson` reads ``occ > 0`` as "this cell has
+    wall". A raw z-score is nonzero nearly everywhere, so an unrectified field
+    would put tens of millions of cells into `sheet_normals` and make
+    `lumen_core`'s occupancy-weighted wall percentile meaningless. ``k_lo``
+    hinges the field to zero exactly where the data says there is nothing —
+    it is **measured**, not picked: [P28] step 1 records the z-score the gap
+    wall sits at against the no-wall controls, and `batch_mesh` records which
+    measurement set the value it used.
+
+    **The global intensity floor is deliberately not applied here.** [P28]'s
+    attribution found the floor, not the local threshold, is what deletes the
+    dim wall; folding it back in would re-delete exactly what this exists to
+    keep. A caller that wants it applies it itself.
+    """
+    z = _local_zscore(vol, window_xy, voxel_zyx_um)
+    return np.maximum(z - np.float32(k_lo), np.float32(0.0)).astype(np.float32,
+                                                                   copy=False)
 
 
 def sauvola_mask(vol: np.ndarray, window_xy: int, k: float, voxel_zyx_um) -> np.ndarray:
@@ -129,9 +199,16 @@ def sauvola_mask(vol: np.ndarray, window_xy: int, k: float, voxel_zyx_um) -> np.
     if window_xy % 2 == 0:
         window_xy += 1
     win = aniso_size(window_xy, voxel_zyx_um)
-    v = vol.astype(np.float32, copy=False)
-    r = max(0.5 * float(v.max() - v.min()), 1e-6)
-    m, s = _mean_std(v, win)
+    # Hand `vol` to `_mean_std` in its NATIVE dtype, not cast to float32 first.
+    # `gpu.local_mean_std` transfers the volume as-is and casts on the device
+    # precisely so a uint16 stack crosses PCIe at half the bytes — casting here
+    # doubled the transfer and defeated that. On a 324x1024x1024 stack it is
+    # 680 MB vs 1.36 GB, and the larger one exceeds the pinned-memory pool, so
+    # the copy silently degraded to a synchronous transfer (and to a full CPU
+    # fallback beyond that). Bit-identical either way: the first thing
+    # `local_mean_std` does is `.astype(float32)`.
+    r = max(0.5 * float(vol.max() - vol.min()), 1e-6)
+    m, s = _mean_std(vol, win)
     thr = m * (1.0 + float(k) * (s / r - 1.0))
     return (vol > thr).astype(np.uint8)
 
@@ -159,3 +236,66 @@ def bernsen_mask(vol: np.ndarray, window_xy: int, contrast_frac: float, voxel_zy
     global_thr = threshold_otsu(v) if v.max() > v.min() else float(v.max())
     fg = np.where(contrast >= contrast_thresh, v > midgray, midgray > global_thr)
     return fg.astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Threshold + label + size-suggest, as a single dispatch point.
+# ---------------------------------------------------------------------------
+#
+# This exists for the same reason `vessel_mesh.build_mesh` does: two callers
+# needed the identical computation and each had written it out.
+# `gui/clover.py::_compute` and `gui/adhesion_rf.py`'s gate fallback both did
+# `otsu_mask` -> `label_and_sizes` -> `auto_min_size_otsu`, so the clover mask
+# the user tuned in one tab and the one the RF gated on could differ without
+# anything saying so. Both now call `build_mask`; do not write the third copy.
+
+METHOD_OTSU = "otsu"
+METHOD_NIBLACK = "niblack"
+METHOD_SAUVOLA = "sauvola"
+METHOD_BERNSEN = "bernsen"
+MASK_METHODS = (METHOD_OTSU, METHOD_NIBLACK, METHOD_SAUVOLA, METHOD_BERNSEN)
+
+# Which knobs each method actually reads. The rest are inert for that method
+# and must be recorded as inert rather than logged as if they had an effect —
+# the same contract as `vessel_mesh.LIVE_PARAMS`.
+MASK_LIVE_PARAMS = {
+    METHOD_OTSU: (),
+    METHOD_NIBLACK: ("window_xy", "niblack_k"),
+    METHOD_SAUVOLA: ("window_xy", "sauvola_k"),
+    METHOD_BERNSEN: ("window_xy", "bernsen_contrast"),
+}
+
+
+def build_mask(vol: np.ndarray, voxel_zyx_um, method: str = METHOD_OTSU,
+               window_xy: int = 50, niblack_k: float = 3.0,
+               sauvola_k: float = 0.2, bernsen_contrast: float = 0.15,
+               min_size: int | None = None):
+    """Threshold `vol`, label components, and suggest a size cutoff.
+
+    Returns ``(labels, sizes, suggested_min_size, mask)`` — always four, so a
+    caller needing only three cannot drift from one needing four.
+
+    `min_size=None` filters at `suggested_min_size`; pass a number to override.
+    The returned `mask` is size-filtered, `labels`/`sizes` are not, so a caller
+    can re-filter at a different cutoff without re-thresholding.
+
+    **`method` is validated.** An unknown string raises rather than silently
+    falling through to Otsu — [P30](../docs/ISSUES.md#p30) records that exact
+    bug in `build_mesh` and there is no reason to reproduce it here.
+    """
+    if method not in MASK_METHODS:
+        raise ValueError(
+            f"unknown method {method!r}; expected one of {MASK_METHODS}")
+    if method == METHOD_OTSU:
+        mask = otsu_mask(vol)
+    elif method == METHOD_NIBLACK:
+        mask = niblack_mask(vol, int(window_xy), float(niblack_k), voxel_zyx_um)
+    elif method == METHOD_SAUVOLA:
+        mask = sauvola_mask(vol, int(window_xy), float(sauvola_k), voxel_zyx_um)
+    else:
+        mask = bernsen_mask(vol, int(window_xy), float(bernsen_contrast),
+                            voxel_zyx_um)
+    labels, sizes = label_and_sizes(mask)
+    suggested = auto_min_size_otsu(sizes)
+    cutoff = suggested if min_size is None else int(min_size)
+    return labels, sizes, suggested, filter_by_size(labels, sizes, cutoff)

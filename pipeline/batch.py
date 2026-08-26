@@ -56,17 +56,53 @@ DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
 # curvature, DAPI, cadherin, fibroblast count) in each <stem>_saved folder;
 # run Measure + export yourself per image in the GUI (Load all saved → Measure
 # → export), which works fine there.
+# (short name, label, state key). The short name is what `--steps` takes; it is
+# stable and is what appears in scripts and in `docs/ISSUES.md`, so renaming the
+# human label does not break a recorded invocation.
 _RUN_STEPS = [
-    ("DAPI + components", "run_dapi"),
-    ("Fibroblast count", "run_fibroblasts"),
-    ("VE-Cadherin (Sauvola)", "run_cadherin"),
-    ("Vessel mesh", "run_vessel_mesh"),
-    ("Surface curvature", "run_vessel_curvature"),
-    ("In-plane path curvature", "run_vessel_path_curvature"),
-    ("Clover Otsu", "run_clover"),
-    ("RF predict", "run_rf_predict"),
-    ("RF post-process (split-merged)", "run_rf_postprocess"),
+    ("dapi", "DAPI + components", "run_dapi"),
+    ("fibroblasts", "Fibroblast count", "run_fibroblasts"),
+    ("cadherin", "VE-Cadherin threshold", "run_cadherin"),
+    ("mesh", "Vessel mesh", "run_vessel_mesh"),
+    ("curvature", "Surface curvature", "run_vessel_curvature"),
+    ("graph", "3D centerline graph", "run_vessel_path_curvature"),
+    ("clover", "Clover threshold", "run_clover"),
+    ("rf", "RF predict", "run_rf_predict"),
+    ("postprocess", "RF post-process (split-merged)", "run_rf_postprocess"),
 ]
+STEP_NAMES = [s[0] for s in _RUN_STEPS]
+
+
+def resolve_steps(spec: str) -> list[str]:
+    """Parse a `--steps` spec into short names, in pipeline order.
+
+    Accepts "all", a comma-separated list, or a "first:last" range. Order is
+    always the pipeline's own, never the order given — a later step consuming
+    an earlier one's output cannot be run first by typo.
+
+    **Every step still reads the tab defaults**, so re-running one is only
+    reproducible if the defaults have not moved since (`docs/ISSUES.md` P26).
+    """
+    spec = (spec or "all").strip()
+    if spec in ("", "all"):
+        return list(STEP_NAMES)
+    if ":" in spec:
+        lo, _, hi = spec.partition(":")
+        lo, hi = lo.strip() or STEP_NAMES[0], hi.strip() or STEP_NAMES[-1]
+        for n in (lo, hi):
+            if n not in STEP_NAMES:
+                raise ValueError(f"unknown step {n!r}; expected one of "
+                                 f"{', '.join(STEP_NAMES)}")
+        i, j = STEP_NAMES.index(lo), STEP_NAMES.index(hi)
+        if i > j:
+            raise ValueError(f"empty range {spec!r}: {lo} comes after {hi}")
+        return STEP_NAMES[i:j + 1]
+    want = {s.strip() for s in spec.split(",") if s.strip()}
+    bad = want - set(STEP_NAMES)
+    if bad:
+        raise ValueError(f"unknown step(s) {', '.join(sorted(bad))}; expected "
+                         f"one of {', '.join(STEP_NAMES)}")
+    return [n for n in STEP_NAMES if n in want]
 
 
 def _fresh_state() -> dict:
@@ -76,7 +112,9 @@ def _fresh_state() -> dict:
         "scale": (1.0, 1.0, 1.0),
         "dapi_mask_layer": None, "cadh_mask_layer": None,
         "clover_mask_layer": None,
-        "dapi_state": {"labels": None, "sizes": None},
+        "dapi_state": {"labels": None, "sizes": None, "nuclei": None,
+                       "nuclei_sizes": None, "nuclei_ids": None,
+                       "nuclei_is_fib": None, "nuclei_min_size_vox": None},
         "cadh_state": {"labels": None, "sizes": None, "centroids": None,
                        "normals": None, "label_ids": None, "keep_mask": None},
         "clover_state": {"labels": None, "sizes": None, "method": None},
@@ -112,11 +150,22 @@ def main() -> None:
     ap.add_argument("--skip-existing", action="store_true",
                     help="skip images that already have a measurements CSV in "
                          "their <stem>_saved folder")
+    ap.add_argument("--steps", default="all",
+                    help="which pipeline steps to run: 'all' (default), a "
+                         "comma-separated list, or a 'first:last' range. "
+                         "Steps: " + ", ".join(STEP_NAMES) + ". Order is always "
+                         "the pipeline's own. NOTE: a step re-run alone still "
+                         "reads the tab defaults, so it reproduces an earlier "
+                         "run only if those have not changed (ISSUES.md P26).")
     ap.add_argument("--timeout", type=float, default=0.0,
                     help="per-image timeout in seconds; if an image takes longer "
                          "(hang), it is skipped and the batch continues. "
                          "0 = no timeout (default).")
     args = ap.parse_args()
+    try:
+        wanted_steps = resolve_steps(args.steps)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     images = sorted(Path(args.dir).glob(args.pattern))
     if args.skip_existing:
@@ -135,6 +184,9 @@ def main() -> None:
               f"(pattern={args.pattern}, skip_existing={args.skip_existing})",
               flush=True)
         sys.exit(1)
+    if wanted_steps != STEP_NAMES:
+        print(f"Batch: running {len(wanted_steps)}/{len(STEP_NAMES)} steps — "
+              f"{', '.join(wanted_steps)}", flush=True)
     print(f"Batch: {len(images)} image(s) in {args.dir}\n"
           f"  model={args.model}\n  params={args.params}\n  lut={args.lut}\n",
           flush=True)
@@ -165,11 +217,25 @@ def main() -> None:
         print(f"Could not load RF model {args.model}: {exc}", flush=True)
         sys.exit(1)
 
+    # Per-image outcome, so an unattended run ends with a verdict instead of a
+    # screen of scrolled-past output. Recorded in _advance, which is already the
+    # single idempotent funnel every image passes through exactly once.
+    outcome: dict[str, list[str]] = {"done": [], "skipped": []}
+    rc = {"code": 0}
+
     def _finish():
-        print("\nBatch complete. Intermediates saved for every image "
-              "(proba, instances, mesh, curvatures, DAPI, cadherin, fibroblast). "
-              "Run Measure + export per image in the GUI (Load all saved → "
-              "Measure → export) to produce the CSVs.", flush=True)
+        n_ok, n_bad = len(outcome["done"]), len(outcome["skipped"])
+        print(f"\nBatch complete: {n_ok} of {len(images)} image(s) processed, "
+              f"{n_bad} skipped.", flush=True)
+        for line in outcome["skipped"]:
+            print(f"  SKIPPED: {line}", flush=True)
+        print("Intermediates saved for every processed image (proba, instances, "
+              "mesh, curvatures, DAPI, split nuclei, cadherin, fibroblast "
+              "count). Run `python -m pipeline.batch_measure --dir <dir>` (or "
+              "the GUI: Load all saved → Measure → export) to produce the "
+              "CSVs.", flush=True)
+        if n_bad:
+            rc["code"] = 1
         _free_gpu()
         try:
             viewer.close()
@@ -206,11 +272,17 @@ def main() -> None:
             pass
         for k in ("dapi_raw", "cadh_raw", "clover_raw", "ruby_raw",
                   "clover_raw_native", "ruby_raw_native", "force_vol",
-                  "adhesion_proba", "clover_ruby_ratio", "vessel_centerline",
+                  "adhesion_proba", "clover_ruby_ratio", "vessel_graph",
+                  # Belt and braces with `_fail` above: nothing derived from
+                  # one image may survive into the next (P38).
+                  "vessel_lumen_field", "vessel_mesh_cache",
                   "measure_result", "dapi_mask_layer", "cadh_mask_layer",
-                  "clover_mask_layer"):
+                  "clover_mask_layer", "fibroblast_count"):
             state[k] = None
-        state["dapi_state"] = {"labels": None, "sizes": None}
+        state["dapi_state"] = {"labels": None, "sizes": None, "nuclei": None,
+                               "nuclei_sizes": None, "nuclei_ids": None,
+                               "nuclei_is_fib": None,
+                               "nuclei_min_size_vox": None}
         state["cadh_state"] = {"labels": None, "sizes": None, "centroids": None,
                                "normals": None, "label_ids": None,
                                "keep_mask": None}
@@ -229,6 +301,12 @@ def main() -> None:
         _disarm()
         if reason:
             print(f"  {images[i].name}: {reason}", flush=True)
+        # "done." is the only success path into _advance; every other reason is
+        # a load failure, a timeout or an unexpected error.
+        if reason == "done.":
+            outcome["done"].append(images[i].name)
+        else:
+            outcome["skipped"].append(f"{images[i].name} — {reason or 'unknown'}")
         _free_image_memory()
         process(i + 1)
 
@@ -260,11 +338,16 @@ def main() -> None:
 
     def _after_load(i: int):
         try:
-            if state.get("force_vol") is None:
+            # "Did the load succeed?" is asked of raw_layers, not force_vol:
+            # force_vol is legitimately None whenever FRET isn't configured for
+            # the dataset (io.fret_configured), which would otherwise skip every
+            # image. raw_layers is cleared per image by _free_image_memory and
+            # only repopulated by the loader's success path.
+            if not state.get("raw_layers"):
                 _advance(i, "load failed; skipped")
                 return
-            steps = [(label, state[key]) for label, key in _RUN_STEPS
-                     if state.get(key)]
+            steps = [(label, state[key]) for name, label, key in _RUN_STEPS
+                     if name in wanted_steps and state.get(key)]
 
             def _next(j: int):
                 if j >= len(steps):
@@ -286,6 +369,10 @@ def main() -> None:
     # Kick off once the Qt event loop is running, then run the loop.
     QTimer.singleShot(0, lambda: process(0))
     napari.run()
+    # napari.run() returns when _finish quits the app; exit non-zero if any
+    # image was skipped, so a wrapper script can tell a clean run from a partial
+    # one without parsing the log.
+    sys.exit(rc["code"])
 
 
 if __name__ == "__main__":

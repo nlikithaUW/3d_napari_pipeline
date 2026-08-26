@@ -98,6 +98,20 @@ def _read_channel(tif: Path, channel: str, ds: int):
     return np.stack(planes).astype(np.float32)
 
 
+def _voxel_zyx(tif: Path) -> tuple[float, float, float]:
+    """Voxel size in um from the OME header. Never hard-coded -- five of the six
+    images are 0.4um in z and `09step` is 0.9um (CLAUDE.md)."""
+    import re
+    with tifffile.TiffFile(str(tif)) as tf:
+        xml = tf.ome_metadata or ""
+    def grab(tag, default):
+        m = re.search(rf'{tag}="([0-9.eE+-]+)"', xml)
+        return float(m.group(1)) if m else default
+    return (grab("PhysicalSizeZ", 1.0),
+            grab("PhysicalSizeY", 1.0),
+            grab("PhysicalSizeX", 1.0))
+
+
 def _total_nuclei(saved: Path) -> int | None:
     fc = saved / "fibroblast_count.npz"
     if fc.exists():
@@ -131,10 +145,47 @@ def _qc_overlay(vol, masks, out_png, title):
     plt.close(fig)
 
 
+def _saved_wall_mask(saved, shape, voxel_raw_zyx, ds):
+    """The pipeline's own cadherin mask, resampled onto this script's grid.
+
+    Prefer this over `_tissue_mask`. Otsu marks ~40% of these volumes as
+    "tissue" because it thresholds the noise: the wall is a thin, dim minority
+    of a speckly channel, which is exactly the global-threshold failure
+    docs/ISSUES.md P36 and P28 record for this channel. The saved Niblack mask
+    is ~2.7% nonzero on the same image. Reusing it also means the endothelial
+    count refers to the *same* wall as the mesh and the graph, rather than to a
+    second, worse copy of the same idea (CLAUDE.md: never write the second copy).
+
+    The saved mask is on the isotropic `min(voxel)` grid; this script works at
+    the raw z-spacing with xy decimated by `ds`. Mapped by nearest neighbour,
+    because a boolean mask must not be interpolated.
+
+    Returns None if the image has no saved mask, so the caller can fall back.
+    """
+    f = Path(saved) / "cadherin_labels.npz"
+    if not f.exists():
+        return None
+    with np.load(f, allow_pickle=True) as z:
+        if "labels" not in z.files:
+            return None
+        m = z["labels"] != 0
+    iso = min(voxel_raw_zyx)          # io.to_isotropic targets min(voxel_zyx_um)
+    nz, ny, nx = shape
+    step = (voxel_raw_zyx[0] / iso,
+            voxel_raw_zyx[1] * ds / iso,
+            voxel_raw_zyx[2] * ds / iso)
+    idx = [np.clip(np.round(np.arange(n) * s).astype(int), 0, m.shape[a] - 1)
+           for a, (n, s) in enumerate(zip((nz, ny, nx), step))]
+    return m[np.ix_(*idx)]
+
+
 def _tissue_mask(vol):
-    """3D mask of real tissue (endothelial walls) vs background noise, so noise
-    can't be mistaken for a wall or amplified by CLAHE. Otsu on a smoothed copy,
-    then keep the largest connected component (drops scattered speckle)."""
+    """Fallback tissue mask for an image with no saved cadherin mask.
+
+    Otsu on a smoothed copy, then the largest connected component. **Known to
+    fail on this dataset** -- see `_saved_wall_mask`, which is why it is now the
+    fallback rather than the default.
+    """
     from scipy.ndimage import gaussian_filter, label, binary_closing
     from skimage.filters import threshold_otsu
     v = gaussian_filter(vol, (1.0, 2.0, 2.0))
@@ -164,7 +215,21 @@ def _split_z(vol, mask=None):
     if len(zr) < 3:
         return int(round(zr.mean())) if len(zr) else len(ps) // 2
     z0, z1 = int(zr[0]), int(zr[-1])
-    return z0 + int(np.argmin(ps[z0:z1 + 1]))       # valley between the 2 walls
+    zs = z0 + int(np.argmin(ps[z0:z1 + 1]))         # valley between the 2 walls
+    # A valley *at* an endpoint is not a valley: the profile is monotonic over
+    # the tissue range, so the two walls were never resolved as two humps. Left
+    # alone this silently degenerates -- zs == z1 sends one "wall" the whole
+    # stack and the other a single plane, which is how a whole-volume MIP got
+    # reported as an en-face wall projection. Say so and split the tissue range
+    # instead; the caller is expected to distrust the count either way.
+    if zs in (z0, z1):
+        mid = (z0 + z1) // 2
+        print(f"    WARNING: no interior valley in the Z profile "
+              f"(tissue Z {z0}..{z1}, minimum at {zs}); the two walls are not "
+              f"separable in depth. Falling back to the midpoint {mid}.",
+              flush=True)
+        return mid
+    return zs
 
 
 def _prep_masked(proj, foot, clahe=True):
@@ -220,7 +285,8 @@ def _count_masks(m, min_area):
 
 
 def _enface_count(model, vol, newapi, diam, min_area, invert, cellprob=0.0,
-                  clahe=True, denoise_r=1, bg_sigma=20.0, tissue=True):
+                  clahe=True, denoise_r=1, bg_sigma=20.0, tissue=True,
+                  wall=None):
     """Split into top/bottom walls, project each en-face, segment 2D, sum.
 
     With tissue=True (default): mask real tissue vs background noise, split at
@@ -229,7 +295,7 @@ def _enface_count(model, vol, newapi, diam, min_area, invert, cellprob=0.0,
     sit high/low in the stack (where a single global Z-split fed noise to one
     wall). tissue=False falls back to the plain split + _preprocess."""
     if tissue:
-        mask = _tissue_mask(vol)
+        mask = _tissue_mask(vol) if wall is None else wall
         mvol = np.where(mask, vol, 0).astype(np.float32)
         zs = _split_z(vol, mask)
         bottom = mvol[:zs].max(0) if zs > 0 else mvol[0]
@@ -366,11 +432,21 @@ def main() -> None:
             saved = Path(args.dir) / f"{tif.stem}_saved"
 
             if args.enface:
+                wall = None
+                if not args.no_tissue:
+                    wall = _saved_wall_mask(saved, vol.shape,
+                                            _voxel_zyx(tif), args.ds)
+                    print(f"    tissue mask: "
+                          + (f"pipeline cadherin_labels.npz "
+                             f"({wall.mean() * 100:.1f}% of volume)"
+                             if wall is not None else
+                             "NO saved mask -- falling back to Otsu, which is "
+                             "known to fail on this data"), flush=True)
                 n_endo, counts, projs, masks2d, zs = _enface_count(
                     model, vol, newapi, diam, args.min_vox, args.invert,
                     cellprob=args.cellprob, clahe=not args.no_clahe,
                     denoise_r=args.denoise, bg_sigma=args.bgsub,
-                    tissue=not args.no_tissue)
+                    tissue=not args.no_tissue, wall=wall)
                 print(f"    split at Z={zs}: top wall={counts[0]}, "
                       f"bottom wall={counts[1]} (total={n_endo})", flush=True)
                 if saved.exists():

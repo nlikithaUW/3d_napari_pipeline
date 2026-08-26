@@ -9,10 +9,9 @@ from magicgui.widgets import ComboBox, Container, FileEdit, PushButton
 from napari.qt.threading import thread_worker
 
 from ..fret import compute_fret_volume, load_force_lut, resample_fret_outputs
-from ..io import load_params, load_stack, to_isotropic
-from .widgets import percentile_limits, pyramid_views
+from ..io import fret_configured, load_params, load_stack, to_isotropic
+from .widgets import percentile_limits, pyramid_views, with_after
 
-FRET_REQUIRED = {"clover", "ruby", "fret"}
 
 # Percentile contrast defaults applied to raw channels on load (napari's
 # min/max auto-contrast magnifies the noise floor — see percentile_limits).
@@ -39,15 +38,17 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         stack_raw = load_stack(tif_path, params)
         role_to_c = {role: stack_raw.channels.index(name)
                      for role, name in stack_raw.roles.items()}
-        missing = FRET_REQUIRED - set(stack_raw.roles)
-        if missing:
-            raise ValueError(
-                f"{tif_path.name}: missing roles {sorted(missing)} required "
-                f"for FRET/force computation"
-            )
-        lut_eff, lut_force = load_force_lut(str(lut_path))
-        fret = compute_fret_volume(stack_raw.data, role_to_c, params["fret"],
-                                   lut_eff, lut_force)
+        fret_ok, why = fret_configured(params, stack_raw.roles)
+        if fret_ok:
+            print(f"  FRET: computing ({why}).", flush=True)
+            lut_eff, lut_force = load_force_lut(str(lut_path))
+            fret = compute_fret_volume(stack_raw.data, role_to_c,
+                                       params["fret"], lut_eff, lut_force)
+        else:
+            print(f"  FRET: skipped — {why}. No efficiency/force layers; the "
+                  f"force_*_pN columns will export blank. The uncalibrated "
+                  f"mClover/mRuby ratio is the tension proxy.", flush=True)
+            fret = None
         raw_shape = stack_raw.data.shape
         raw_nbytes = stack_raw.data.nbytes
         raw_voxel = stack_raw.voxel_zyx_um
@@ -59,8 +60,9 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         ruby_native = (stack_raw.data[:, role_to_c["ruby"]].copy()
                        if "ruby" in stack_raw.roles else None)
         stack = to_isotropic(stack_raw)
-        fret = resample_fret_outputs(fret, stack_raw.voxel_zyx_um,
-                                     stack.voxel_zyx_um[0])
+        if fret is not None:
+            fret = resample_fret_outputs(fret, stack_raw.voxel_zyx_um,
+                                         stack.voxel_zyx_um[0])
         # Drop the raw uint16 stack — closure would otherwise retain it.
         del stack_raw
         return (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
@@ -132,9 +134,11 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         ruby_raw = stack.data[:, role_to_c["ruby"]] if "ruby" in stack.roles else None
         state["dapi_raw"] = dapi_raw
         state["cadh_raw"] = cadh_raw
-        seed = state.get("seed_cadh_floor")
-        if seed is not None:
-            seed()
+        # `seed_cadh_floor` is NOT called here any more. It overwrote the
+        # Cadherin tab's `floor_k` on every load, so the tab default never
+        # reached the build and a headless run silently used a different value
+        # than the one recorded as the default (P26). It is a button on the
+        # Cadherin tab now — press it if you want the suggestion.
         state["clover_raw"] = clover_raw
         state["ruby_raw"] = ruby_raw
         state["clover_raw_native"] = clover_native
@@ -157,7 +161,14 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         state["cadh_mask_layer"] = _mask_layer(cadh_raw, "VE-Cadherin mask", "magenta")
         state["clover_mask_layer"] = _mask_layer(clover_raw, "Clover filter mask", "green")
 
-        state["dapi_state"] = {"labels": None, "sizes": None}
+        # "labels"/"sizes" are the unsplit DAPI connected components; "nuclei"
+        # and friends are the watershed-split nuclei + their per-nucleus
+        # fibroblast class (P04). Two different objects, one dict, replaced
+        # wholesale per image so neither can leak across images.
+        state["dapi_state"] = {"labels": None, "sizes": None,
+                               "nuclei": None, "nuclei_sizes": None,
+                               "nuclei_ids": None, "nuclei_is_fib": None,
+                               "nuclei_min_size_vox": None}
         state["cadh_state"] = {
             "labels": None, "sizes": None,
             "centroids": None, "normals": None, "label_ids": None,
@@ -170,6 +181,11 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
                               "normals": None, "lids": None}
         state["adhesion_proba"] = None
         state["clover_ruby_ratio"] = None
+        # Must be cleared per image (P25). `run_fibroblasts` chains its save
+        # through `call_all`, which fires even when the count bails out early —
+        # so a stale count from the previous image would be written into this
+        # image's fibroblast_count.npz and, from there, into its CSV.
+        state["fibroblast_count"] = None
         for hist in state.get("hists", []):
             hist.clear()
 
@@ -193,17 +209,13 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
                 pass
 
         print("Load complete.", flush=True)
-        if after:
-            after()
 
     def _err(exc):
         print(f"Load error ({tif_path.name}): {exc}", flush=True)
-        if after:
-            after()
 
     w = _run()
-    w.returned.connect(_done)
-    w.errored.connect(_err)
+    w.returned.connect(with_after(_done, after, "Load"))
+    w.errored.connect(with_after(_err, after, "Load"))
     w.start()
 
 
@@ -242,10 +254,11 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
     # (label, state key) in dependency-friendly order.
     _LOADERS = [
         ("DAPI labels", "load_dapi_labels"),
+        ("Split nuclei + classes", "load_nuclei_split"),
         ("VE-Cadherin mask", "load_cadh"),
         ("Vessel mesh", "load_vessel_mesh"),
         ("Vessel curvature", "load_vessel_curvature"),
-        ("Vessel path curvature", "load_vessel_path_curvature"),
+        ("Vessel centerline graph", "load_vessel_path_curvature"),
         ("Adhesion proba", "load_proba"),
         ("Adhesion instances", "load_instances"),
         ("Clover/Ruby ratio", "load_ratio"),
@@ -293,11 +306,11 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
     _RUN_STEPS = [
         ("DAPI + components", "run_dapi"),
         ("Fibroblast count", "run_fibroblasts"),
-        ("VE-Cadherin (Sauvola)", "run_cadherin"),
+        ("VE-Cadherin threshold", "run_cadherin"),
         ("Vessel mesh", "run_vessel_mesh"),
         ("Surface curvature", "run_vessel_curvature"),
-        ("In-plane path curvature", "run_vessel_path_curvature"),
-        ("Clover Otsu", "run_clover"),
+        ("3D centerline graph", "run_vessel_path_curvature"),
+        ("Clover threshold", "run_clover"),
         ("RF predict", "run_rf_predict"),
         ("RF post-process (split-merged)", "run_rf_postprocess"),
         ("Measure + export CSV", "run_measure"),

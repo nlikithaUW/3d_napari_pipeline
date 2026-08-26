@@ -41,6 +41,32 @@ def load_params(params_path: str | Path) -> dict:
         return json.load(f)
 
 
+# Roles the FRET math needs. Absent any of them — or absent a "fret" block in
+# params.json — FRET is skipped rather than computed from borrowed constants.
+FRET_REQUIRED = {"clover", "ruby", "fret"}
+
+
+def fret_configured(params: dict, roles) -> tuple[bool, str]:
+    """Is FRET configured for this dataset? Returns ``(ok, reason)``.
+
+    Absence of the ``fret`` block in params.json is the signal to skip: there is
+    no boolean flag to default wrongly, and the params file documents itself.
+    The constants are instrument- and sensor-specific, so an uncalibrated
+    dataset must not silently borrow another's — that would produce force
+    numbers that look real and are not.
+
+    Lives here rather than in ``gui.loader`` so the headless batch can use it
+    without importing napari, and in ``io`` rather than ``fret`` because it
+    interprets params.json — ``fret.py`` is frozen math.
+    """
+    if not params.get("fret"):
+        return False, 'no "fret" block in params.json (dataset not calibrated)'
+    missing = FRET_REQUIRED - set(roles)
+    if missing:
+        return False, f"missing channel role(s) {sorted(missing)}"
+    return True, "fret block + clover/ruby/fret channels present"
+
+
 def load_stack(tif_path: str | Path, params: dict) -> Stack:
     """Read an OME-TIFF stack and return data + channel mapping built from params."""
     with tifffile.TiffFile(str(tif_path)) as tf:

@@ -27,6 +27,7 @@ from magicgui.widgets import Container, FileEdit, PushButton, SpinBox
 from napari.qt.threading import thread_worker
 
 from ..rf import AdhesionRF
+from .widgets import call_all, with_after
 
 LABELS_LAYER = "VE-cad boundary labels"
 PROBA_LAYER = "VE-cad junction proba"
@@ -66,14 +67,12 @@ def build(state, viewer) -> Container:
         cadh = state.get("cadh_raw")
         if cadh is None:
             print("Load a stack first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         if LABELS_LAYER not in [l.name for l in viewer.layers]:
             print(f"No '{LABELS_LAYER}' layer — create it and paint first.",
                   flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         ann_layer = viewer.layers[LABELS_LAYER]
         ann_vol = (np.asarray(ann_layer.data[0]) if getattr(
@@ -82,8 +81,7 @@ def build(state, viewer) -> Container:
         if not np.any(ann_vol > 0):
             print("No annotations found. Paint junction (1) and background (2) "
                   "first.", flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         n_est = int(n_estimators_w.value)
         voxel_um = state.get("scale", (1.0, 1.0, 1.0))
@@ -98,18 +96,14 @@ def build(state, viewer) -> Container:
         def _done(rf):
             state["cadherin_rf"] = rf
             print("VE-cad RF training complete.", flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Training error: {exc}", flush=True)
-            if after:
-                after()
 
         print(f"Training VE-cad RF (n_estimators={n_est}) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "VE-cad RF train"))
+        w.errored.connect(with_after(_err, after, "VE-cad RF train"))
         w.start()
 
     # ---- Predict ----
@@ -119,8 +113,7 @@ def build(state, viewer) -> Container:
         if cadh is None or rf is None:
             print("Need a loaded stack and a trained/loaded VE-cad RF.",
                   flush=True)
-            if after:
-                after()
+            call_all(after)
             return
         voxel_um = state.get("scale", (1.0, 1.0, 1.0))
         vol_f32 = np.asarray(cadh).astype(np.float32)
@@ -138,18 +131,14 @@ def build(state, viewer) -> Container:
                              colormap="magma", blending="additive")
             print(f"VE-cad junction proba computed (max={float(proba.max()):.2f}).",
                   flush=True)
-            if after:
-                after()
 
         def _err(exc):
             print(f"Predict error: {exc}", flush=True)
-            if after:
-                after()
 
         print("Running VE-cad RF predict (full volume) ...", flush=True)
         w = _run()
-        w.returned.connect(_done)
-        w.errored.connect(_err)
+        w.returned.connect(with_after(_done, after, "VE-cad RF predict"))
+        w.errored.connect(with_after(_err, after, "VE-cad RF predict"))
         w.start()
 
     # ---- Save / load model + proba ----
@@ -199,7 +188,8 @@ def build(state, viewer) -> Container:
     # Headless / Run-all hooks.
     state["run_cadherin_rf_train"] = lambda after=None: _train(after=after)
     state["run_cadherin_rf_predict"] = lambda after=None: _predict(
-        after=(lambda: (_save_proba(), after() if after else None)))
+        after=lambda: call_all(_save_proba, after,
+                               label="run_cadherin_rf_predict"))
     state["load_cadherin_proba"] = _load_proba
 
     return Container(widgets=[

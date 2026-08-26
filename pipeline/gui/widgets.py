@@ -1,13 +1,75 @@
-"""Shared GUI helpers: histogram canvas, debounce decorator, strided pyramid."""
+"""Shared GUI helpers: histogram canvas, debounce decorator, strided pyramid,
+and the ``after``-hand-off wrapper that keeps the "Run all" chain alive."""
 
 from __future__ import annotations
 
+import traceback
 from functools import wraps
 
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from qtpy.QtCore import QTimer
+
+
+def call_all(*fns, label: str = "step") -> None:
+    """Call each non-None callable in order; a failure is reported, not raised.
+
+    Used for the "save the result, then continue the chain" hand-offs. If the
+    save throws, the continuation must still run — otherwise the pipeline stops
+    at that step with nothing to show for it.
+    """
+    for fn in fns:
+        if fn is None:
+            continue
+        try:
+            fn()
+        except Exception:
+            print(f"{label}: {getattr(fn, '__name__', 'callback')} failed —\n"
+                  f"{traceback.format_exc()}", flush=True)
+
+
+def with_after(handler, after=None, label: str = "step"):
+    """Wrap a worker completion handler so the ``after`` hand-off always fires.
+
+    Qt swallows exceptions raised inside a signal slot. Without this, anything
+    that throws part-way through ``handler`` skips the trailing ``after()`` and
+    the "Run all" chain stops dead — no error, no timeout, just a pipeline that
+    never reaches the next step. Runs ``handler``, prints any traceback it
+    raises, then calls ``after`` from a ``finally``.
+
+    Handlers wrapped here must NOT call ``after`` themselves.
+    """
+    @wraps(handler)
+    def _wrapped(*args, **kwargs):
+        try:
+            return handler(*args, **kwargs)
+        except Exception:
+            print(f"{label}: handler failed —\n{traceback.format_exc()}",
+                  flush=True)
+        finally:
+            call_all(after, label=label)
+    return _wrapped
+
+
+def after_on_error(handler, after=None, label: str = "step"):
+    """Like ``with_after``, but fires ``after`` *only* when ``handler`` raises.
+
+    For a handler whose success path launches a further worker that owns the
+    hand-off (e.g. auto-running the Clover threshold, then RF predict). Calling ``after``
+    unconditionally there would advance the chain the moment the second worker
+    *started*, not when it finished. Calling it never would stall the chain if
+    the handler died before launching that worker — hence this middle ground.
+    """
+    @wraps(handler)
+    def _wrapped(*args, **kwargs):
+        try:
+            return handler(*args, **kwargs)
+        except Exception:
+            print(f"{label}: handler failed —\n{traceback.format_exc()}",
+                  flush=True)
+            call_all(after, label=label)
+    return _wrapped
 
 
 def pyramid_views(vol: np.ndarray, levels: int):

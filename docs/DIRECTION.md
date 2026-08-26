@@ -10,7 +10,7 @@ what is not, and what to do next.
 |---|---|---|
 | **this file** | the **program**: goal, hypothesis, physics, dataset, and the work queue | the direction and the ordering |
 | `docs/ISSUES.md` | the **defect log**: one entry per problem, permanent IDs (`P01`…), full history | the detail and the dates for every `Pnn`/`Inn` |
-| `docs/audit.md` | frozen evidence, 2026-08-10, commit `5077918` | never edited |
+| `docs/audit.md` | frozen evidence, 2026-08-10, commit `0faf2e5` | never edited |
 | `README.md` | public description + short limitations table | links to `ISSUES.md` |
 
 **The rule that keeps these from drifting:** this file cites issue IDs and quotes
@@ -1627,7 +1627,7 @@ and [I09](ISSUES.md#i09). What matters at program level is three things.
 
 **1. The adhesion artifacts on disk were two weeks stale, and re-running them
 changed nothing.** Every `adhesion_instances.npz` dated 2026-08-11, against the
-clover-gate fix in commit `9aec319` (2026-08-24). Re-detection on image 6 with a
+clover-gate fix in commit `46f99cc` (2026-08-24). Re-detection on image 6 with a
 30× wider gate returned a **bit-identical** `proba >= 0.5` set — 0 voxels
 different. So the CSVs' adhesion positions were never affected by the gate, and
 everything measured off them in §8E stands.

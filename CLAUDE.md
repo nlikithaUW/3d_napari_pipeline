@@ -394,7 +394,7 @@ here; it will drift.
 - **`docs/ISSUES.md`** — living state. One entry per problem, permanent IDs
   (`P01`, `P02`, …). Closed entries stay, including ones closed as `invalid`.
 - **`docs/audit.md`** — frozen evidence: a dated snapshot of the full audit
-  (2026-08-10, commit `5077918`). Never edited to reflect a fix. `ISSUES.md`
+  (2026-08-10, commit `0faf2e5`). Never edited to reflect a fix. `ISSUES.md`
   cites it as `audit F1`, `audit F2`, …
 - **`README.md`** — public. Carries only a short limitations table linking here.
 

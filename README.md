@@ -529,7 +529,7 @@ pipeline/gui/        one module per napari tab
 Scripts/             standalone utility scripts (see above)
 docs/
   ISSUES.md          known problems — the living development log. Read this
-  audit.md           frozen pipeline audit, 2026-08-10, commit 5077918
+  audit.md           frozen pipeline audit, 2026-08-10, commit 0faf2e5
 3d_images_folder/    data root (images are git-ignored; only config is tracked)
 Fret_LUT/            FRET efficiency -> force calibration
 environment.yml      conda spec (image_analysis)

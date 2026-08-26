@@ -10,7 +10,7 @@ Read this before trusting or extending any output.
 - **`README.md`** is the public description of what the project is and how to
   run it. It carries a short limitations table that links back here.
 - **`docs/audit.md`** is a frozen, dated snapshot of a full pipeline audit
-  (2026-08-10, commit `5077918`). Entries below cite it as `audit F1` and so on.
+  (2026-08-10, commit `0faf2e5`). Entries below cite it as `audit F1` and so on.
   It is evidence, not state: it is never edited to reflect a fix.
 - **This file** is state. It changes every time a problem is opened, verified,
   or closed.
@@ -115,7 +115,7 @@ true of the code and data on that date and may not be true now.
 | [P43](#p43) | The clover gate cost bias and saved ~10%; removed | S3 | **fixed** 2026-08-25 — refutes [I07](#i07)'s premise |
 | [I09](#i09) | RF inference is dominated by `_eigh3x3` on the CPU (~52%) | idea | open — **~2× available, exact**; profiled, three proposals rejected on measurement |
 | [P44](#p44) | The RF's training annotations were never saved; the model cannot be retrained | **S2** | open — **blocks [P03](#p03)'s hypothesis and its fix**; escalates [H02](#h02) |
-| [P45](#p45) | `batch_mesh` crashed on every invocation — two names used, never imported | S3 | **fixed** 2026-08-26 — every mesh artifact since `48b4f9d` came from the GUI |
+| [P45](#p45) | `batch_mesh` crashed on every invocation — two names used, never imported | S3 | **fixed** 2026-08-26 — every mesh artifact since `fa8d895` came from the GUI |
 | [P46](#p46) | A digitized wall is longer than the wall it stands for, so absolute τ reads ~5% low | S3 | open — **quantified, common-mode**; cancels in the within-segment profile, not in Pa |
 | [P47](#p47) | Emptying the cell-mesh slice `Shapes` layer poisons its mesh with NaN and faults the GL draw | S3 | **fixed** 2026-08-26 — a second, unguarded `add_surface` fixed in the same change |
 | [H01](#h01) | Repository has no LICENSE | — | open |
@@ -533,7 +533,7 @@ queue by being superseded rather than fixed.
 | **Severity** | S1 |
 | **Opened** | 2026-08-10 (audit F1) |
 | **Last verified** | 2026-08-10 |
-| **Resolved** | 2026-08-10 (commit `af8e6c0`) |
+| **Resolved** | 2026-08-10 (commit `0d8237e`) |
 | **Where** | `pipeline/cell_mesh.py:137` (`alpha_shape_faces`), `pipeline/cell_mesh.py:305` (`vertex_outward_normals`) |
 | **Affects** | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian`; the Vessel-mesh tab's "implied caliber" readout; the Measure tab's `Spearman(ratio, curv_*)` lines |
 | **Evidence** | `docs/audit.md` §3 F1 |
@@ -1105,7 +1105,7 @@ analysis. If it holds, correcting the intensities will not be enough on its own.
 | **Severity** | S1 |
 | **Opened** | 2026-08-10 (audit F4) |
 | **Last verified** | 2026-08-11 |
-| **Resolved** | 2026-08-11 (commit `04262b8`) |
+| **Resolved** | 2026-08-11 (commit `ce03ff5`) |
 | **Where** | `pipeline/gui/nuclei.py:218` vs `pipeline/gui/measure.py:62` |
 | **Affects** | `nuc_id`, `dist_nuc_um`, `n_fibroblasts`, `n_nuclei_total`, and the new `nuc_is_fibroblast` |
 | **Evidence** | `docs/audit.md` §3 F4 |
@@ -1533,7 +1533,7 @@ and [P03](#p03) both have to land first for any of those to mean anything.
 | **Severity** | S2 |
 | **Opened** | 2026-08-10 (audit F5) |
 | **Last verified** | 2026-08-10 (scikit-image 0.26.0) |
-| **Resolved** | 2026-08-10 (commit `af8e6c0`) |
+| **Resolved** | 2026-08-10 (commit `0d8237e`) |
 | **Where** | `pipeline/gui/nuclei.py:213`, `pipeline/rf.py:606,619` |
 | **Affects** | `n_nuclei_total`, `n_fibroblasts`, adhesion instance boundaries (**not** `nuc_id` / `dist_nuc_um` — see History) |
 | **Evidence** | `docs/audit.md` §3 F5 |
@@ -1609,7 +1609,7 @@ crop padding above `min_distance`.
   the original claim belongs to [P04](#p04).
 - 2026-08-11 — **that correction expires with [P04](#p04).** The watershed result
   *is* now written to `state` and saved as `nuclei_split.npz`, and Measure reads
-  it. So from this commit (`04262b8`) onward P07(a) **does** reach `nuc_id` and
+  it. So from this commit (`ce03ff5`) onward P07(a) **does** reach `nuc_id` and
   `dist_nuc_um`, and the original "Affects" list is right again for any CSV
   exported after it. The correction remains accurate for every CSV exported
   before it. This is the reason `nuc_id` is not comparable across the P04
@@ -2087,7 +2087,7 @@ should not share a commit with behaviour changes. **Deliberately deferred.**
 | **Severity** | S3 |
 | **Opened** | 2026-08-10 (audit F9) |
 | **Last verified** | 2026-08-11 |
-| **Resolved** | 2026-08-11 (commit `04262b8`) |
+| **Resolved** | 2026-08-11 (commit `ce03ff5`) |
 | **Where** | `pipeline/batch_measure.py:181`, `:144`; `pipeline/gui/vessel_mesh.py:515` (`_load_curv`'s length check) |
 
 Two asymmetries between the GUI and headless paths:
@@ -2659,7 +2659,7 @@ that varies by construction.
 | **Severity** | S3 (display only — no exported column changes) |
 | **Opened** | 2026-08-10 |
 | **Last verified** | 2026-08-13 |
-| **Resolved** | 2026-08-10 (commit `af8e6c0`); superseded 2026-08-13 |
+| **Resolved** | 2026-08-10 (commit `0d8237e`); superseded 2026-08-13 |
 | **Where** | `pipeline/centerline.py:195` (`lumen_center_z`), `pipeline/gui/vessel_mesh.py::_show_path`. **`_path_z_um` no longer exists** — the pre-2026-08-13 fix. **Both the file and `_show_path` were deleted 2026-08-22** |
 | **Affects** | the `Vessel path curvature (X-Y)` layer only — **which no longer exists**; see the 2026-08-22 note |
 
@@ -3156,7 +3156,7 @@ other curvature column).
 | **Severity** | S1 |
 | **Opened** | 2026-08-11 |
 | **Last verified** | 2026-08-11 |
-| **Resolved** | 2026-08-11 (commit `da9f15e`) |
+| **Resolved** | 2026-08-11 (commit `37f7de7`) |
 | **Where** | `pipeline/gui/loader.py:186` (the fix), `pipeline/batch.py:227` |
 | **Affects** | `n_fibroblasts`, `n_nuclei_total`, and the saved `fibroblast_count.npz` |
 
@@ -4189,7 +4189,7 @@ sign-safe curvature is the one with almost no dynamic range on this geometry.
 |---|---|
 | **Status** | **fixed** |
 | **Opened** | before 2026-08-06 |
-| **Resolved** | 2026-08-06, commit `f8106a5` |
+| **Resolved** | 2026-08-06, commit `18e8b45` |
 | **Verified** | 2026-08-10 — `force_mean_pN`, `force_std_pN`, `force_total_pN` are all-NaN in the shipped CSV and export blank |
 | **Where** | `pipeline/io.py::fret_configured` |
 
@@ -5924,7 +5924,7 @@ ones while gaining ones this metric cannot see. Only re-detection settles it.
 - 2026-08-25 — **closed: the premise is refuted, though the sub-measurements
   stand.** This entry's claim was that the global Otsu gate is "the root cause of
   an S1 defect", [P03](#p03). The clover tab did move to niblack (commit
-  `9aec319`), and this entry's depth-ratio table (Otsu 3.06 vs niblack ~0.91) is
+  `46f99cc`), and this entry's depth-ratio table (Otsu 3.06 vs niblack ~0.91) is
   still correct as far as it goes. But it measured the *gate*, never the
   *output*: re-running detection on image 6 with the gate at 93.4% of the volume
   produced a bit-identical `proba >= 0.5` set ([P43](#p43)). The gate was never
@@ -6087,7 +6087,7 @@ have `(1|image)` with n = 6, or a spatial clustering of adhesions as a rough cel
 proxy.
 
 > **2026-08-11 — [P04](#p04) is fixed, so `(1|image/nucleus)` is now available**
-> on any CSV exported after commit `04262b8`: `nuc_id` indexes nuclei rather than
+> on any CSV exported after commit `ce03ff5`: `nuc_id` indexes nuclei rather than
 > DAPI components, and `nuc_is_fibroblast` says which class each belongs to. On
 > `V3_..._04step_002` that is 2,147 adhesions across **170 nuclei**, median ~8
 > adhesions per nucleus.
@@ -6718,7 +6718,7 @@ cites as an example of *not* letting the GUI and the headless path drift. It was
 extracted into `vessel_mesh` for both callers to share and then not imported by
 the second one, so the check ran in the tab and crashed the runner.
 
-Introduced in `48b4f9d` ("Stop the cadherin GUI/headless drift; scope sliders to
+Introduced in `fa8d895` ("Stop the cadherin GUI/headless drift; scope sliders to
 the active method"), which added both uses. The fix is the two missing import
 lines.
 
@@ -6727,7 +6727,7 @@ lines.
 been caught by, in under a second, on any of the six images.
 
 **What this says about the last week of work.** Every `vessel_graph.npz` and
-`vessel_mesh.npz` written since `48b4f9d` came from the **napari tab**, not from
+`vessel_mesh.npz` written since `fa8d895` came from the **napari tab**, not from
 `batch_mesh` — the headless path could not have produced one. That is worth
 holding next to [P26](#p26) and [P37](#p37): the artifacts in
 `WT/..._saved/` carry no `vessel_recon.json` for the untagged build precisely

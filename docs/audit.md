@@ -1,7 +1,7 @@
 # Pipeline audit — 3d_napari_pipeline
 
 > **This file is frozen.** It is a dated snapshot of what was measured on
-> 2026-08-10 against commit `5077918`, and it is **not** edited to reflect
+> 2026-08-10 against commit `0faf2e5`, and it is **not** edited to reflect
 > fixes — its value is that it records what was true before them. Only factual
 > corrections to the measurements themselves belong here.
 >
@@ -9,6 +9,14 @@
 > log. Its entries cite the findings below by ID (`audit F1`, `audit F2`, …).
 > A future audit becomes a new dated file alongside this one rather than an
 > edit to it.
+>
+> **The commit hash changed on 2026-08-26, and nothing else did.** The branch
+> `consolidation-fixes-and-docs` was rewritten to strip a co-author trailer from
+> its commit messages, which changes every hash on it. The audited commit was
+> `5077918` and is now `0faf2e5`; the tree, the author, the dates and the
+> measurements below are byte-identical. This is the one kind of edit this file
+> accepts — a pointer that would otherwise dangle — and it is recorded here
+> rather than made silently.
 >
 > **Navigating the references below.** This audit was written against
 > `TODO.md`, which was retired on 2026-08-10 and migrated into `ISSUES.md`.
@@ -39,7 +47,7 @@
 
 | | |
 |---|---|
-| **Audited at commit** | `5077918` "Record the ruby-contrast and depth-drift findings in TODO.md", branch `consolidation-fixes-and-docs` |
+| **Audited at commit** | `0faf2e5` "Record the ruby-contrast and depth-drift findings in TODO.md", branch `consolidation-fixes-and-docs` — **was `5077918` until 2026-08-26**, see the note below |
 | **Date** | 2026-08-10 |
 | **Scope** | Every module in `pipeline/` and `pipeline/gui/`, the three batch runners, `Scripts/depth_check.py`, and the exported CSV. ~8,600 lines |
 | **Evidence image** | `V3_CorrectSettings_40xWater_04step_002` — the only image with a full set of saved intermediates and a shipped CSV (2,092 adhesions) |

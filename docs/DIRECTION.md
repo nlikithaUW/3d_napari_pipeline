@@ -279,6 +279,59 @@ builds the binary section internally and then discards it. Two additions:
 - **perimeter**, which `D_h = 4A/P` needs before *any* of §4.2's algebra can be
   evaluated numerically. It is not currently computed anywhere.
 
+> **Built, 2026-08-26.** `pipeline/shear.py`, plus both additions above:
+> `cross_section` now reports `perim_um` and fills an optional `extras=`
+> out-dict with the section mask and its frame. `build_graph(compute_shear=True)`
+> — `batch_mesh --shear`, and a checkbox on the Vessel Mesh tab so the two
+> cannot drift — adds `hydraulic_diam_um`, `q_hat_um4`, `tau_hat_mean/min/max_um`,
+> `tau_rel_1_um3`, `force_balance` and `wall_ok_frac` per station. Off by
+> default, because `batch.py` runs at defaults and a default is a decision.
+>
+> **Validated against closed form, not against itself** ([I03](ISSUES.md#i03)'s
+> doctrine): `docs/scratch/shear/solver_check.py` solves the disc analytically
+> and the rectangle by its double sine series. `Q̂` lands within 0.08% and the
+> wall profile within 1% on the rectangle. The disc is 5% low for a reason that
+> is not the solver — [P46](ISSUES.md#p46), a digitized wall is longer than the
+> wall it stands for, and it is common-mode.
+>
+> **The circumferential variation is not a detail.** On an aspect-1.8 rectangle
+> the solved τ varies **9× around the perimeter**, and on image 6's real
+> sections the median is 6.7×. §7.4 asked that circumferential position be
+> preserved; this is the size of what a per-section scalar would have thrown
+> away.
+>
+> **Visible on the surface, 2026-08-26.** `build_graph(..., extras=)` keeps the
+> full per-boundary-point profile — every wall point with its 3D position and
+> its τ — as `extras["wall"]`, written to `vessel_shear.npz` by
+> `batch_mesh --shear` and drawn by the Vessel Mesh tab as a per-vertex surface
+> layer beside `Vessel curvature`. On image 6 that is 27,682 wall points
+> covering 88% of the mesh vertices (70% after dropping clipped and censored
+> sections), and the waist reads red against dark arms — the arc-length plot,
+> in place.
+>
+> **The view is a view.** Vertices take the value of the **nearest measured**
+> wall point, never an interpolation, and wall with no measurement within a
+> section spacing is **not drawn** rather than filled — `curvature` fills its
+> NaNs with the median, which is right for a field defined on every vertex and
+> would be a fabricated measurement here. Where the axial sampling shows, the
+> fix is a smaller `section_every_um`, which is a real measurement and costs
+> seconds.
+>
+> **One caution that is about statistics, not about the picture.** Cutting
+> sections closer together for a better view also multiplies the rows. Adjacent
+> sections on a 60 µm-wide vessel are nearly the same cut, so a finer
+> `section_every_um` does **not** buy independent measurements — the
+> correlation length is the caliber, not the spacing. Anything that counts
+> sections, or fits with an n, has to use the recorded `section_every_um` rather
+> than the row count.
+>
+> **And it is the same array the adhesion join will use.** The wall point cloud
+> is what an adhesion joins to — nearest luminal wall point, read its τ — so
+> what is on screen is literally what gets joined. That join must carry the
+> **distance to that wall point** as a column: the fibroblasts are cast through
+> the bulk gel at a range of distances (§8D), so some adhesions are nowhere near
+> the lumen and must not silently receive a τ.
+
 Take the perimeter from a marching-squares contour, not a count of boundary
 pixels: the staircase estimate overestimates a smooth boundary by up to 4/π.
 
@@ -662,10 +715,21 @@ is real and it is one more reason the 2D centerline is being replaced (§8B).
    **Promoted above Tier 3A on 2026-08-25** (§8E.4): every route to the
    fibroblast count is blocked, while the shear half is pure geometry and needs
    no cell-type call. **Split it and do the geometry first** —
-   8a. **Build the shear map itself** (§4.3): return the section mask and
-   perimeter from `cross_section`, solve `∇²û = -1` per section, take
-   `|∇û|` on the boundary, normalise by `Q̂` along the segment. Image 6,
-   one segment, τ against arc length. Depends on nothing in Tier 3A.
+   8a. ~~**Build the shear map itself** (§4.3)~~ — **done 2026-08-26.**
+   `pipeline/shear.py`; `docs/scratch/shear/image6_profile.py` draws it.
+   **Image 6's shear varies 75× within the one field of view**, with no flow
+   rate assumed, over 60 usable sections of 411 µm — rising into the waist at
+   ~250 µm of arc length and falling again, exactly the form §5 predicted from
+   the caliber profile. An independent check on the solve: the area ratio is
+   17.9× and 17.9^1.5 = 75.5 against the solved 75.1, i.e. these near-circular
+   sections reproduce the R⁻³ scaling without any formula having been applied.
+   **The absolute scale is the one thing still missing** and it is a single
+   multiplier µQ; the perfusion rate is being asked for.
+   Two cautions on the number: the vessel is unbranched only after a 21 µm stub
+   ending in a §5.1 `terminus` is read as a reconstruction artifact rather than
+   a branch (a dead end carries no flow, so Q is still conserved); and 23 of the
+   83 solved sections are censored near a field-of-view crop and are excluded
+   above.
    8b. Join it to fibroblast density — which does need [P05](ISSUES.md#p05), so
    it waits.
 
@@ -1169,7 +1233,11 @@ Three cautions, all flagged per point rather than argued away:
   smallest-caliber image and this is a 60% change, so it is the one to check by
   eye first.
 
-**§4's shear-exponent question is now answerable and is not yet answered.**
+**§4's shear-exponent question is now answerable and is not yet answered** —
+though as of 2026-08-26 it is also less pressing than it was, because §4.3's
+solve does not use an exponent: it reads the shape of each section and solves.
+The exponent question survives as a question about the *chip*, not about the
+calculation.
 Height and width are separate columns on all six; what is missing is the
 along-vessel profile rather than the median, and image 6's waist is where to
 read it.

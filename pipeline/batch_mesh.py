@@ -98,14 +98,17 @@ from .saved_check import (
     describe_saved,
     mesh_notes,
 )
+from . import shear
 from . import vessel_poisson
 from .vessel_mesh import (
     ALL_PARAMS,
     METHOD_ALPHA3D,
+    METHOD_ALPHA_POISSON,
     METHOD_POISSON,
     METHODS,
     ORIENTATIONS,
     build_mesh,
+    check_alpha_vs_spacing,
     live_params,
     mask_to_points_um,
     voxel_subsample,
@@ -204,6 +207,10 @@ GRAPH_DEFAULTS = {
     "kappa_window_um": lumen_graph.DEFAULT_KAPPA_WINDOW_UM,
     "section_every_um": lumen_graph.DEFAULT_SECTION_EVERY_UM,
     "section_span": lumen_graph.DEFAULT_SECTION_SPAN,
+    # §4.3's wall-shear solve. **Off by default and that is the decision**: it
+    # is an extra computation per section, and turning it on here would change
+    # every headless run at defaults. Same doctrine as `--steps score`.
+    "compute_shear": False,
 }
 # The radii P24's plateau table was measured at, so a `--steps score` run is
 # directly comparable to the evidence already on record.
@@ -431,7 +438,8 @@ def resolve_params(args) -> dict:
         "crop_margin_um": args.crop_margin_um,
         "kappa_window_um": args.kappa_window_um,
         "section_every_um": args.section_every_um,
-        "section_span": args.section_span}
+        "section_span": args.section_span,
+        "compute_shear": args.compute_shear}
     for key, default in GRAPH_DEFAULTS.items():
         graph[key], source[f"graph.{key}"] = _pick(
             explicit_graph[key], seed_graph, default, key)
@@ -846,6 +854,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     # comes back through `build_mesh`'s `extras`, and the interpolating methods
     # never solve for one.
     cl = None
+    graph_extras: dict = {}
     if "graph" in steps:
         lum = (mesh_extras or {}).get("lumen") or {}
         if lum.get("chi") is None:
@@ -860,7 +869,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                 lum["chi"], lum["iso_level"], lum["h_um"], lum["origin_um"],
                 core=lum.get("core"),
                 domain_shape_um=np.asarray(mask.shape) * float(scale[0]),
-                **params["graph"])
+                extras=graph_extras, **params["graph"])
             timings["graph_s"] = time.perf_counter() - t
             _p(f"centerline graph: {len(cl['points_zyx_um']):,} points, "
                f"{len(cl['edge_len_um'])} edge(s), {cl['n_junctions']} "
@@ -981,6 +990,39 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                           if np.isfinite(k2).any() else None)}
         g["curv"] = {"radius_um": radius, "smooth_iter": smooth}
         _p(f"wrote {cp.name}")
+
+    # ---- the wall-shear point cloud ----------------------------------------
+    # Written as its own file rather than into `vessel_graph.npz` because it is
+    # **ragged** — one row per wall point, not per centerline point — and mixing
+    # two row lengths in one npz is how a consumer ends up indexing the wrong
+    # one. It is the same array the napari tab colours the surface with and the
+    # same array an adhesion joins to; per the standing rule, one file, both
+    # paths.
+    wall = graph_extras.get("wall")
+    if wall is not None and len(wall["points_zyx_um"]):
+        sp = _out(saved, "vessel_shear", single_tag, ".npz")
+        np.savez_compressed(sp, **{k: v for k, v in wall.items()
+                                   if isinstance(v, np.ndarray)},
+                            max_dist_um=np.float64(wall["max_dist_um"]))
+        cov = np.nan
+        if verts is not None and len(verts):
+            f = shear.vertex_field(verts, wall["points_zyx_um"],
+                                   wall["tau_rel_1_um3"],
+                                   float(wall["max_dist_um"]))
+            cov = float(np.isfinite(f).mean())
+        good = ~(wall["section_clipped"] | wall["censored"])
+        _p(f"wall shear: {len(wall['points_zyx_um']):,} wall points "
+           f"({int(good.sum()):,} neither clipped nor censored); "
+           f"{100 * cov:.0f}% of mesh vertices within "
+           f"{wall['max_dist_um']:g} um of one")
+        _p(f"wrote {sp.name}")
+        _group(single_tag)["outputs"][sp.name] = {
+            "n_wall_points": int(len(wall["points_zyx_um"])),
+            "n_usable": int(good.sum()),
+            "max_dist_um": float(wall["max_dist_um"]),
+            "vertex_coverage": (None if not np.isfinite(cov) else round(cov, 4)),
+            "tau_rel_1_um3_median": _nanmed(wall["tau_rel_1_um3"][good]),
+        }
 
     if cl is not None:
         pp = _out(saved, "vessel_graph", single_tag, ".npz")
@@ -1268,6 +1310,17 @@ def main() -> None:
                    help="cut a perpendicular cross-section every this many um "
                         "of arc length. Between cuts the section columns are "
                         "NaN, never interpolated.")
+    g.add_argument("--shear", dest="compute_shear", action="store_true",
+                   default=None,
+                   help="solve for wall shear stress on every cross-section "
+                        "(DIRECTION 4.3): a 2D Poisson solve per section, "
+                        "giving perimeter, hydraulic diameter and the wall "
+                        "shear profile normalised so that only mu*Q is "
+                        "unknown. Off by default because it costs more than "
+                        "the geometry it annotates.")
+    g.add_argument("--no-shear", dest="compute_shear", action="store_false",
+                   help="the default; stated so a settings seed can be "
+                        "overridden back off from the command line.")
     g.add_argument("--section-span", type=float, default=None,
                    help="sample the cut plane out to this many local inscribed "
                         "radii. The inscribed radius is the *minor* semi-axis, "

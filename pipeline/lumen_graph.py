@@ -56,6 +56,8 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage as ndi
 
+from . import shear as _shear
+
 # --------------------------------------------------------------------------- #
 # Defaults. Mirrored by `batch_mesh.GRAPH_DEFAULTS` and the napari sliders.
 # --------------------------------------------------------------------------- #
@@ -591,7 +593,8 @@ def path_curvature(pts_um: np.ndarray, window_um: float):
 def cross_section(lumen: np.ndarray, origin_um: np.ndarray, h_um: float,
                   point_um: np.ndarray, tangent: np.ndarray,
                   radius_um: float, span: float = DEFAULT_SECTION_SPAN,
-                  step_um: float | None = None) -> dict:
+                  step_um: float | None = None,
+                  extras: dict | None = None) -> dict:
     """Cut the lumen with the plane through ``point_um`` normal to ``tangent``.
 
     Returns area, the two principal extents, aspect, and whether the section ran
@@ -605,11 +608,24 @@ def cross_section(lumen: np.ndarray, origin_um: np.ndarray, h_um: float,
     axes, not ellipse semi-axes fitted to it — the measured cross-sections are
     D-shaped rather than elliptical ([P24](b)), and an extent says what it says
     on a shape that is not an ellipse.
+
+    ``perim_um`` is the sub-pixel wall length, from `shear.section_contour`, and
+    is what `D_h = 4A/P` needs — §4.2's algebra could not be evaluated
+    numerically anywhere in this project before it existed.
+
+    ``extras``, if given, is filled with the section **mask** and the frame it
+    lives in (``u``, ``v``, ``step_um``, ``center_rc``, ``point_um``,
+    ``tangent``). That is what `shear.solve_section` runs on and what
+    `shear.contour_to_3d` needs to put a wall point back in the image frame.
+    It is an optional out-dict for the same reason `vessel_mesh.build_mesh`
+    uses one: the return value has consumers that destructure it, and a mask is
+    orders of magnitude larger than the scalars beside it.
     """
     step = float(step_um if step_um else h_um / 2.0)
     R = float(span) * float(radius_um)
     out = {"area_um2": np.nan, "major_um": np.nan, "minor_um": np.nan,
-           "aspect": np.nan, "clipped": True, "touches_domain": False}
+           "aspect": np.nan, "perim_um": np.nan,
+           "clipped": True, "touches_domain": False}
     if not np.isfinite(R) or R <= 0:
         return out
 
@@ -655,7 +671,14 @@ def cross_section(lumen: np.ndarray, origin_um: np.ndarray, h_um: float,
     if len(yy) < 3:
         return out
 
+    if extras is not None:
+        extras.update({"mask": sel, "step_um": step, "u": u, "v": v,
+                       "center_rc": (float(m), float(m)),
+                       "point_um": np.asarray(point_um, float).copy(),
+                       "tangent": t.copy()})
+
     out["area_um2"] = float(len(yy) * step * step)
+    out["perim_um"] = _shear.section_contour(sel, step)["perim_um"]
     a = (yy - m) * step
     b = (xx - m) * step
     P = np.column_stack([a, b])
@@ -691,7 +714,8 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
                 kappa_window_um: float = DEFAULT_KAPPA_WINDOW_UM,
                 section_every_um: float = DEFAULT_SECTION_EVERY_UM,
                 section_span: float = DEFAULT_SECTION_SPAN,
-                domain_shape_um=None) -> dict:
+                compute_shear: bool = False,
+                domain_shape_um=None, extras: dict | None = None) -> dict:
     """χ in, the whole centerline graph out.
 
     Every returned per-point array is parallel and in path order, concatenated
@@ -702,6 +726,21 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
     ``domain_shape_um`` is the extent of the *original image* in µm, used to
     decide whether an endpoint is a crop. It defaults to the χ grid's own
     extent, which is very slightly smaller.
+
+    ``extras``, if given, receives ``extras["wall"]`` — the **per-boundary-point**
+    shear profile, when ``compute_shear`` is on. That is a ragged quantity (a
+    different number of wall points per section), so it cannot live in the
+    parallel per-point columns and it goes in an optional out-dict instead, the
+    same doctrine `vessel_mesh.build_mesh` uses. It is **the** shear
+    measurement: the per-station columns are a summary of it. Two consumers want
+    it and they want the same numbers — colouring the vessel surface, and
+    joining an adhesion to the shear at its nearest luminal wall point.
+
+    ``compute_shear`` adds §4.3's per-section wall-shear solve (`shear.py`).
+    **Default off, and that is a decision**: `batch.py` and the tab run at
+    defaults, so turning it on here would change every headless run and
+    invalidate the artifacts already produced. It is opt-in for the same reason
+    `batch_mesh --steps score` is — it costs more than the thing it annotates.
     """
     origin_um = np.broadcast_to(np.asarray(origin_um, float), (3,)).copy()
     out: dict = {"notes": [], "params": {
@@ -711,7 +750,8 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
         "crop_margin_um": float(crop_margin_um),
         "kappa_window_um": float(kappa_window_um),
         "section_every_um": float(section_every_um),
-        "section_span": float(section_span)}}
+        "section_span": float(section_span),
+        "compute_shear": bool(compute_shear)}}
 
     lumen, linfo = lumen_volume(chi, iso_level, core)
     out["lumen_info"] = linfo
@@ -778,6 +818,7 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
 
     # ---- per-edge geometry ----
     P, E, S, K, KXY, CAL, SEC = [], [], [], [], [], [], []
+    WALL: list = []
     edge_len, edge_nodes, edge_censored = [], [], []
     for ei, ((a, b), pth) in enumerate(zip(g["edges"], g["paths"])):
         raw_um = pth.astype(float) * h_um + origin_um
@@ -796,8 +837,13 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
 
         cens = bool((a >= 0 and end_kind[a] == "crop")
                     or (b >= 0 and end_kind[b] == "crop"))
+        wall_rows: list | None = [] if (compute_shear
+                                        and extras is not None) else None
         sec_rows = _sections_along(lumen, origin_um, h_um, pts, tang, cal, s,
-                                   section_every_um, section_span)
+                                   section_every_um, section_span,
+                                   compute_shear, wall_rows)
+        if wall_rows is not None:
+            WALL.append((sum(len(x) for x in P), wall_rows))
         P.append(pts)
         E.append(np.full(len(pts), ei, np.int32))
         S.append(s)
@@ -819,7 +865,7 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
     out["kappa_xy_1_um"] = np.concatenate(KXY).astype(np.float32)
     out["caliber_um"] = np.concatenate(CAL).astype(np.float32)
     sec = np.concatenate(SEC)
-    for name in ("area_um2", "major_um", "minor_um", "aspect"):
+    for name in _SEC_FLOATS + _SHEAR_FLOATS:
         out[name] = sec[name].astype(np.float32)
     out["section_clipped"] = sec["clipped"]
     out["section_touches_domain"] = sec["touches_domain"]
@@ -850,6 +896,58 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
             out["dist_crop_um"] <= crop_ratio * out["caliber_um"], bool)
     out["censored"] &= np.isfinite(out["dist_crop_um"])
 
+    # ---- the per-boundary-point wall profile ---------------------------------
+    # Ragged, so it goes in `extras` rather than in the parallel columns. Each
+    # wall point carries the **station index** it came from, which is how it
+    # inherits that station's `section_clipped` and `censored` flags — the same
+    # flags, not a second copy computed some other way. Nothing is filtered
+    # here; `lumen_graph` chooses nothing.
+    if extras is not None and compute_shear:
+        PTS, TAU, SEG, QH, IDX = [], [], [], [], []
+        for base, rows in WALL:
+            for r in rows:
+                n = len(r["tau_hat_um"])
+                PTS.append(r["points_zyx_um"])
+                TAU.append(r["tau_hat_um"])
+                SEG.append(r["seg_len_um"])
+                QH.append(np.full(n, r["q_hat_um4"]))
+                IDX.append(np.full(n, base + r["i"], np.int64))
+        if PTS:
+            idx = np.concatenate(IDX)
+            tau = np.concatenate(TAU)
+            qh = np.concatenate(QH)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                rel = np.where(qh > 0, tau / qh, np.nan)
+            wall = {
+                "points_zyx_um": np.concatenate(PTS).astype(np.float32),
+                "tau_hat_um": tau.astype(np.float32),
+                "tau_rel_1_um3": rel.astype(np.float32),
+                "q_hat_um4": qh.astype(np.float32),
+                "seg_len_um": np.concatenate(SEG).astype(np.float32),
+                "point_index": idx,
+                "s_um": out["s_um"][idx],
+                "edge_id": out["edge_id"][idx],
+                "section_clipped": out["section_clipped"][idx],
+                "censored": out["censored"][idx],
+            }
+        else:
+            wall = {"points_zyx_um": np.zeros((0, 3), np.float32),
+                    "point_index": np.zeros(0, np.int64)}
+            for k in ("tau_hat_um", "tau_rel_1_um3", "q_hat_um4", "seg_len_um",
+                      "s_um"):
+                wall[k] = np.zeros(0, np.float32)
+            wall["edge_id"] = np.zeros(0, np.int32)
+            wall["section_clipped"] = np.zeros(0, bool)
+            wall["censored"] = np.zeros(0, bool)
+        wall["max_dist_um"] = float(max(section_every_um, 2.0 * h_um))
+        extras["wall"] = wall
+        out["notes"].append(
+            f"NOTE: {len(wall['points_zyx_um']):,} wall points carry a shear "
+            f"measurement, over {int(np.unique(wall['point_index']).size)} "
+            f"section(s). Sections are cut every {section_every_um:g} um, so "
+            f"the surface field is that coarse along the axis — cut them "
+            f"closer rather than interpolating if it matters.")
+
     n_junc = int((kind == "junction").sum())
     n_end = int((kind == "endpoint").sum())
     out["n_junctions"] = n_junc
@@ -870,21 +968,33 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
     return out
 
 
-_SEC_DTYPE = np.dtype([("area_um2", "f8"), ("major_um", "f8"),
-                       ("minor_um", "f8"), ("aspect", "f8"),
-                       ("clipped", "?"), ("touches_domain", "?")])
+_SEC_FLOATS = ("area_um2", "major_um", "minor_um", "aspect", "perim_um")
+# The shear columns, filled only when `build_graph(compute_shear=True)`. Left
+# NaN otherwise rather than absent, so a consumer sees the same columns either
+# way and a missing solve reads as "not measured" instead of as a KeyError.
+_SHEAR_FLOATS = ("hydraulic_diam_um", "q_hat_um4", "tau_hat_mean_um",
+                 "tau_hat_min_um", "tau_hat_max_um", "tau_rel_1_um3",
+                 "force_balance", "wall_ok_frac")
+_SEC_DTYPE = np.dtype([(n, "f8") for n in _SEC_FLOATS + _SHEAR_FLOATS]
+                      + [("clipped", "?"), ("touches_domain", "?")])
 
 
 def _sections_along(lumen, origin_um, h_um, pts, tang, cal, s,
-                    every_um, span):
+                    every_um, span, compute_shear=False, wall_out=None):
     """Cross-sections every ``every_um`` of arc length; NaN in between.
 
     Left NaN rather than interpolated on purpose: an interpolated cross-section
     is not a measurement, and this project has already been bitten by a number
     that looked measured and was not ([P26]).
+
+    With ``compute_shear``, each section is also handed to `shear.solve_section`
+    and the per-station summary of the wall-shear profile is recorded. The
+    summary goes in the parallel columns; the **full per-boundary-point
+    profile** is ragged, so it goes into ``wall_out`` — one dict per station —
+    for `build_graph` to concatenate.
     """
     rows = np.zeros(len(pts), _SEC_DTYPE)
-    for name in ("area_um2", "major_um", "minor_um", "aspect"):
+    for name in _SEC_FLOATS + _SHEAR_FLOATS:
         rows[name] = np.nan
     rows["clipped"] = False
     if len(pts) == 0:
@@ -892,12 +1002,24 @@ def _sections_along(lumen, origin_um, h_um, pts, tang, cal, s,
     want = np.arange(0.0, float(s[-1]) + 1e-9, max(every_um, h_um))
     take = np.unique(np.searchsorted(s, want).clip(0, len(s) - 1))
     for i in take:
+        ex: dict = {} if compute_shear else None
         r = cross_section(lumen, origin_um, h_um, pts[i], tang[i],
-                          float(cal[i]), span)
-        for name in ("area_um2", "major_um", "minor_um", "aspect"):
+                          float(cal[i]), span, extras=ex)
+        for name in _SEC_FLOATS:
             rows[name][i] = r[name]
         rows["clipped"][i] = r["clipped"]
         rows["touches_domain"][i] = r["touches_domain"]
+        if compute_shear and ex:
+            sh = _shear.solve_section(ex["mask"], ex["step_um"])
+            for name in _SHEAR_FLOATS:
+                rows[name][i] = sh[name]
+            if wall_out is not None and len(sh["contour_rc"]):
+                wall_out.append({
+                    "i": int(i),
+                    "points_zyx_um": _shear.contour_to_3d(sh["contour_rc"], ex),
+                    "tau_hat_um": sh["tau_hat_um"],
+                    "seg_len_um": sh["seg_len_um"],
+                    "q_hat_um4": sh["q_hat_um4"]})
     return rows
 
 
@@ -953,6 +1075,8 @@ def _dist_to_nodes(edge_id, s_um, edges, edge_len, targets, n_nodes):
 
 
 def _empty_graph(out: dict) -> dict:
+    out.update({n: np.zeros(0, np.float32)
+                for n in _SEC_FLOATS + _SHEAR_FLOATS})
     out.update({
         "points_zyx_um": np.zeros((0, 3), np.float32),
         "edge_id": np.zeros(0, np.int32),
@@ -960,10 +1084,6 @@ def _empty_graph(out: dict) -> dict:
         "kappa_1_um": np.zeros(0, np.float32),
         "kappa_xy_1_um": np.zeros(0, np.float32),
         "caliber_um": np.zeros(0, np.float32),
-        "area_um2": np.zeros(0, np.float32),
-        "major_um": np.zeros(0, np.float32),
-        "minor_um": np.zeros(0, np.float32),
-        "aspect": np.zeros(0, np.float32),
         "section_clipped": np.zeros(0, bool),
         "section_touches_domain": np.zeros(0, bool),
         "censored": np.zeros(0, bool),

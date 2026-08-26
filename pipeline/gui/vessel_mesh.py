@@ -22,12 +22,13 @@ from __future__ import annotations
 import numpy as np
 from magicgui import magicgui
 from magicgui.widgets import (
-    ComboBox, Container, FileEdit, FloatSlider, PushButton, Slider,
+    CheckBox, ComboBox, Container, FileEdit, FloatSlider, PushButton, Slider,
 )
 from napari.qt.threading import thread_worker
 
 from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
 from .. import lumen_graph
+from .. import shear
 from ..saved_check import curvature_notes
 # The method constants and the build itself live in the core module so the
 # headless `pipeline.batch_mesh` runner builds the *same* mesh from the same
@@ -207,6 +208,7 @@ def build(state, viewer) -> Container:
                 print(msg, flush=True)
                 state["vessel_mesh_cache"] = {"verts": keep_verts,
                                               "faces": None}
+                _drop_shear()
                 # **Drop the lumen field too.** It is set below, after these
                 # early returns, so a failed build used to leave the PREVIOUS
                 # build's field in `state` — and the centerline graph reads it.
@@ -255,6 +257,7 @@ def build(state, viewer) -> Container:
             )
             state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
                                           "normals": normals}
+            _drop_shear()
             # The solved lumen field, for the 3D centerline graph below. Only
             # the Poisson family produces one; the interpolating methods leave
             # it absent and the graph button then says so rather than falling
@@ -365,6 +368,7 @@ def build(state, viewer) -> Container:
             lyr.visible = visible
             state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
                                           "normals": normals}
+            _drop_shear()
             print(f"Loaded vessel mesh <- {path} "
                   f"({len(verts)} verts, {len(faces)} faces).", flush=True)
         except Exception as exc:
@@ -377,6 +381,18 @@ def build(state, viewer) -> Container:
     state["load_vessel_mesh"] = _load_mesh
     state.setdefault("save_path_widgets", []).append(
         (mesh_path_w, "vessel_mesh.npz"))
+
+    # A new mesh invalidates the wall-shear field: the shear was measured on
+    # the lumen of the *previous* build, and `vertex_field` would happily map it
+    # onto whatever vertices it is now handed. That is [P38](docs/ISSUES.md#p38)
+    # exactly — one build's geometry surviving into another's — so the cloud and
+    # its layer are dropped here rather than left to look plausible.
+    SHEAR_LAYER = "Vessel wall shear"
+
+    def _drop_shear():
+        state["vessel_shear"] = None
+        if SHEAR_LAYER in viewer.layers:
+            viewer.layers.remove(SHEAR_LAYER)
 
     # ---- Per-vertex curvature (local quadric fit at a physical radius) ----
     CURV_CHOICES = {"mean (H)": "mean", "κ1 max": "k1",
@@ -496,8 +512,14 @@ def build(state, viewer) -> Container:
                               label="section_every_um")
     sec_span_w = FloatSlider(value=lumen_graph.DEFAULT_SECTION_SPAN,
                              min=1.0, max=8.0, step=0.25, label="section_span")
+    # §4.3's wall-shear solve, matching `batch_mesh --shear`. Present here for
+    # the standing rule that the GUI and the headless path must not drift: a
+    # check that exists in only one of them is how P36 and the alpha3d_um case
+    # happened. Off by default in both.
+    shear_w = CheckBox(value=False, text="wall shear (sec 4.3)")
     graph_color_w = ComboBox(
-        choices=["caliber_um", "kappa_1_um", "kappa_xy_1_um", "lumen_area_um2",
+        choices=["caliber_um", "kappa_1_um", "kappa_xy_1_um", "tau_rel_1_um3",
+                 "tau_hat_mean_um", "hydraulic_diam_um", "lumen_area_um2",
                  "lumen_major_um", "lumen_minor_um", "lumen_aspect",
                  "dist_junction_um", "dist_crop_um", "censored"],
         value="caliber_um", label="colour by")
@@ -577,7 +599,8 @@ def build(state, viewer) -> Container:
                 "crop_ratio": float(crop_ratio_w.value),
                 "kappa_window_um": float(kappa_win_w.value),
                 "section_every_um": float(sec_every_w.value),
-                "section_span": float(sec_span_w.value)}
+                "section_span": float(sec_span_w.value),
+                "compute_shear": bool(shear_w.value)}
 
     def _compute_graph(*_, after=None):
         lum = state.get("vessel_lumen_field")
@@ -597,12 +620,21 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            return lumen_graph.build_graph(
+            ex: dict = {}
+            g = lumen_graph.build_graph(
                 lum["chi"], lum["iso_level"], lum["h_um"], lum["origin_um"],
-                core=lum.get("core"), domain_shape_um=dom, **gp)
+                core=lum.get("core"), domain_shape_um=dom, extras=ex, **gp)
+            return g, ex
 
-        def _done(g):
+        def _done(result):
+            g, ex = result
             state["vessel_graph"] = g
+            # The wall point cloud, when the shear box is ticked. Cleared
+            # otherwise, so an untick cannot leave the previous build's shear
+            # painted on a new mesh — that is [P38](docs/ISSUES.md#p38)'s
+            # failure mode, one image's field surviving into another's build.
+            state["vessel_shear"] = ex.get("wall")
+            _show_shear()
             for n in g.get("notes", []):
                 print(f"  {n}", flush=True)
             if not len(g.get("points_zyx_um", [])):
@@ -637,6 +669,128 @@ def build(state, viewer) -> Container:
         lambda *_: (state.get("vessel_graph")
                     and _show_graph(state["vessel_graph"])))
     graph_btn.changed.connect(_compute_graph)
+
+    # ---- Wall shear on the vessel surface -----------------------------------
+    # The same read as `curvature` above: a per-vertex scalar on the mesh, drawn
+    # with `add_surface`. Two deliberate differences, both because shear is
+    # measured on **part** of the surface rather than defined on all of it:
+    #
+    #  - **nearest measured wall point, never interpolated.** The colour under
+    #    the cursor is a number that was solved for, not a blend of two. Where
+    #    the banding along the axis is visible, the honest fix is a smaller
+    #    `section_every_um` — a real measurement that costs seconds — not a
+    #    smoother that would make a 5 µm sampling look like a continuous field.
+    #  - **un-measured wall is not drawn.** `curvature` fills its NaN vertices
+    #    with the median, which is fine for a field defined on every vertex and
+    #    actively misleading here: it would paint wall that was never sectioned
+    #    in a mid-range colour that reads as a measurement.
+    #
+    # This is a view of `extras["wall"]` and nothing else — the same array
+    # `batch_mesh` writes to `vessel_shear.npz` and the same one an adhesion
+    # will join to. Nothing here feeds a calculation.
+    SHEAR_CHOICES = {"τ / µQ (relative)": "tau_rel_1_um3",
+                     "τ̂ (shape function, µm)": "tau_hat_um"}
+    shear_measure_w = ComboBox(choices=list(SHEAR_CHOICES.keys()),
+                               value="τ / µQ (relative)", label="wall shear")
+    shear_drop_w = CheckBox(value=True,
+                            text="drop clipped / censored sections")
+
+    def _show_shear():
+        wall = state.get("vessel_shear")
+        cache = state.get("vessel_mesh_cache") or {}
+        verts, faces = cache.get("verts"), cache.get("faces")
+        if SHEAR_LAYER in viewer.layers:
+            viewer.layers.remove(SHEAR_LAYER)
+        if not wall or verts is None or faces is None:
+            return
+        pts = np.asarray(wall["points_zyx_um"], float)
+        vals = np.asarray(wall[SHEAR_CHOICES[shear_measure_w.value]], float)
+        if shear_drop_w.value:
+            keep = ~(np.asarray(wall["section_clipped"], bool)
+                     | np.asarray(wall["censored"], bool))
+            pts, vals = pts[keep], vals[keep]
+        if not len(pts):
+            print("Wall shear: no usable wall points — every section is "
+                  "clipped or censored. Untick the filter to see them "
+                  "anyway; they are measured against a wall that is not "
+                  "there.", flush=True)
+            return
+        per_vertex = shear.vertex_field(verts, pts, vals,
+                                        float(wall["max_dist_um"]))
+        keep_faces = shear.covered_faces(faces, per_vertex)
+        if not len(keep_faces):
+            print("Wall shear: no mesh face has a measurement on all three "
+                  "vertices.", flush=True)
+            return
+        finite = per_vertex[np.isfinite(per_vertex)]
+        lo, hi = np.percentile(finite, [2, 98])
+        fill = float(finite.min())
+        vv = np.where(np.isfinite(per_vertex), per_vertex, fill)
+        lyr = viewer.add_surface((verts, keep_faces, vv), name=SHEAR_LAYER,
+                                 colormap="turbo", blending="translucent",
+                                 opacity=0.95)
+        try:
+            lyr.contrast_limits = (float(lo), float(hi))
+        except Exception:
+            pass
+        cov = float(np.isfinite(per_vertex).mean())
+        print(f"Wall shear: {len(pts):,} wall points -> "
+              f"{int(np.isfinite(per_vertex).sum()):,} of {len(verts):,} "
+              f"vertices ({100 * cov:.0f}%), {len(keep_faces):,} of "
+              f"{len(faces):,} faces drawn. Nearest measured point within "
+              f"{wall['max_dist_um']:g} µm; the rest is not drawn because it "
+              f"was not measured.", flush=True)
+
+    shear_measure_w.changed.connect(lambda *_: _show_shear())
+    shear_drop_w.changed.connect(lambda *_: _show_shear())
+
+    shear_path_w = FileEdit(value="vessel_shear.npz", label="shear_path",
+                            mode="w")
+    save_shear_w = PushButton(text="Save wall shear")
+    load_shear_w = PushButton(text="Load wall shear")
+
+    def _save_shear(*_):
+        wall = state.get("vessel_shear")
+        if not wall:
+            print("No wall shear to save — tick 'wall shear (sec 4.3)' and "
+                  "rebuild the centerline graph.", flush=True)
+            return
+        path = str(shear_path_w.value)
+        np.savez_compressed(
+            path, **{k: v for k, v in wall.items()
+                     if isinstance(v, np.ndarray)},
+            max_dist_um=np.float64(wall["max_dist_um"]))
+        print(f"Saved wall shear -> {path}.", flush=True)
+
+    def _load_shear(*_, after=None, visible=True):
+        path = str(shear_path_w.value)
+        try:
+            with np.load(path, allow_pickle=False) as d:
+                wall = {k: d[k] for k in d.files}
+            wall["max_dist_um"] = float(wall["max_dist_um"])
+            state["vessel_shear"] = wall
+            if visible:
+                _show_shear()
+            print(f"Loaded wall shear <- {path} "
+                  f"({len(wall['points_zyx_um']):,} wall points).", flush=True)
+        except Exception as exc:
+            print(f"Load wall shear error: {exc}", flush=True)
+        finally:
+            call_all(after, label="Load wall shear")
+
+    def _save_shear_if_any(*_):
+        """Save only if the shear box was ticked — silent when it was not.
+
+        `_save_shear` prints a complaint when there is nothing to save, which is
+        right for the button and wrong for the "Run all" chain, where not
+        computing shear is the default and not an error.
+        """
+        if state.get("vessel_shear"):
+            _save_shear()
+
+    save_shear_w.changed.connect(_save_shear)
+    load_shear_w.changed.connect(_load_shear)
+    state["load_vessel_shear"] = _load_shear
 
     # ---- Save / load the computed curvature so it need not be recomputed each
     # session (only the mesh geometry is saved with the mesh; curvature and the
@@ -743,6 +897,7 @@ def build(state, viewer) -> Container:
     state.setdefault("save_path_widgets", []).extend([
         (curv_path_w, "vessel_curvature.npz"),
         (path_curv_path_w, "vessel_graph.npz"),
+        (shear_path_w, "vessel_shear.npz"),
     ])
 
     # Chainable "Run all" steps: compute then save, then call `after`.
@@ -752,7 +907,7 @@ def build(state, viewer) -> Container:
         after=lambda: call_all(_save_curv, after,
                                label="run_vessel_curvature"))
     state["run_vessel_path_curvature"] = lambda after=None: _compute_graph(
-        after=lambda: call_all(_save_path_curv, after,
+        after=lambda: call_all(_save_path_curv, _save_shear_if_any, after,
                                label="run_vessel_path_curvature"))
 
     # Apply the visibility rule once at build time (`suggest_w` exists by now).
@@ -763,8 +918,11 @@ def build(state, viewer) -> Container:
                               curv_measure_w, curv_radius_w, curv_smooth_w,
                               curv_btn, curv_path_w, save_curv_w, load_curv_w,
                               spur_ratio_w, crop_ratio_w, kappa_win_w,
-                              sec_every_w, sec_span_w, graph_color_w,
+                              sec_every_w, sec_span_w, shear_w,
+                              graph_color_w,
                               graph_btn,
+                              shear_measure_w, shear_drop_w,
+                              shear_path_w, save_shear_w, load_shear_w,
                               path_curv_path_w, save_path_curv_w,
                               load_path_curv_w],
                      labels=False),

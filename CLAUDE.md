@@ -213,6 +213,33 @@ where the fibroblasts are.
   measure by any route and which the shear estimate needs. Pure functions, no
   Qt. **It chooses nothing**: `censored`, `section_clipped` and the z-face
   warning are flags for the caller, not filters it applies.
+- `shear.py` — **wall shear stress on a cross-section, from geometry alone**
+  (`docs/DIRECTION.md` §4.3). A 2D Poisson solve per section — `µ∇²u = dp/ds`,
+  `u = 0` on the wall, `τ_w = µ|∇u|` — rather than a closed form, because every
+  closed form in §4 assumes a circle or a rectangle and the measured sections are
+  **D-shaped** ([P24](b)). Solving with `dp/ds = -1, µ = 1` leaves **µQ as a
+  single unknown multiplying the whole profile**, so the *shape* of the shear map
+  along an unbranched segment is fixed by geometry with no flow rate, viscosity
+  or pressure. **Flow direction is not needed**: the axis comes from the
+  centerline tangent and `τ_w = µ|∇u|` is even in the sign along it — direction
+  only matters at a junction (the split rides on h³) and for upstream/downstream
+  asymmetry. It returns the **full per-boundary-point profile**, not a
+  per-section scalar: τ varies 6-9× around one section, and §7.4 needs
+  circumferential position to separate the U-shaped shear prediction from
+  monotonic optical attenuation. **Validated against closed form, not against
+  itself** — `docs/scratch/shear/solver_check.py`, the analytic disc and the
+  rectangle's double sine series; two τ estimators were killed by it before the
+  one that shipped. `force_balance` (∮τ dP = A, exact) is a per-section health
+  check that needs no ground truth. The one residual bias is
+  [P46](docs/ISSUES.md#p46) and it is common-mode. Pure functions, no `gpu.*`.
+  `vertex_field` + `covered_faces` carry the wall points onto a mesh for
+  display — **nearest measured point, never interpolated, and un-measured wall
+  is not drawn**. Both the Vessel Mesh tab's `Vessel wall shear` layer and
+  `batch_mesh --shear`'s coverage note call them, and both read the one
+  `vessel_shear.npz`. That file is deliberately separate from
+  `vessel_graph.npz` because it is **ragged** — one row per wall point, not per
+  centerline point — and it is also what a per-adhesion join will read, so the
+  surface you look at and the number an adhesion gets are the same array.
 - `nuc_side.py` — which side of the wall a nucleus is on: **signed** distance,
   exact nearest-**triangle** (two passes; the second is what makes it exact),
   no subsample. Only meaningful on a Poisson-family mesh, whose ∇χ normals make

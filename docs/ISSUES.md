@@ -115,6 +115,8 @@ true of the code and data on that date and may not be true now.
 | [P43](#p43) | The clover gate cost bias and saved ~10%; removed | S3 | **fixed** 2026-08-25 — refutes [I07](#i07)'s premise |
 | [I09](#i09) | RF inference is dominated by `_eigh3x3` on the CPU (~52%) | idea | open — **~2× available, exact**; profiled, three proposals rejected on measurement |
 | [P44](#p44) | The RF's training annotations were never saved; the model cannot be retrained | **S2** | open — **blocks [P03](#p03)'s hypothesis and its fix**; escalates [H02](#h02) |
+| [P45](#p45) | `batch_mesh` crashed on every invocation — two names used, never imported | S3 | **fixed** 2026-08-26 — every mesh artifact since `48b4f9d` came from the GUI |
+| [P46](#p46) | A digitized wall is longer than the wall it stands for, so absolute τ reads ~5% low | S3 | open — **quantified, common-mode**; cancels in the within-segment profile, not in Pa |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -6684,3 +6686,118 @@ verifying it still loads and still reproduces a known `proba >= 0.5` set.
 **History**
 - 2026-08-25 — opened after asking whether the RF could simply be retrained to
   sidestep a feature-set change. It cannot.
+
+---
+
+## P45 — `batch_mesh` crashed on every invocation: two names used but never imported
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-26 |
+| **Severity** | S3 |
+| **Opened** | 2026-08-26 |
+| **Last verified** | 2026-08-26 |
+| **Resolved** | 2026-08-26 |
+| **Where** | `pipeline/batch_mesh.py` — the `from .vessel_mesh import (...)` block; both names are used inside `parameter_warnings` |
+| **Affects** | every headless mesh rebuild |
+
+`parameter_warnings` tests `method in (METHOD_ALPHA3D, METHOD_ALPHA_POISSON)`,
+and the second name was never added to the import list. `parameter_warnings`
+runs on **every** invocation, before any work, so `batch_mesh` raised
+
+    NameError: name 'METHOD_ALPHA_POISSON' is not defined
+
+unconditionally — `--dry-run`, `--check-only` and every real rebuild alike. The
+same name is also referenced in the `--steps graph` guard's message, which would
+have failed the same way one line later.
+
+**And it was two names, not one.** With `METHOD_ALPHA_POISSON` imported the next
+line failed the same way on `check_alpha_vs_spacing` — the very function CLAUDE.md
+cites as an example of *not* letting the GUI and the headless path drift. It was
+extracted into `vessel_mesh` for both callers to share and then not imported by
+the second one, so the check ran in the tab and crashed the runner.
+
+Introduced in `48b4f9d` ("Stop the cadherin GUI/headless drift; scope sliders to
+the active method"), which added both uses. The fix is the two missing import
+lines.
+
+**Why nothing caught it.** There is no smoke test that runs `batch_mesh --dry-run`
+— which is exactly what a `NameError` in the argument-resolution path would have
+been caught by, in under a second, on any of the six images.
+
+**What this says about the last week of work.** Every `vessel_graph.npz` and
+`vessel_mesh.npz` written since `48b4f9d` came from the **napari tab**, not from
+`batch_mesh` — the headless path could not have produced one. That is worth
+holding next to [P26](#p26) and [P37](#p37): the artifacts in
+`WT/..._saved/` carry no `vessel_recon.json` for the untagged build precisely
+because nothing headless wrote them, so their parameters are unrecorded and a
+rebuild does not reproduce them. Image 6's saved untagged graph is one edge of
+455 µm; the same image rebuilt headless at defaults gives three edges and 433 µm.
+**Neither is known to be right**, and the difference is not explained here.
+
+**Related:** [P26](#p26), [P37](#p37), [P30](#p30).
+
+**History**
+- 2026-08-26 — found while running the first `--shear` build for
+  `DIRECTION.md` §8 item 8a; fixed in the same change. `--dry-run` over all six
+  images now reports `6 ok, 0 degraded, 0 failed`.
+
+---
+
+## P46 — a digitized wall is longer than the wall it stands for, so absolute τ reads low
+
+| | |
+|---|---|
+| **Status** | open — **quantified, common-mode, not corrected** |
+| **Severity** | S3 |
+| **Opened** | 2026-08-26 |
+| **Last verified** | 2026-08-26 (analytic disc and rectangle, `docs/scratch/shear/solver_check.py`) |
+| **Resolved** | — |
+| **Where** | `pipeline/shear.py` — `section_contour`, `wall_profile`; inherited by `lumen_graph.cross_section`'s `perim_um` |
+| **Affects** | `perim_um`, `hydraulic_diam_um`, `tau_hat_*`, and any absolute τ in Pa. **Not** `tau_rel_1_um3` read as a within-segment profile |
+
+The shear solve runs on a **pixelated** cross-section, and a pixelated boundary
+is longer than the smooth boundary it approximates. For a digitized disc the
+marching-squares perimeter is **5.6–7.9% high**, and — this is the part that
+matters — **it does not converge**: 5.63% at 120 pixels per radius, essentially
+the same as at 60. It is a digitization bias, not a discretization error, and
+finer sampling of the same voxel grid cannot remove it.
+
+The solve is faithful to the duct it is handed, so the extra wetted perimeter
+comes out as τ̂ reading about **5% low** on a curved wall. On the analytic
+rectangle, whose walls are axis-aligned and therefore not digitized at all,
+`Q̂` lands within 0.08% and the wall profile within 1% — which is how we know
+this is the boundary representation and not the solver.
+
+**Why it is left uncorrected.** It is common-mode: it multiplies every section by
+roughly the same factor, so it cancels in the within-segment τ ratio, and by
+[DIRECTION](DIRECTION.md) §4.1 the within-segment profile is where the entire
+spatial hypothesis lives. It does **not** cancel in an absolute Pa number, and
+that is the number a perfusion rate would produce. A Crofton perimeter fixes the
+disc (0.15% at fine resolution) but is 5.4% *low* on an axis-aligned rectangle,
+so it trades one bias for another on the D-shaped sections this project actually
+has; picking between them is not a decision to make by eye
+([P26](#p26)).
+
+**The real fix, if it is ever worth it,** is to stop handing the solve a binary
+mask: `vessel_poisson` already produces a smooth indicator χ, and cutting the
+section from χ with linear interpolation would give a sub-voxel wall with no
+digitization bias at all. That changes `cross_section`'s input contract, and it
+would have to change it for the area and the extents too, or the section the
+shear sees and the section the geometry columns describe would be different
+shapes — which is the drift this project's standing rule exists to prevent.
+
+**The free check that catches everything else.** ∮τ dP = A·(dp/ds) is an exact
+force balance, so with the normalisation used here it must equal 1. It is
+recorded per section as `force_balance` and needs no ground truth. On image 6 it
+runs 0.993–1.077 over 60 usable sections — i.e. the residual is this bias and
+nothing larger is hiding under it.
+
+**Related:** [P24](#p24), [P26](#p26).
+
+**History**
+- 2026-08-26 — opened when `solver_check.py` measured it. Two τ estimators were
+  discarded on the way (contour-normal sampling, 36% high and converging the
+  wrong way; first-layer closed form, ±28% scatter on a digitized curve); the
+  near-wall quadratic fit that shipped is what left this as the only bias
+  standing.

@@ -77,12 +77,11 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
               f"voxel(z,y,x)={stack.voxel_zyx_um} µm "
               f"({stack.data.nbytes/1e6:.1f} MB)", flush=True)
 
-        # Clear the cell-mesh cache BEFORE touching layers. Adding/removing
-        # layers changes `viewer.dims` and fires `current_step`, which runs the
-        # persistent `_update_section` hook. If the previous image's mesh is
-        # still cached, that hook re-creates the "Cell mesh (slice)" layer from
-        # geometry sliced at the new image's z-plane — the source of the
-        # NaN-segment GL crash when loading a different-depth image.
+        # Clear the cell-mesh cache on load: it holds the *previous* image's
+        # geometry in µm, and Refine/Measure would otherwise read it against the
+        # new image. (This also used to stop a `current_step` hook re-creating
+        # the "Cell mesh (slice)" overlay at the new image's z; that overlay is
+        # gone — see [P47] — but the cache still has to be cleared.)
         state["mesh_cache"] = {"offset_centroids": None, "outward": None,
                                "inward_offset_um": 0.0, "kdtree": None,
                                "verts": None, "faces": None}

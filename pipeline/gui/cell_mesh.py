@@ -20,51 +20,6 @@ from ..cell_mesh import (
 from .widgets import Histogram, finite_surface, finite_vectors
 
 
-def _section_segments(verts: np.ndarray, faces: np.ndarray, plane_z: float) -> np.ndarray:
-    """Line segments where the mesh intersects z = plane_z. Vectorized.
-
-    Returns (M, 2, 3) in (z, y, x) — both endpoints have z = plane_z.
-    """
-    if len(faces) == 0:
-        return np.zeros((0, 2, 3), dtype=np.float32)
-    z = verts[:, 0]
-    fz = z[faces]                          # (M, 3)
-    above = fz > plane_z
-    n_above = above.sum(1)
-    cross = (n_above == 1) | (n_above == 2)
-    if not cross.any():
-        return np.zeros((0, 2, 3), dtype=np.float32)
-    f = faces[cross]
-    sa = above[cross]
-    # The "lone" vertex is the one with the unique sign — True if n_above==1,
-    # False if n_above==2. The two edges from the lone vertex are the ones
-    # that cross the plane.
-    n1 = sa.sum(1) == 1
-    lone = np.where(n1[:, None], sa, ~sa)
-    idx0 = np.argmax(lone, axis=1)
-    rows = np.arange(len(f))
-    A = f[rows, idx0]
-    B = f[rows, (idx0 + 1) % 3]
-    C = f[rows, (idx0 + 2) % 3]
-    pA, pB, pC = verts[A], verts[B], verts[C]
-    zA = pA[:, 0]
-    tAB = (plane_z - zA) / (pB[:, 0] - zA)
-    tAC = (plane_z - zA) / (pC[:, 0] - zA)
-    iAB = pA + tAB[:, None] * (pB - pA)
-    iAC = pA + tAC[:, None] * (pC - pA)
-    segs = np.stack([iAB, iAC], axis=1).astype(np.float32)
-    segs[:, :, 0] = plane_z
-    # Drop degenerate segments before they reach the Shapes layer: a coplanar
-    # edge gives a 0/0 intersection (NaN/inf endpoints), and a lone vertex
-    # sitting on the plane gives a zero-length segment. Either makes vispy's
-    # line frame divide by zero and crashes the GL draw with an access
-    # violation. Keep only finite, non-zero-length segments.
-    finite = np.isfinite(segs).all(axis=(1, 2))
-    length = np.linalg.norm(segs[:, 1] - segs[:, 0], axis=1)
-    good = finite & (length > 1e-6)
-    return segs[good]
-
-
 def _keep_mask(sizes: np.ndarray, lids_all: np.ndarray, min_size: int) -> np.ndarray:
     """Boolean mask over lids_all: keep nucleus iff its component size >= min_size.
 
@@ -78,56 +33,6 @@ def _keep_mask(sizes: np.ndarray, lids_all: np.ndarray, min_size: int) -> np.nda
 def build(state, viewer) -> Container:
     hist = Histogram("Tet circumradii (alpha_um)", "log10(circumradius µm)", "seagreen")
     state.setdefault("hists", []).append(hist)
-
-    SECTION_NAME = "Cell mesh (slice)"
-
-    def _hide_section():
-        """Blank the slice overlay **without emptying it** ([P47]).
-
-        Never assign an empty array to the `Shapes` layer. napari 0.6.0 does not
-        clear the layer's triangle mesh on an empty assignment: refilling it
-        afterwards leaves NaN vertices in that mesh (20 of 60 for a two-segment
-        refill), and a non-finite vertex faults the GL draw with
-        `OSError: access violation` inside `glDrawArrays` — the same failure
-        `widgets.finite_surface` guards for on surfaces. Hiding the layer keeps
-        its last good mesh intact.
-        """
-        if SECTION_NAME in viewer.layers:
-            viewer.layers[SECTION_NAME].visible = False
-
-    def _update_section(*_):
-        mc = state.get("mesh_cache") or {}
-        verts = mc.get("verts")
-        faces = mc.get("faces")
-        if verts is None or faces is None or len(faces) == 0:
-            _hide_section()
-            return
-        # World-z of current slice (mesh verts are in µm; image scale = µm/voxel).
-        scale = state.get("scale", (1.0, 1.0, 1.0))
-        step_z = int(viewer.dims.current_step[0])
-        plane_z = step_z * float(scale[0])
-        segs = _section_segments(verts, faces, plane_z)
-        if not len(segs):
-            _hide_section()
-            return
-        if SECTION_NAME in viewer.layers:
-            layer = viewer.layers[SECTION_NAME]
-            layer.data = segs
-        else:
-            # Create it only once there is real 3D data: `add_shapes` on a
-            # (0, 2, 3) array infers ndim=2, and the first non-empty assignment
-            # then produces the same NaN mesh ([P47]).
-            layer = viewer.add_shapes(
-                segs, shape_type="line", name=SECTION_NAME,
-                edge_color="cyan", edge_width=0.4,
-                blending="additive",
-            )
-        layer.visible = True
-
-    # Connect once; survives mesh rebuilds. Idempotent guard via state flag.
-    if not state.get("_section_hooked"):
-        viewer.dims.events.current_step.connect(_update_section)
-        state["_section_hooked"] = True
 
     @magicgui(
         call_button="Build cell mesh",
@@ -197,13 +102,11 @@ def build(state, viewer) -> Container:
                 "verts": offset_centroids,
                 "faces": faces,
             }
-            for name in ("Cell mesh", "Cell mesh (slice)",
-                         "Nuclei normals", "Nuclei vertices"):
+            for name in ("Cell mesh", "Nuclei normals", "Nuclei vertices"):
                 if name in viewer.layers:
                     viewer.layers.remove(name)
             if len(centroids) == 0:
                 print("No nuclei survived filtering.", flush=True)
-                _update_section()
                 return
             if len(faces) == 0:
                 print(f"{len(centroids)} vertices but 0 faces — increase alpha_um.",
@@ -212,7 +115,6 @@ def build(state, viewer) -> Container:
                     offset_centroids, name="Nuclei vertices", size=2.0,
                     face_color="cyan", blending="additive",
                 )
-                _update_section()
                 return
             verts_disp = offset_centroids
             vals = np.linalg.norm(verts_disp - verts_disp.mean(0), axis=1)
@@ -220,7 +122,6 @@ def build(state, viewer) -> Container:
                 finite_surface(verts_disp, faces, vals), name="Cell mesh",
                 colormap="cividis", blending="translucent", opacity=0.6,
             )
-            _update_section()
             if show_normals:
                 tail = verts_disp
                 head = verts_disp + 4.0 * outward
@@ -327,13 +228,12 @@ def build(state, viewer) -> Container:
             "verts": offset_centroids,
             "faces": faces,
         }
-        for name in ("Cell mesh", "Cell mesh (slice)",
-                     "Nuclei normals", "Nuclei vertices", CADH_VERTS_NAME):
+        for name in ("Cell mesh", "Nuclei normals", "Nuclei vertices",
+                     CADH_VERTS_NAME):
             if name in viewer.layers:
                 viewer.layers.remove(name)
         if len(centroids) == 0:
             print("No vertices to mesh.", flush=True)
-            _update_section()
             return
         if len(faces) == 0:
             print(f"{len(centroids)} vertices but 0 faces — increase alpha_um.",
@@ -342,7 +242,6 @@ def build(state, viewer) -> Container:
                 offset_centroids, name="Nuclei vertices", size=2.0,
                 face_color="cyan", blending="additive",
             )
-            _update_section()
             return
         verts_disp = offset_centroids
         vals = np.linalg.norm(verts_disp - verts_disp.mean(0), axis=1)
@@ -350,7 +249,6 @@ def build(state, viewer) -> Container:
             finite_surface(verts_disp, faces, vals), name="Cell mesh",
             colormap="cividis", blending="translucent", opacity=0.6,
         )
-        _update_section()
         if show_cadh_pts and cadh_points is not None and len(cadh_points):
             viewer.add_points(
                 cadh_points, name=CADH_VERTS_NAME, size=2.0,

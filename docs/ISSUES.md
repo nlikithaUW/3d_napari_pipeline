@@ -6894,3 +6894,53 @@ in the layer model, upstream of vispy, and needs no GL at all to observe.
 - 2026-08-26 — opened and fixed. Found from a user-reported traceback while
   retuning cell-mesh parameters; reproduced headless, both defects fixed, repro
   script added.
+- 2026-08-26 — **reopened the same day: the fix was correct and did not stop the
+  crash.** The user restarted the GUI on the fixed code, changed `alpha_um`,
+  rebuilt, and got the identical `access violation` in
+  `glDrawArrays(GL_TRIANGLES, 0, 3)`. Three candidate causes were measured and
+  ruled out, none of which the original entry had tested:
+
+  | candidate | measurement | result |
+  |---|---|---|
+  | refill at a *different* segment count (the repro script only tested equal counts) | 7 count changes, never empty | 0 non-finite vertices |
+  | the `ndim == 2` pad branch in `_on_data_change` firing on top of the placeholder | `.data =` promotes the layer to ndim=3 | never fires |
+  | float32 `plane_z` missing napari's slice test | 60 z-steps at 0.4 µm | 0 misses |
+
+  **The vertex count was the tell.** Three vertices and one triangle is not
+  geometry this project produces — it is napari's own degenerate placeholder for
+  an empty mesh, in `_vispy/layers/shapes.py`:
+
+      vertices = np.zeros((3, self.layer._slice_input.ndisplay))
+      faces = np.array([[0, 1, 2]])
+
+  It appears twice: once for `shape_faces`, and once for `shape_highlights`,
+  which is in that state **whenever no shape is selected** — permanently, for an
+  overlay nobody clicks. The traceback's GL state (`glDisable depth_test`,
+  `glEnable blend`) is the additive path, and `Cell mesh (slice)` was the only
+  additive `Shapes` layer in the app. The user confirmed 3D display, which rules
+  out the `shape_faces` half (in 3D every shape stays resident regardless of z)
+  and leaves the always-degenerate highlight mesh.
+
+  **Resolution: the overlay is deleted, not repaired.** The user's actual
+  requirement is only to see the mesh, which is a separate `Surface` layer and
+  was never implicated. `_section_segments`, `_hide_section`, `_update_section`,
+  the `current_step` hook and the `state["_section_hooked"]` flag are all gone;
+  `loader.py`'s cache-clear stays but its comment no longer cites the hook.
+  That closes **three** doors into this crash rather than one — the two in P47
+  above, plus a third in `loader.py` that P47 never recorded: loading a
+  different-depth image re-created the overlay from the previous image's cached
+  geometry.
+
+  **What this says about the first fix.** Nothing in it was wrong; it was aimed
+  at a mechanism that is real and measured but was not the one firing. The
+  general lesson is the one the vertex count taught: **read what the GL command
+  actually says before theorising about the data.** `(0, 3)` was in the original
+  traceback from the start and identified the faulting draw as a placeholder,
+  not as our geometry — a `Shapes` layer cannot be made safe by sanitising what
+  you put into it, because the highlight mesh is degenerate no matter what you
+  put in.
+
+  A `Vectors` layer was considered as a replacement and would have been sound —
+  `VectorsVisual` is a single `Mesh`, not a `Compound` of five, and its
+  placeholder fires only when its own data is empty. It was dropped because the
+  overlay is not needed, and no layer is safer than a safe one.

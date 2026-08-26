@@ -64,7 +64,7 @@ true of the code and data on that date and may not be true now.
 |---|---|---|---|
 | [P01](#p01) | Curvature columns are noise — `alpha_shape_faces` destroys winding | S1 | **fixed** — part B has a principled replacement for [I06](#i06) |
 | [P02](#p02) | `ratio_clover_ruby` tracks the ruby noise floor, not tension | S1 | open |
-| [P03](#p03) | Adhesion detection is depth-truncated | S1 | open — **confirmed 6/6; confirmed optical not gravity 2026-08-24**, fix is [I07](#i07) |
+| [P03](#p03) | Adhesion detection is depth-truncated | S1 | open — **confirmed 6/6**; 2026-08-25 the clover gate is ruled out as the cause ([P43](#p43)); live hypothesis is annotation sampling |
 | [P04](#p04) | Two nucleus label maps; `nuc_id` is not joinable to cell type | S1 | **fixed** — but joinable is not correct: see [P42](#p42) |
 | [P05](#p05) | Fibroblast / endothelial classifier is unvalidated | S1 | open — **2026-08-25: likely over-calls ~10×**; all three routes to the count now failed ([P41](#p41), [P42](#p42), §8E) |
 | [P06](#p06) | Tension readout drifts with imaging depth | S2 | open — **sign flips 6 images** |
@@ -99,7 +99,7 @@ true of the code and data on that date and may not be true now.
 | [I04](#i04) | `batch.py` has no way to re-run one step | idea | **done** 2026-08-24 — `batch.py --steps` |
 | [I05](#i05) | Is the alpha shape the right reconstruction method at all? | idea | open |
 | [I06](#i06) | Oriented-point implicit reconstruction — the plan of record | idea | **in progress — `alpha 3D solid -> poisson` is the direction of record as of 2026-08-21**, visually confirmed; three refinements open (bumps, runtime, Open3D) |
-| [I07](#i07) | Local thresholding on the clover channel | idea | open — **root cause of [P03](#p03); tools exist, unused on this path** |
+| [I07](#i07) | Local thresholding on the clover channel | idea | **closed 2026-08-25 — premise refuted.** The gate was never binding; it is [P43](#p43)-removed, and [P03](#p03) is unaffected |
 | [I08](#i08) | "Refine with cadherin" is a dead end and should be removed | idea | open — **superseded by [I06](#i06); sole consumer of [P34](#p34)'s centroids** |
 | [P32](#p32) | The fitted lumen leaks through the z faces on images 4 and 5, wrecking the graph topology | S2 | open — **diagnosed and warned, not fixed** |
 | [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
@@ -112,6 +112,9 @@ true of the code and data on that date and may not be true now.
 | [P40](#p40) | `fibroblast_cellpose.py` thresholded noise as tissue; wall split degenerated silently | S2 | **fixed** 2026-08-25 — sanity-gate half still open |
 | [P41](#p41) | The en-face VE-cadherin wall has no polygonal cells; endothelial segmentation returns nothing | S2 | open — **blocks the subtraction route to [P05](#p05)** |
 | [P42](#p42) | `nuc_id` is a nearest-neighbour join presented as ownership | **S1** | open — **a cross-tab was retracted on this**; qualifies [P04](#p04) |
+| [P43](#p43) | The clover gate cost bias and saved ~10%; removed | S3 | **fixed** 2026-08-25 — refutes [I07](#i07)'s premise |
+| [I09](#i09) | RF inference is dominated by `_eigh3x3` on the CPU (~52%) | idea | open — **~2× available, exact**; profiled, three proposals rejected on measurement |
+| [P44](#p44) | The RF's training annotations were never saved; the model cannot be retrained | **S2** | open — **blocks [P03](#p03)'s hypothesis and its fix**; escalates [H02](#h02) |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -1071,6 +1074,22 @@ analysis. If it holds, correcting the intensities will not be enough on its own.
   **What this settles.** The root cause named in **Where** is confirmed as
   optical rather than biological, for the first time with evidence that
   separates the two. That promotes the fix: see [I07](#i07).
+
+- 2026-08-25 — **the clover gate is ruled out as the cause.** [I07](#i07)
+  proposed local thresholding on the gate as this entry's fix. The gate was
+  widened on image 6 (the worst image here, shallow/deep 3.00) from Otsu's
+  0.969% of the volume to 93.4%, and the `proba >= 0.5` set came back
+  **bit-identical, 0 voxels different** ([P43](#p43)). The gate was never
+  binding, so no change to it can fix this. The truncation is downstream — in
+  the RF itself or in the post-process `min_size_vox=100`.
+  **New live hypothesis: annotation sampling.** `rf.py::train` fits on
+  hand-painted voxels over the *raw* volume (`np.argwhere(ann_vol > 0)`), so the
+  gate never touched training — but if the painted examples were drawn mostly on
+  shallow, bright adhesions, the model learned that brightness profile and will
+  not fire on deep dim ones. That would make the fix *retraining with deep
+  examples*, not any threshold change. Untested; the discriminating measurement
+  is the depth distribution of `proba >= 0.5` voxels against that of the surviving
+  instances, which separates an RF cause from a `min_size` cause.
 
 ---
 
@@ -5899,6 +5918,24 @@ ones while gaining ones this metric cannot see. Only re-detection settles it.
   measured to delete 59-85% of the dim wall; the two are the same code and
   different regimes.
 
+- 2026-08-25 — **closed: the premise is refuted, though the sub-measurements
+  stand.** This entry's claim was that the global Otsu gate is "the root cause of
+  an S1 defect", [P03](#p03). The clover tab did move to niblack (commit
+  `9aec319`), and this entry's depth-ratio table (Otsu 3.06 vs niblack ~0.91) is
+  still correct as far as it goes. But it measured the *gate*, never the
+  *output*: re-running detection on image 6 with the gate at 93.4% of the volume
+  produced a bit-identical `proba >= 0.5` set ([P43](#p43)). The gate was never
+  binding, so its depth bias never reached the result.
+  **Two of this entry's own cautions turn out to have been the important part.**
+  It warned that recall was measured against instances produced *through* the
+  Otsu gate and so was "rigged in Otsu's favour", and that "only re-detection
+  settles it". Re-detection settled it the other way. And its rejection of
+  `k=3.0` as "uniform *discarding*" has a mirror it did not consider: `k=0.5` is
+  uniform *passing* — a fixed noise quantile is depth-uniform by construction
+  whether or not any signal is present, which is what the 0.91 ratio was
+  measuring. See [P43](#p43) for the percolation argument.
+  The gate is now removed entirely, so this idea has no remaining consumer.
+
 ---
 
 <a id="i08"></a>
@@ -6384,3 +6421,266 @@ adhesions by nucleus**.
 
 **History**
 - 2026-08-25 — opened after the adhesions-per-nucleus cross-tab was retracted.
+
+---
+
+<a id="p43"></a>
+## P43 — the clover gate cost bias and saved ~10%; removed
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-25 — gate default off, `chunk_z` auto-sized |
+| **Severity** | S3 (compute), but it was the assumed cause of an S1 — see [P03](#p03) |
+| **Opened** | 2026-08-25 |
+| **Last verified** | 2026-08-25 (image 6) |
+| **Resolved** | 2026-08-25 |
+| **Where** | `pipeline/gui/adhesion_rf.py` (`gate_by_clover`), `pipeline/rf.py` (`predict_proba`) |
+| **Affects** | RF inference cost; the premise of [I07](#i07) |
+
+`gate_by_clover` restricted RF inference to voxels passing a threshold on the
+clover channel. It was **only ever a compute shortcut** — but it decided *a
+priori* which voxels were allowed to be positive, which is exactly the bias
+[P03](#p03) is about.
+
+**It did not save what it appeared to.** `predict_proba` chunks over **all** z
+regardless of the gate, and `_extract_scale_*` filters the whole padded slab
+densely before gathering at the gate's indices. Since adhesions span all z, a
+sparse gate still touches every chunk and pays the same filtering. Per chunk:
+
+| | time |
+|---|---|
+| dense feature filtering | ~80–100 s |
+| RF `predict_proba` | ~9–12 s |
+
+The gate only shrinks the second. **It saved ~10% of runtime.**
+
+**And it was never binding.** Widening the gate on image 6 from Otsu's 0.969% of
+the volume to niblack `k=0.5`'s 93.4% (post-dilation) left the `proba >= 0.5`
+set **bit-identical — 0 voxels differed**:
+
+| gate | nonzero proba | proba >= 0.5 | components | >=100 vox |
+|---|---|---|---|---|
+| Otsu, dil 1 µm | 4,577,402 | **843,386** | 2,026 | 829 |
+| niblack k=0.5, dil 1 µm | 4,882,386 | **843,386** | 2,026 | 829 |
+
+305,000 extra voxels got a nonzero probability and **not one reached 0.5**. The
+resulting `adhesion_instances.npz` was byte-identical to the previous one, which
+is the correct consequence rather than a stale-artifact bug (the proba files do
+differ).
+
+**Confirmed at full volume.** A third run with the gate off entirely (100% of
+the volume, `chunk_z` auto-sized to 24) gives:
+
+| | proba >= 0.5 | instances |
+|---|---|---|
+| niblack gate 93.4%, `chunk_z` 20 | 843,386 | 1872 (mean 438, min 100, max 2161) |
+| **no gate, `chunk_z` 24** | **843,372** | **1872 (mean 438, min 100, max 2161)** |
+
+**130 voxels differ — 0.015%.** They are scattered over 78 z-planes rather than
+concentrated at chunk boundaries, and this run changed two things at once (gate
+*and* `chunk_z`), so they are consistent with float-level chunking effects
+rather than with the gate having withheld anything. `adhesion_instances.npz`
+differs in 5,197 voxels, which is larger only because a handful of mask voxels
+can merge, split or **renumber** whole components downstream; the instance count
+and every summary statistic are unchanged.
+
+**Runtime, as predicted:** gated 15 × ~89 s ≈ 22 min, ungated 13 × ~112 s ≈ 24
+min — about 10% more for removing the bias.
+
+**Two mechanisms had to be understood to get here, both worth keeping:**
+
+- **The 1 µm dilation destroys a speckly gate.** niblack `k=0.5` selects 19.51%
+  of the volume as **11.1 M components**; dilating by a 9×9×9 element expands it
+  to 93.4%. `min_size` cannot rescue it (see below), so the gate became vacuous.
+- **niblack at low `k` is a noise quantile, not a detector.** Foreground is
+  `vol > mean + k·std`, so on pure noise it passes `P(Z>k)` by construction:
+  30.9% at `k=0.5` against [I07](#i07)'s measured 24.25%. 3D site percolation on
+  a simple cubic lattice (which is `ndi.label`'s default 6-connectivity) has
+  **p_c ≈ 0.3116** — so at `k=0.5` the background condenses into one spanning
+  cluster. That is why it "flags basically everything" in the viewer, why
+  `min_size` is useless there, and why the dilation closes the rest.
+  **Design rule: keep `P(Z>k)` well below 0.31, i.e. `k >= 1.5`.**
+
+**The fix.** `gate_by_clover` now defaults **off**. Removing it makes the
+feature matrix `X` the binding memory constraint — it is
+`(chunk voxels × 60) float32`, i.e. 5.0 GB for a 20-plane chunk of a 1024²
+volume — so `predict_proba` grew `_auto_chunk_z`, which sizes the chunk to fit
+both a host budget (`HOST_BUDGET_GB`, default 8.0) and a share of free VRAM
+(`VRAM_FRACTION`, default 0.8), and **logs the choice**. `X` cannot be streamed
+in batches: the dense filtering is shared across every voxel in the chunk, so
+streaming would recompute it per batch.
+
+**Note for 12 GB cards** (the target this was sized for): the largest scale needs
+a `2·max_pad = 126`-plane slab whatever `chunk_z` is, so there is a **~6.5 GB
+device-memory floor** for a 1024² volume at 5 µm/0.325 µm that shrinking the
+chunk cannot get under. `_auto_chunk_z` warns when it does not fit rather than
+letting it OOM silently.
+
+**Related:** [P03](#p03), [I07](#i07) (whose premise this refutes),
+[I09](#i09) (where the runtime actually goes), [P36](#p36), [P19](#p19).
+
+**History**
+- 2026-08-25 — opened and fixed. Found while re-running detection to test
+  [I07](#i07); see `docs/DIRECTION.md` §8F.
+
+---
+
+<a id="i09"></a>
+## I09 — RF inference is dominated by `_eigh3x3` on the CPU
+
+**Opened** 2026-08-25 · **Status** open · **Relates to** [P43](#p43)
+
+Feature extraction is ~90% of RF inference cost. Per-scale timing on image 6,
+one chunk (24 z-planes of a 1024² volume, GPU):
+
+| scale | σ (voxels) | taps/axis | time |
+|---|---|---|---|
+| 0.3 µm | 0.9 | 9 | 16.4 s |
+| 0.7 µm | 2.2 | 19 | 14.0 s |
+| 1.0 µm | 3.1 | 27 | 16.5 s |
+| 1.6 µm | 4.9 | 41 | 15.6 s |
+| 3.5 µm | 10.8 | 89 | 16.9 s |
+| 5.0 µm | 15.4 | 125 | 17.9 s |
+
+**Taps vary 14×; time varies 1.3×.** The cost is per-filter-operation memory
+traffic over the slab, not kernel arithmetic. Everything below follows from
+that one table.
+
+**Two optimisations were proposed and are rejected on this measurement** —
+recorded so they are not re-proposed:
+
+- **`truncate` 4.0 → 3.0** gives ~24% fewer taps at every scale. On something
+  that is not tap-bound that is worth almost nothing, and it changes every
+  feature value while `adhesion_rf.joblib` was fitted at 4.0 — a
+  train/inference mismatch for no gain.
+- **Decimating the large scales** (blur, subsample, filter small, upsample) was
+  premised on large σ being expensive. It is not: 5.0 µm is 17.9 s of ~97 s, so
+  making it *free* caps the saving at 18%. It also has a real failure mode —
+  decimating without prefiltering aliases broadband content, and this channel is
+  noise-dominated, which is the worst case for exactly that.
+
+**Profiled 2026-08-25, and the answer is none of the above.** One chunk
+(24 z-planes of 1024², GPU), each step timed with an explicit sync:
+
+| step | 0.3 µm | 5.0 µm |
+|---|---|---|
+| one `gaussian_filter` | 4.4 ms | 206.7 ms |
+| gather `g[iz,iy,ix]` | 2.6 ms | 2.7 ms |
+| `.get()` 100 MB to host | 18.5 ms | 20.2 ms |
+| `X[:, col] = ...` (stride 240 B) | 140.4 ms | 143.2 ms |
+
+Per-chunk budget:
+
+| | time | share |
+|---|---|---|
+| **`_eigh3x3` + (N,3,3) assembly** | **~52 s** | **~52%** |
+| strided `X[:, col]` writes | ~8.4 s | 8% |
+| all 19×6 `gaussian_filter` calls | ~8.1 s | 8% |
+| gathers + `.get()` | ~1.3 s | 1% |
+| unaccounted (allocation, page faults, GPU products) | ~30 s | 30% |
+
+**`_eigh3x3` costs 3.77 s per call and is called twice per scale** (Hessian and
+structure tensor), on a 0.91 GB `(N,3,3)` float32 array assembled by 9 strided
+host writes, then computed in float64 on the CPU. **It does not depend on sigma
+at all, which is exactly why the per-scale timings are flat** — that flatness was
+the clue, and it is what makes taps, slab size and padding all red herrings.
+
+**The pass-sharing idea this entry originally recommended is therefore demoted.**
+Sharing the separable 1D passes attacks the `gaussian_filter` line — 8% of
+runtime — so even a perfect 2× there is ~4% overall. Recording that plainly
+because proposing it was the same error the clover gate made: optimising the
+part that is not the cost. It remains correct, just nearly worthless.
+
+**What to do instead, in order:**
+
+1. **Move `_eigh3x3` to the GPU, and drop the `(N,3,3)` assembly.** The six
+   components are already on the device when they are transferred off; computing
+   the eigenvalues there and returning only the 3 results removes the host math,
+   6 transfers per call, and the 0.91 GB temporary. Elementwise and
+   embarrassingly parallel. **~2×, exact, no retraining.** Note it is
+   memory-bound rather than FLOP-bound (~4 GB of traffic per call), so float64
+   costs little even on a 3090's 1/64-rate FP64 units — prefer keeping float64
+   over risking cancellation in the `q`/`p`/`r` terms in float32.
+2. **Write X in blocks, not columns.** 10 single-column writes cost 9.2 s/chunk;
+   one 10-column block costs 2.9 s. ~6 s/chunk, trivial change.
+3. **Allocate X once and reuse it** across chunks rather than `np.empty` per
+   chunk — 6.04 GB of first-touch page faults per chunk, repeated 13 times.
+4. **Gather `gzz`/`gyy`/`gxx` once.** They are gathered for the LoG sum and then
+   again individually for the Hessian, and the LoG builds a full slab-sized
+   `(gzz+gyy+gxx)` temporary (629 MB at 5 µm) that is only ever read at the
+   gathered indices.
+
+**Dropping the 3.5/5.0 µm scales is re-scored by this profile too.** Its speed
+argument was the filters, which are only 8% — so it is ~1.3×, not 2–3×. Its real
+remaining value is that `max_pad` 63 → 21 collapses the ~6.5 GB device-memory
+floor, which is what constrains 12 GB cards ([P43](#p43)). That is a memory
+argument, not a speed one, and it still needs a retrain.
+
+**Related:** [P43](#p43), [P03](#p03).
+
+**History**
+- 2026-08-25 — opened from the per-scale timing above, replacing two rejected
+  proposals with a measured one.
+
+---
+
+<a id="p44"></a>
+## P44 — the RF's training annotations were never saved; the model cannot be retrained
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | **S2** — no exported number is wrong, but the detector behind every adhesion number is unreproducible |
+| **Opened** | 2026-08-25 |
+| **Last verified** | 2026-08-25 |
+| **Resolved** | — |
+| **Where** | `pipeline/gui/adhesion_rf.py` — the "Adhesion labels" layer, `_train` |
+| **Affects** | [P03](#p03) (blocks its live hypothesis *and* its fix), [H02](#h02), every adhesion column |
+
+`_train` reads `ann_vol` from a live napari layer named **"Adhesion labels"**
+(`adhesion_rf.py:101`) and fits on it. **Nothing ever writes that layer to
+disk.** The tab persists `adhesion_proba.npy`, `clover_ruby_ratio.npy`,
+`adhesion_instances.npz` and `adhesion_rf.joblib`; the annotations are not among
+them. The `*_labels.npz` files in `_saved/` are cadherin and DAPI segmentation
+output, unrelated.
+
+So the hand-painted training set exists **only** as weights inside
+`adhesion_rf.joblib`, and only for as long as that file keeps loading.
+
+**Three consequences, in increasing order of how much they hurt:**
+
+- **The model cannot be retrained or reproduced.** Any change that needs a
+  refit — a different feature set, a different scale list, more examples —
+  requires re-painting from scratch.
+- **[H02](#h02) escalates.** That entry records an unpinned-scikit-learn pickle
+  risk. With no training data it is not a *reproducibility* risk but a
+  *permanent loss* risk: the file already warns on load (fitted 1.9.0, loaded
+  1.8.0), and if a future version refuses it the detector is gone. Note the
+  warning appears to be benign so far — a run under 1.8.0 reproduced the 1.9.0
+  `proba >= 0.5` set to the voxel ([P43](#p43)) — but that is luck, not a
+  guarantee.
+- **It blocks [P03](#p03) from both ends.** P03's live hypothesis as of
+  2026-08-25 is that the annotations were painted mostly on shallow, bright
+  adhesions, so the RF never learned deep dim ones. **Testing that needs the
+  annotations** — their depth distribution is the whole measurement. And if the
+  hypothesis is right, the fix is retraining with deep examples, which needs
+  them too. An S1 is currently gated on a file that was never written.
+
+**The fix is small and should land before any retraining is attempted.** Persist
+the annotation volume whenever "Train RF" runs — sparse (only nonzero voxels:
+`np.argwhere(ann_vol > 0)` plus the class value), which for a few thousand
+painted voxels is a trivial file. Write it per image into `_saved/` and
+alongside the model, and load it back into the layer so a session can be
+resumed. This is the same doctrine as `adhesion_proba.npy` being persisted
+because "RF predict is the slow step" — hand-painting is far slower than RF
+predict and is the one input that cannot be recomputed at all.
+
+**Until then, treat `adhesion_rf.joblib` as irreplaceable**: back it up outside
+the repo, and do not upgrade scikit-learn in either environment without
+verifying it still loads and still reproduces a known `proba >= 0.5` set.
+
+**Related:** [P03](#p03), [H02](#h02), [P43](#p43), [I09](#i09).
+
+**History**
+- 2026-08-25 — opened after asking whether the RF could simply be retrained to
+  sidestep a feature-set change. It cannot.

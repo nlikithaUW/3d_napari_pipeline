@@ -1552,6 +1552,43 @@ script** — the blocker is image content, not parameters.
 
 ---
 
+# 8F. P03's assumed fix is dead, and the adhesion map is unchanged — 2026-08-25
+
+Short, because the detail belongs in [P43](ISSUES.md#p43), [I07](ISSUES.md#i07)
+and [I09](ISSUES.md#i09). What matters at program level is three things.
+
+**1. The adhesion artifacts on disk were two weeks stale, and re-running them
+changed nothing.** Every `adhesion_instances.npz` dated 2026-08-11, against the
+clover-gate fix in commit `9aec319` (2026-08-24). Re-detection on image 6 with a
+30× wider gate returned a **bit-identical** `proba >= 0.5` set — 0 voxels
+different. So the CSVs' adhesion positions were never affected by the gate, and
+everything measured off them in §8E stands.
+
+**2. [P03](ISSUES.md#p03) is still open and its planned fix is refuted.**
+[I07](ISSUES.md#i07) held that the global Otsu gate was the root cause of the
+depth truncation. It was not the cause; it was never even binding. The
+truncation is downstream — the RF itself, or the post-process `min_size`. The
+live hypothesis is now **annotation sampling**: training fits hand-painted
+voxels on the raw volume, so if the examples were painted on shallow bright
+adhesions the model simply never learned the deep dim ones. If that is right the
+fix is *retraining*, not a threshold — a materially bigger job than the queue
+assumed.
+
+**3. This does not block the shear work, and that is the point.** §4.3's map is
+pure geometry. P03 bites only when adhesions are *joined* to it (queue 8b), and
+it bites as a depth-dependent detection efficiency — which is exactly the
+confound §7.4 already requires be modelled rather than assumed away. **8a is
+still clear to run.**
+
+Also from this session: the clover gate is removed
+([P43](ISSUES.md#p43)) because it saved ~10% of runtime while deciding a priori
+which voxels could be positive; `chunk_z` is now sized automatically against
+host and VRAM budgets, with 12 GB cards as the target; and two proposed
+speed-ups were measured and rejected in favour of one that changes no feature
+value ([I09](ISSUES.md#i09)).
+
+---
+
 # 9. Open questions for the bench
 
 Send as one message, not three:
@@ -1602,7 +1639,19 @@ whether the endothelium was confluent at 7 days ([P39](ISSUES.md#p39)).
 
 # History
 
-- **2026-08-25b** (latest) — **every route to the fibroblast count failed, and
+- **2026-08-25c** (latest) — **the adhesion map was stale, re-running it changed
+  nothing, and [P03](ISSUES.md#p03)'s planned fix is refuted.** New **§8F**.
+  Every adhesion artifact predated the 2026-08-24 clover-gate fix; re-detection
+  with a 30× wider gate gave a bit-identical `proba >= 0.5` set, so the gate was
+  never binding and [I07](ISSUES.md#i07) closes with its premise wrong. The
+  depth truncation is downstream, and the live hypothesis is annotation
+  sampling — which would make the fix retraining rather than a threshold.
+  The gate is removed ([P43](ISSUES.md#p43)); `chunk_z` is auto-sized for 12 GB
+  cards; and two proposed speed-ups were measured and rejected for one that
+  changes no feature value ([I09](ISSUES.md#i09)). **None of this blocks queue
+  item 8a**, which is pure geometry.
+
+- **2026-08-25b** — **every route to the fibroblast count failed, and
   the shear half was promoted past it.** §8D queued an eye count to settle
   [P05](ISSUES.md#p05); the experimenter reports the fibroblasts are not
   distinguishable by eye, so the premise was wrong. Two substitutes were tried

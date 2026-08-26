@@ -135,10 +135,21 @@ def build(state, viewer) -> Container:
     # Section 3 — RF predict (slow; run once, stores proba map)           #
     # ------------------------------------------------------------------ #
 
-    gate_by_clover_w = CheckBox(value=True, label="gate_by_clover")
+    # Default OFF as of 2026-08-25. The gate was only ever a compute shortcut,
+    # and it was a bad one: `predict_proba` chunks over *all* z regardless, and
+    # the dense Gaussian filtering that dominates the cost (feat≈80 s vs rf≈9 s
+    # per chunk) is paid per chunk whatever the gate selects. It therefore saved
+    # ~10% of runtime while deciding a priori which voxels were allowed to be
+    # positive — the bias [P03](../../docs/ISSUES.md#p03) is about.
+    #
+    # Measured on image 6 (`docs/ISSUES.md` I07): widening the gate from Otsu's
+    # ~3% of the volume to niblack's 93.4% left the proba ≥ 0.5 set
+    # **bit-identical** — 0 voxels differed. So the gate was never binding, and
+    # removing it costs correctness nothing and runtime ~12%.
+    gate_by_clover_w = CheckBox(value=False, label="gate_by_clover")
     clover_dilation_um_w = FloatSlider(value=1.0, min=0.0, max=10.0,
                                        label="clover_dilation_um")
-    clover_dilation_um_w.visible = True
+    clover_dilation_um_w.visible = False
 
     def _on_gate_clover(val):
         clover_dilation_um_w.visible = bool(val)

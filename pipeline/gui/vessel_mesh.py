@@ -1,5 +1,15 @@
 """Vessel mesh tab — compare three cadherin-closing strategies.
 
+The tab is laid out as **four collapsible groups, one per pipeline** — surface,
+surface curvature, centerline graph, wall shear. Each has its own trigger, its
+own `.npz` and its own state key, and each carries a status line saying what is
+cached and whether it was built on the mesh currently on screen. Inside a group:
+inputs above the button, outputs and display-only controls below it, save/load
+last. Wall shear has its own button rather than a checkbox on the graph's — the
+sections are cut inside the centerline trace, so solving shear re-traces the
+graph, but that is a fact about the core module and not something a user should
+have to know to find the control.
+
 The wall mask is NOT filtered here: it consumes the live filtered mask from the
 Cadherin tab (the "VE-Cadherin mask" layer), so the filter lives in one place
 and it is explicit which cadherin is being meshed.
@@ -22,9 +32,13 @@ from __future__ import annotations
 import numpy as np
 from magicgui import magicgui
 from magicgui.widgets import (
-    CheckBox, ComboBox, Container, FileEdit, FloatSlider, PushButton, Slider,
+    CheckBox, ComboBox, Container, FileEdit, FloatSlider, Label, PushButton,
+    Slider,
 )
 from napari.qt.threading import thread_worker
+# superqt is a hard napari dependency (0.7.8 in both envs), so this adds
+# nothing to install by hand in the Windows env.
+from superqt import QCollapsible
 
 from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
 from .. import lumen_graph
@@ -69,10 +83,86 @@ def _cadh_mask_array(state):
     return data[0] if layer.multiscale else data
 
 
-def build(state, viewer) -> Container:
+def build(state, viewer) -> list:
     hist = Histogram("Cadherin tet circumradii (alpha_um)",
                      "log10(circumradius µm)", "darkorange")
     state.setdefault("hists", []).append(hist)
+
+    # ---- one status line per group ------------------------------------------
+    # Four caches (`vessel_mesh_cache`, `vessel_lumen_field`, `vessel_graph`,
+    # `vessel_shear`) were entirely invisible: there was no way to tell whether
+    # the graph on screen had been built on the mesh on screen, which is
+    # [P38](docs/ISSUES.md#p38)'s failure mode — one build's geometry surviving
+    # into another's. These say so.
+    surf_status_w = Label(value="", label="")
+    curv_status_w = Label(value="", label="")
+    graph_status_w = Label(value="", label="")
+    shear_status_w = Label(value="", label="")
+
+    def _build_id_note(obj):
+        """Whether `obj` was computed on the mesh currently in the cache.
+
+        The graph and the shear live in state keys separate from the mesh
+        cache, so a rebuild cannot invalidate them by construction the way it
+        invalidates curvature (both `_run_build` and `_load_mesh` replace
+        `vessel_mesh_cache` wholesale). A monotone token, stamped in when they
+        are computed and compared here, is the cheapest thing that notices.
+        """
+        bid = obj.get("build_id") if isinstance(obj, dict) else None
+        if bid is None:
+            return " — loaded from file, provenance unknown"
+        if int(bid) == int(state.get("vessel_build_id", 0)):
+            return " — built on the current mesh"
+        return " — built on a PREVIOUS mesh, re-solve"
+
+    def _refresh_status(*_):
+        cache = state.get("vessel_mesh_cache") or {}
+        verts, faces = cache.get("verts"), cache.get("faces")
+        if verts is None or faces is None or not len(verts) or not len(faces):
+            surf_status_w.value = "1. Surface — nothing built"
+        else:
+            surf_status_w.value = (
+                f"1. Surface — {len(verts):,} verts / {len(faces):,} faces — "
+                f"{cache.get('built_by') or 'loaded from file'}")
+
+        curv = cache.get("curvature")
+        if not curv:
+            curv_status_w.value = "2. Curvature — not computed"
+        else:
+            k1 = np.asarray(curv["k1"], float)
+            n_fin = int(np.isfinite(k1).sum())
+            how = cache.get("curvature_from") or "loaded from file"
+            curv_status_w.value = (f"2. Curvature — {how}, {n_fin:,} finite of "
+                                   f"{k1.size:,}")
+
+        g = state.get("vessel_graph")
+        if not g or not len(g.get("points_zyx_um", [])):
+            graph_status_w.value = "3. Graph — not computed"
+        else:
+            graph_status_w.value = (
+                f"3. Graph — {len(g.get('edge_len_um', []))} edge(s), "
+                f"{int(np.asarray(g.get('n_junctions', 0)))} junction(s), "
+                f"{float(np.asarray(g.get('total_length_um', 0.0))):.0f} µm"
+                + _build_id_note(g))
+
+        wall = state.get("vessel_shear")
+        if not wall or not len(wall.get("points_zyx_um", [])):
+            shear_status_w.value = "4. Wall shear — not solved"
+        else:
+            idx = np.asarray(wall["point_index"])
+            n_sec = int(np.unique(idx).size)
+            clip = np.asarray(wall["section_clipped"], bool)
+            cens = np.asarray(wall["censored"], bool)
+            n_clip = int(np.unique(idx[clip]).size)
+            n_cens = int(np.unique(idx[cens]).size)
+            shear_status_w.value = (
+                f"4. Wall shear — {len(idx):,} wall points, {n_sec} sections "
+                f"({n_clip} clipped, {n_cens} censored)"
+                + _build_id_note(wall))
+
+    # Redrawn whenever a tab's state changes out from under it (a new image
+    # load clears all four caches — see `gui/loader.py`).
+    state.setdefault("vessel_status_refresh", []).append(_refresh_status)
 
     # Every knob carries a tooltip saying what it does **and** what it costs
     # when it is wrong. A slider with only a name on it is a slider nobody can
@@ -287,6 +377,7 @@ def build(state, viewer) -> Container:
                 # image's lumen and saved under the failed image's name, which
                 # is what happened on 2026-08-24 (P38).
                 state["vessel_lumen_field"] = None
+                _refresh_status()
 
             if kind == "empty":
                 # Do not blame the cadherin mask unconditionally: on the
@@ -326,8 +417,12 @@ def build(state, viewer) -> Container:
                 finite_surface(verts, faces, vals), name=LAYER_NAME,
                 colormap="viridis", blending="translucent", opacity=0.6,
             )
-            state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
-                                          "normals": normals}
+            state["vessel_mesh_cache"] = {
+                "verts": verts, "faces": faces, "normals": normals,
+                "built_by": f"{method}"}
+            # A new surface: everything stamped with an older token is now
+            # describing geometry that is no longer on screen.
+            state["vessel_build_id"] = int(state.get("vessel_build_id", 0)) + 1
             _drop_shear()
             # The solved lumen field, for the 3D centerline graph below. Only
             # the Poisson family produces one; the interpolating methods leave
@@ -336,6 +431,7 @@ def build(state, viewer) -> Container:
             state["vessel_lumen_field"] = extras.get("lumen") or None
             print(f"Vessel mesh ({method}, orientation={orientation}): "
                   f"{len(verts)} verts, {len(faces)} faces.", flush=True)
+            _refresh_status()
 
         def _err(exc):
             print(f"Vessel mesh error: {exc}", flush=True)
@@ -446,12 +542,14 @@ def build(state, viewer) -> Container:
             lyr.visible = visible
             state["vessel_mesh_cache"] = {"verts": verts, "faces": faces,
                                           "normals": normals}
+            state["vessel_build_id"] = int(state.get("vessel_build_id", 0)) + 1
             _drop_shear()
             print(f"Loaded vessel mesh <- {path} "
                   f"({len(verts)} verts, {len(faces)} faces).", flush=True)
         except Exception as exc:
             print(f"Load vessel mesh error: {exc}", flush=True)
         finally:
+            _refresh_status()
             call_all(after, label="Load vessel mesh")
 
     save_mesh_w.changed.connect(_save_mesh)
@@ -471,6 +569,7 @@ def build(state, viewer) -> Container:
         state["vessel_shear"] = None
         if SHEAR_LAYER in viewer.layers:
             viewer.layers.remove(SHEAR_LAYER)
+        _refresh_status()
 
     # ---- Per-vertex curvature (local quadric fit at a physical radius) ----
     CURV_CHOICES = {"mean (H)": "mean", "κ1 max": "k1",
@@ -541,6 +640,8 @@ def build(state, viewer) -> Container:
 
         def _done(curv):
             state["vessel_mesh_cache"]["curvature"] = curv
+            state["vessel_mesh_cache"]["curvature_from"] = (
+                f"radius {radius:g} µm, smooth {smooth_iter}")
             k1 = np.asarray(curv["k1"]); k1 = k1[np.isfinite(k1)]
             n_surf = int(k1.size)
             for k in ("mean", "k1", "k2", "gaussian"):
@@ -556,6 +657,7 @@ def build(state, viewer) -> Container:
             _show_curvature()
             print(f"Curvature computed (radius={radius} µm, smooth={smooth_iter}) "
                   f"on {n_surf} surface vertices.", flush=True)
+            _refresh_status()
 
         def _err(exc):
             print(f"Curvature error: {exc}", flush=True)
@@ -629,16 +731,6 @@ def build(state, viewer) -> Container:
                 "width-to-height ratio or the cut runs off the sampled disc "
                 "and the section is flagged `clipped` — its size then being a "
                 "lower bound rather than a measurement.")
-    # §4.3's wall-shear solve, matching `batch_mesh --shear`. Present here for
-    # the standing rule that the GUI and the headless path must not drift: a
-    # check that exists in only one of them is how P36 and the alpha3d_um case
-    # happened. Off by default in both.
-    shear_w = CheckBox(
-        value=False, text="wall shear (sec 4.3)",
-        tooltip="Solve the flow in every cross-section and get the wall shear "
-                "around each one. Off by default because it is extra work per "
-                "section. Nothing below in the shear group does anything until "
-                "this has been run once.")
     # Present here only so the tab and `batch_mesh --no-section-from-field`
     # cannot disagree about what a section is. On in both; unticking reproduces
     # a pre-2026-08-28 build, which is the only reason it is a control at all.
@@ -660,7 +752,7 @@ def build(state, viewer) -> Container:
         value="caliber_um", label="colour by")
     graph_btn = PushButton(
         text="Compute 3D centerline graph (lumen)",
-        tooltip="Trace the vessel centerline through the solved lumen, cut a cross-section every section_every_um along it, and — with 'wall shear' ticked — solve the flow in each. Needs a Poisson-family method, since the interpolating ones never solve for a lumen volume.")
+        tooltip="Trace the vessel centerline through the solved lumen and cut a cross-section every section_every_um along it. Needs a Poisson-family method, since the interpolating ones never solve for a lumen volume. The flow is not solved — that is the wall-shear group's own button, which re-traces the graph.")
 
     GRAPH_LAYER = "Vessel centerline (3D graph)"
     GRAPH_PATH_LAYER = "Vessel centerline path"
@@ -731,16 +823,16 @@ def build(state, viewer) -> Container:
             nl.opacity = 0.85
             nl.visible = visible
 
-    def _graph_params():
+    def _graph_params(compute_shear: bool):
         return {"spur_ratio": float(spur_ratio_w.value),
                 "crop_ratio": float(crop_ratio_w.value),
                 "kappa_window_um": float(kappa_win_w.value),
                 "section_every_um": float(sec_every_w.value),
                 "section_span": float(sec_span_w.value),
                 "section_from_field": bool(sec_field_w.value),
-                "compute_shear": bool(shear_w.value)}
+                "compute_shear": bool(compute_shear)}
 
-    def _compute_graph(*_, after=None):
+    def _compute_graph(*_, after=None, compute_shear=False):
         lum = state.get("vessel_lumen_field")
         if not lum or lum.get("chi") is None:
             print("Centerline graph: build the mesh first with a Poisson "
@@ -751,7 +843,7 @@ def build(state, viewer) -> Container:
             return
         mask = _cadh_mask_array(state)
         scale = state.get("scale", (1.0, 1.0, 1.0))
-        gp = _graph_params()
+        gp = _graph_params(compute_shear)
         state.setdefault("run_settings", {})["centerline_graph"] = dict(gp)
         dom = (np.asarray(np.asarray(mask).shape) * float(scale[0])
                if mask is not None else None)
@@ -766,13 +858,20 @@ def build(state, viewer) -> Container:
 
         def _done(result):
             g, ex = result
+            bid = int(state.get("vessel_build_id", 0))
+            g["build_id"] = bid
             state["vessel_graph"] = g
-            # The wall point cloud, when the shear box is ticked. Cleared
-            # otherwise, so an untick cannot leave the previous build's shear
-            # painted on a new mesh — that is [P38](docs/ISSUES.md#p38)'s
-            # failure mode, one image's field surviving into another's build.
-            state["vessel_shear"] = ex.get("wall")
+            # The wall point cloud, when shear was asked for. Cleared
+            # otherwise, so pressing the plain graph button cannot leave the
+            # previous build's shear painted on a new mesh — that is
+            # [P38](docs/ISSUES.md#p38)'s failure mode, one image's field
+            # surviving into another's build.
+            wall = ex.get("wall")
+            if wall is not None:
+                wall["build_id"] = bid
+            state["vessel_shear"] = wall
             _show_shear()
+            _refresh_status()
             for n in g.get("notes", []):
                 print(f"  {n}", flush=True)
             if not len(g.get("points_zyx_um", [])):
@@ -806,7 +905,7 @@ def build(state, viewer) -> Container:
     graph_color_w.changed.connect(
         lambda *_: (state.get("vessel_graph")
                     and _show_graph(state["vessel_graph"])))
-    graph_btn.changed.connect(_compute_graph)
+    graph_btn.changed.connect(lambda *_: _compute_graph())
 
     # ---- Wall shear on the vessel surface -----------------------------------
     # The same read as `curvature` above: a per-vertex scalar on the mesh, drawn
@@ -826,6 +925,27 @@ def build(state, viewer) -> Container:
     # This is a view of `extras["wall"]` and nothing else — the same array
     # `batch_mesh` writes to `vessel_shear.npz` and the same one an adhesion
     # will join to. Nothing here feeds a calculation.
+
+    # §4.3's wall-shear solve, matching `batch_mesh --shear`. It gets its own
+    # button rather than a checkbox on the graph's, even though it re-traces the
+    # graph to get it: the sections are cut **inside** `lumen_graph`'s trace
+    # (`_sections_along`), so shear cannot be solved on an already-built graph
+    # without changing that core module's contract. The cost of the honest
+    # layout is one re-trace; the cost of the checkbox was that "calculate
+    # shear" did not appear anywhere in the tab.
+    #
+    # This does not break the no-drift rule: `compute_shear` still exists in
+    # both paths, still defaults off in both, and `batch_mesh --shear` still
+    # maps onto it. Only the widget that sets it has changed.
+    shear_btn = PushButton(
+        text="Solve wall shear (re-traces the graph)",
+        tooltip="Trace the centerline, cut the cross-sections and solve the "
+                "flow in each one, giving the wall shear around every section. "
+                "This re-runs the centerline graph as well — the sections are "
+                "cut during the trace — so it replaces whatever the graph "
+                "group last produced. Extra work per section, which is why it "
+                "is not what the graph button does.")
+
     SHEAR_CHOICES = {"τ / µQ (relative)": "tau_rel_1_um3",
                      "τ̂ (shape function, µm)": "tau_hat_um"}
     shear_measure_w = ComboBox(
@@ -1165,6 +1285,7 @@ def build(state, viewer) -> Container:
                   f"read their circumferential shape, not their absolute "
                   f"τ / µQ.", flush=True)
 
+    shear_btn.changed.connect(lambda *_: _compute_graph(compute_shear=True))
     shear_measure_w.changed.connect(lambda *_: _show_shear())
     shear_drop_clipped_w.changed.connect(lambda *_: _show_shear())
     shear_drop_censored_w.changed.connect(lambda *_: _show_shear())
@@ -1186,8 +1307,8 @@ def build(state, viewer) -> Container:
     def _save_shear(*_):
         wall = state.get("vessel_shear")
         if not wall:
-            print("No wall shear to save — tick 'wall shear (sec 4.3)' and "
-                  "rebuild the centerline graph.", flush=True)
+            print("No wall shear to save — click 'Solve wall shear' first.",
+                  flush=True)
             return
         path = str(shear_path_w.value)
         np.savez_compressed(
@@ -1210,6 +1331,7 @@ def build(state, viewer) -> Container:
         except Exception as exc:
             print(f"Load wall shear error: {exc}", flush=True)
         finally:
+            _refresh_status()
             call_all(after, label="Load wall shear")
 
     def _save_shear_if_any(*_):
@@ -1260,6 +1382,7 @@ def build(state, viewer) -> Container:
                                                        "faces": None,
                                                        "normals": None}
             cache["curvature"] = curv
+            cache["curvature_from"] = "loaded from file"
             state["vessel_mesh_cache"] = cache
             verts = cache.get("verts")
             # Curvature is per-vertex, so it is only meaningful against the mesh
@@ -1279,6 +1402,7 @@ def build(state, viewer) -> Container:
         except Exception as exc:
             print(f"Load curvature error: {exc}", flush=True)
         finally:
+            _refresh_status()
             call_all(after, label="Load curvature")
 
     path_curv_path_w = FileEdit(
@@ -1330,6 +1454,7 @@ def build(state, viewer) -> Container:
         except Exception as exc:
             print(f"Load centerline graph error: {exc}", flush=True)
         finally:
+            _refresh_status()
             call_all(after, label="Load centerline graph")
 
     save_curv_w.changed.connect(_save_curv)
@@ -1363,26 +1488,67 @@ def build(state, viewer) -> Container:
         "the method and knobs above. The knobs a method does not read are "
         "hidden rather than left on screen looking operative.")
 
-    return (Container(widgets=[controls, suggest_w,
-                              mesh_path_w, save_mesh_w, load_mesh_w,
-                              curv_measure_w, curv_radius_w, curv_smooth_w,
-                              curv_btn, curv_path_w, save_curv_w, load_curv_w,
-                              spur_ratio_w, crop_ratio_w, kappa_win_w,
-                              sec_every_w, sec_span_w, sec_field_w, shear_w,
-                              graph_color_w,
-                              graph_btn,
-                              shear_measure_w, shear_drop_clipped_w,
-                              shear_drop_censored_w, shear_scale_w,
-                              shear_inlet_w, shear_terminus_open_w,
-                              shear_junction_ratio_w,
-                              shear_path_w, save_shear_w, load_shear_w,
-                              path_curv_path_w, save_path_curv_w,
-                              load_path_curv_w],
-                     # **Labels on.** With `labels=False` a magicgui Container
-                     # draws no name beside a slider or a combo, so every knob
-                     # in this tab that is not a checkbox (whose text is drawn
-                     # inside it) appeared as a bare unlabelled control. The
-                     # `label=` values were all there and none of them reached
-                     # the screen.
-                     labels=True),
-            hist.canvas)
+    _refresh_status()
+
+    def _group(title, widgets, extra=None, expanded=False):
+        """One pipeline, one collapsible.
+
+        The rule inside a group is: inputs above the button, outputs and
+        display-only controls below it, save/load last. `setDuration(0)` because
+        the collapse animation resizes badly inside the QScrollArea [P50] put
+        around every tab.
+        """
+        coll = QCollapsible(title)
+        coll.setDuration(0)
+        inner = Container(widgets=widgets, labels=True)
+        coll.addWidget(inner.native)
+        # Hold the magicgui wrapper: `addWidget` reparents the native QWidget,
+        # but nothing keeps the Python Container alive, and when it is collected
+        # the QLabels underneath it are deleted out from under the status
+        # widgets this closure still writes to ("wrapped C/C++ object of type
+        # QLabel has been deleted").
+        coll._mg_container = inner
+        if extra is not None:
+            coll.addWidget(extra)
+        if expanded:
+            coll.expand(animate=False)
+        else:
+            coll.collapse(animate=False)
+        return coll
+
+    def _sep(text):
+        return Label(value=text, label="")
+
+    return [
+        _group("1. Vessel surface — build the mesh",
+               [controls, suggest_w, surf_status_w,
+                mesh_path_w, save_mesh_w, load_mesh_w],
+               extra=hist.canvas, expanded=True),
+        _group("2. Surface curvature — per-vertex, on the built mesh",
+               [curv_measure_w, curv_radius_w, curv_smooth_w, curv_btn,
+                curv_status_w,
+                curv_path_w, save_curv_w, load_curv_w]),
+        _group("3. Centerline graph — the axis and its cross-sections",
+               [spur_ratio_w, crop_ratio_w, kappa_win_w, sec_every_w,
+                sec_span_w, sec_field_w, graph_btn, graph_status_w,
+                # Display only — its own tooltip says "nothing here feeds a
+                # calculation", so it belongs below the button, not among the
+                # knobs the button reads.
+                graph_color_w,
+                path_curv_path_w, save_path_curv_w, load_path_curv_w]),
+        _group("4. Wall shear — solve the flow in every section",
+               [shear_btn, shear_status_w,
+                # Three kinds of control used to look identical here. They are
+                # now separated by what they cost you: a display filter changes
+                # nothing that was measured, a scenario input re-runs Kirchhoff
+                # and genuinely changes the numbers (on 04step_003 'treat a
+                # terminus as an opening' is the difference between the stub
+                # taking 69% of the flow and none), and the solve inputs live
+                # in group 3 because that is the button that reads them.
+                _sep("— display only (changes nothing measured) —"),
+                shear_measure_w, shear_drop_clipped_w, shear_drop_censored_w,
+                shear_junction_ratio_w,
+                _sep("— scenario (changes the numbers) —"),
+                shear_scale_w, shear_inlet_w, shear_terminus_open_w,
+                shear_path_w, save_shear_w, load_shear_w]),
+    ]

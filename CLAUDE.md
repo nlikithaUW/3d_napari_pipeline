@@ -333,6 +333,13 @@ where the fibroblasts are.
 **GUI (`pipeline/gui/`, one module per tab):** `loader`, `display`, `nuclei`,
 `cadherin`, `cadherin_rf`, `cell_mesh`, `vessel_mesh`, `clover`, `adhesion_rf`,
 `roi`, `measure`, plus `widgets.py` (shared helpers) and `logpanel.py`.
+`vessel_mesh` is grouped **by pipeline** — four collapsibles (surface, surface
+curvature, centerline graph, wall shear), each with its own trigger, its own
+`.npz` and a status line saying what is cached and whether it was built on the
+mesh currently on screen. **Wall shear has its own button**, not a checkbox on
+the graph's; it re-traces the graph to get it, because the sections are cut
+inside `lumen_graph`'s trace. `compute_shear` still defaults off in both paths
+and `batch_mesh --shear` still maps onto it — only the widget changed.
 
 **Scripts (`Scripts/`):** `nd2_to_ometiff.py`, `gputest.py`, `vecad_mip.py`,
 `fibroblast_cellpose.py` — the last counts endothelial cells from VE-cadherin to

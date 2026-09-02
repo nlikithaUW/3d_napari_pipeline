@@ -191,6 +191,17 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         state["clover_state"] = {"labels": None, "sizes": None, "method": None}
         # mesh_cache is cleared earlier, before the layer churn (see above).
         state["vessel_mesh_cache"] = {"verts": None, "faces": None}
+        # **The graph, the shear and the solved lumen go with it.** Only the
+        # mesh cache was cleared here, so loading a second image left image 1's
+        # solved lumen field in state and "Compute 3D centerline graph" then
+        # traced image 1's centerline and reported it as image 2's. That is
+        # [P38](../../docs/ISSUES.md#p38)'s failure mode — one build's geometry
+        # surviving into another's — on the path P38 did not cover: it fixed the
+        # failed-*build* path, not the image-*load* path.
+        state["vessel_lumen_field"] = None
+        state["vessel_graph"] = None
+        state["vessel_shear"] = None
+        state["vessel_build_id"] = 0
         state["nuc_cache"] = {"labels_id": None, "centroids": None,
                               "normals": None, "lids": None}
         state["adhesion_proba"] = None
@@ -202,6 +213,10 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         state["fibroblast_count"] = None
         for hist in state.get("hists", []):
             hist.clear()
+        # The Vessel mesh tab's four status lines describe caches this handler
+        # just emptied.
+        for fn in state.get("vessel_status_refresh", []):
+            fn()
 
         # Point every tab's save/load path field into a per-image folder next to
         # the image (e.g. images/WT/<stem>_saved/), so features for different
@@ -273,6 +288,7 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
         ("Vessel mesh", "load_vessel_mesh"),
         ("Vessel curvature", "load_vessel_curvature"),
         ("Vessel centerline graph", "load_vessel_path_curvature"),
+        ("Vessel wall shear", "load_vessel_shear"),
         ("Adhesion proba", "load_proba"),
         ("Adhesion instances", "load_instances"),
         ("Clover/Ruby ratio", "load_ratio"),

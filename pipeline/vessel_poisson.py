@@ -99,13 +99,32 @@ from scipy import ndimage as ndi
 from .cell_mesh import filter_faces_by_extent
 
 # Defaults, mirrored by `vessel_mesh.build_mesh` and `batch_mesh.MESH_DEFAULTS`.
-# Three knobs; everything else is derived. They are deliberately *not* merged
+# Four knobs; everything else is derived. They are deliberately *not* merged
 # into one: [I05]'s own caveat is that its table never held the grid and the
 # level fixed while varying σ, so un-confounding cost from smoothness is part of
 # what this method is for.
 DEFAULT_GRID_UM = 2.0
 DEFAULT_SMOOTH_UM = 5.0
 DEFAULT_ISO_PCT = 50.0
+# The **lumen detection scale**, split out of `smooth_um` on 2026-09-02
+# ([P51](docs/ISSUES.md#p51)). 0 means "follow `smooth_um`", which is what every
+# mesh on disk was built under, so the default changes nothing.
+#
+# Why it had to be split: `smooth_um` was doing three unrelated jobs at once —
+# the structure-tensor width in `sheet_normals`, the smoothing of the splatted
+# normal field before the solve (the *surface regularisation*), and, in
+# `lumen_core`, the scale that decides what counts as lumen at all
+# (``deep = D > 2σ``, kept only if ``D >= 4σ``). The first two want a large
+# value on a noisy wall; the third wants a small one on a vessel with a narrow
+# waist, because 2σ is a **floor on the inscribed radius the method can see**.
+# Measured on V3b_04step_003, whose lumen radius runs 1-31 µm: at σ = 5 µm,
+# 46.4% of the vessel's length sits below 2σ and is invisible to the trace, the
+# surface is severed at x ≈ 40-60 µm and the centerline starts ~90 px inside
+# the cadherin; at σ = 2.99 µm it reaches the end but the surface is
+# measurably rougher (mean dihedral 3.02° against 2.47°). No single value gave
+# both, because the two jobs move in opposite directions across the whole
+# usable range.
+DEFAULT_CORE_UM = 0.0
 
 # The occupancy-weighted percentile of the smoothed density that defines "wall"
 # in `lumen_core`. **Not** the median, which is where this started and which is
@@ -258,7 +277,7 @@ def sheet_normals(occ: np.ndarray, h_um: float, smooth_um: float):
 # (3) the lumen core, and orienting the normals into it
 # --------------------------------------------------------------------------- #
 
-def lumen_core(occ: np.ndarray, h_um: float, smooth_um: float):
+def lumen_core(occ: np.ndarray, h_um: float, core_um: float):
     """The lumen interior as a boolean field → ``(core, info)``.
 
     Wall = where the smoothed occupancy exceeds the level holding
@@ -268,11 +287,21 @@ def lumen_core(occ: np.ndarray, h_um: float, smooth_um: float):
     own z column**. A candidate is kept only if it touches **neither** z face
     and reaches ``D ≥ 4σ`` somewhere.
 
+    **σ here is `core_um`, the lumen detection scale, not the surface smoothing
+    scale.** They were one parameter until 2026-09-02 and pull in opposite
+    directions on a vessel that both tapers and has a noisy wall — see
+    `DEFAULT_CORE_UM` and [P51](docs/ISSUES.md#p51). `reconstruct` passes
+    `smooth_um` through when `core_um` is 0 or None, so the split changes
+    nothing by default.
+
     The ``4σ`` rule is a real constraint on the method, not a formality: a
-    vessel whose inscribed lumen radius is under ``4 · poisson_smooth_um``
-    cannot be oriented by this route at that σ, and the refusal below says so.
-    The reference vessel's measured 38.1 µm clears the default 20 µm
-    comfortably.
+    vessel whose inscribed lumen radius is under ``4 · core_um`` cannot be
+    oriented by this route at that σ, and the refusal below says so — with the
+    inscribed radius it actually measured, so the reader can see how far off it
+    was rather than only that it failed. The reference vessel's measured
+    38.1 µm clears the default 20 µm comfortably; V3b_04step_003's 31.2 µm does
+    not clear the 60 µm that `poisson_smooth_um = 15` demands, which is what
+    [P51] was opened on.
 
     The z-face rule is the whole discriminator and it is empirical, not
     decorative: [P24] measured 0.01% of the reference mask in the first z slice
@@ -288,8 +317,8 @@ def lumen_core(occ: np.ndarray, h_um: float, smooth_um: float):
     orientation is not recoverable from this data, and inventing one would put a
     silent global sign on every curvature downstream.
     """
-    info: dict = {"notes": [], "components": []}
-    sig = float(smooth_um) / float(h_um)
+    info: dict = {"notes": [], "components": [], "core_um": float(core_um)}
+    sig = float(core_um) / float(h_um)
     sm = ndi.gaussian_filter(occ.astype(np.float64), sigma=sig, mode="nearest")
     occupied = occ > 0
     empty = np.zeros(occ.shape, bool)
@@ -307,7 +336,7 @@ def lumen_core(occ: np.ndarray, h_um: float, smooth_um: float):
         return empty, info
 
     D = ndi.distance_transform_edt(~wall, sampling=float(h_um))
-    deep = D > 2.0 * float(smooth_um)
+    deep = D > 2.0 * float(core_um)
 
     # **z-enclosure, applied per column rather than by connectivity.** Pure
     # connectivity was tried first and leaks: a hole in the wall band widens by
@@ -330,7 +359,7 @@ def lumen_core(occ: np.ndarray, h_um: float, smooth_um: float):
         touches_z = bool(sel[0].any() or sel[-1].any())
         dmax = float(D[sel].max())
         vol = float(sel.sum()) * cell_vol
-        keep = (not touches_z) and dmax >= 4.0 * float(smooth_um)
+        keep = (not touches_z) and dmax >= 4.0 * float(core_um)
         info["components"].append({
             "label": int(lid), "volume_um3": vol, "max_D_um": dmax,
             "touches_z_face": touches_z, "kept": bool(keep)})
@@ -351,13 +380,29 @@ def lumen_core(occ: np.ndarray, h_um: float, smooth_um: float):
     kept = [c for c in info["components"] if c["kept"]]
     info["n_core_components"] = len(kept)
     info["core_volume_um3"] = float(sum(c["volume_um3"] for c in kept))
+    # The largest inscribed radius anywhere z-enclosed, measured whether or not
+    # anything qualified. Without it the refusal below says only that the test
+    # failed; with it, it says by how much — which is the difference between
+    # "this vessel is not contained in z" and "no value of core_um could ever
+    # have passed on this image" ([P51] was two hours of the wrong hypothesis
+    # for exactly this reason).
+    d_best = float(D[enclosed].max()) if enclosed.any() else 0.0
+    info["max_enclosed_D_um"] = d_best
     if not kept:
+        need = 4.0 * float(core_um)
         info["notes"].append(
             f"WARN: no lumen core found — {nlab} candidate region(s), none of "
-            f"which both avoided the z faces and reached "
-            f"{4.0 * float(smooth_um):.1f} µm from a wall. Either the vessel is "
-            f"not contained in z, or its inscribed lumen radius is under "
-            f"4 x poisson_smooth_um. Refusing to guess an orientation.")
+            f"which both avoided the z faces and reached {need:.1f} µm from a "
+            f"wall. The largest inscribed radius anywhere z-enclosed in this "
+            f"mask is {d_best:.1f} µm"
+            + (f", which is under the {need:.1f} µm required, so **no z-enclosed "
+               f"region could have passed**: lower poisson_core_um to at most "
+               f"{d_best / 4.0:.1f} µm (it defaults to poisson_smooth_um)."
+               if d_best < need else
+               ", which clears the requirement — so this is the z-enclosure "
+               "test failing, not the size test: the vessel is probably not "
+               "contained in z.")
+            + " Refusing to guess an orientation.")
     elif len(kept) > 2:
         # Not alarming on its own: the enclosure test cuts the lumen wherever
         # the wall drops out of a z column, so this counts *fragments*, and is
@@ -528,6 +573,7 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
                 smooth_um: float = DEFAULT_SMOOTH_UM,
                 iso_pct: float = DEFAULT_ISO_PCT,
                 min_component_um: float = 50.0,
+                core_um: float | None = DEFAULT_CORE_UM,
                 extras: dict | None = None):
     """The vessel surface as a level set of the fitted χ.
 
@@ -559,6 +605,12 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
     cannot be read back off the mesh); ``info`` is the diagnostic record,
     including ``notes`` for the caller to print.
 
+    ``core_um`` is the **lumen detection scale** `lumen_core` runs at; 0 or
+    ``None`` means "follow ``smooth_um``", which is what every mesh built before
+    2026-09-02 used and is why the split is a no-op by default. Raise
+    ``smooth_um`` for a smoother surface, lower ``core_um`` to see a narrower
+    lumen — see `DEFAULT_CORE_UM` for the measurement that separated them.
+
     A deterministic pure function of ``(mask, scale, params)`` — required so
     `batch_mesh`'s byte-identical rebuild check keeps working.
 
@@ -567,10 +619,15 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
     """
     from skimage.measure import marching_cubes
 
+    # 0 / None both mean "follow smooth_um"; resolved once, here, so the
+    # recorded value is the one that actually ran rather than the sentinel.
+    core_res = float(core_um) if core_um else float(smooth_um)
     info: dict = {"notes": [], "method": "poisson",
                   "grid_um": float(grid_um), "smooth_um": float(smooth_um),
                   "iso_pct": float(iso_pct),
-                  "min_component_um": float(min_component_um)}
+                  "min_component_um": float(min_component_um),
+                  "core_um": core_res,
+                  "core_um_follows_smooth": not bool(core_um)}
     def _ex(**kw):
         """Record into the caller's out-dict, if there is one."""
         if extras is not None:
@@ -601,12 +658,18 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
             f"WARN: poisson_smooth_um={smooth_um:g} is below the realised grid "
             f"spacing h={h:.2f} µm, so the smoothing is sub-cell and does "
             f"nothing. Lower poisson_grid_um or raise poisson_smooth_um.")
+    if core_res < h:
+        info["notes"].append(
+            f"WARN: the lumen detection scale {core_res:g} µm is below the "
+            f"realised grid spacing h={h:.2f} µm, so `lumen_core` smooths "
+            f"sub-cell and 2x/4x it are both under one cell — the detection "
+            f"test is no longer resolved. Lower poisson_grid_um to match.")
     info["n_occupied_cells"] = int((occ > 0).sum())
 
     idx, n, sheet = sheet_normals(occ, h, smooth_um)
     info["sheetness_median"] = float(np.median(sheet)) if len(sheet) else None
 
-    core, core_info = lumen_core(occ, h, smooth_um)
+    core, core_info = lumen_core(occ, h, core_res)
     # The exterior mask is an array; keep it out of the JSON-serialisable record.
     outside = core_info.pop("outside", np.zeros(occ.shape, bool))
     info["core"] = core_info
@@ -720,7 +783,8 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
 def diagnose(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
              smooth_um: float = DEFAULT_SMOOTH_UM,
              iso_pct: float = DEFAULT_ISO_PCT,
-             min_component_um: float = 50.0) -> dict:
+             min_component_um: float = 50.0,
+             core_um: float | None = DEFAULT_CORE_UM) -> dict:
     """`reconstruct`'s diagnostic record, plus the mesh counts.
 
     Separate from `build_mesh` on purpose: `build_mesh` must stay a 4-tuple
@@ -730,7 +794,7 @@ def diagnose(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
     """
     verts, faces, _values, normals, info = reconstruct(
         mask, scale, grid_um=grid_um, smooth_um=smooth_um, iso_pct=iso_pct,
-        min_component_um=min_component_um)
+        min_component_um=min_component_um, core_um=core_um)
     out = dict(info)
     out["n_verts"] = int(len(verts))
     out["n_faces"] = int(len(faces))

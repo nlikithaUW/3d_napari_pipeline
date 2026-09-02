@@ -228,11 +228,24 @@ def build(state, viewer) -> list:
         poisson_smooth_um={"widget_type": "FloatSlider", "min": 1.0,
                            "max": 15.0, "step": 0.5,
                            "tooltip": "poisson: the width in µm over which the "
-                                      "wall direction is estimated. It also "
-                                      "sets the lumen test: a vessel whose "
-                                      "inscribed radius is under 4x this "
-                                      "cannot be oriented at all and the build "
-                                      "refuses rather than guessing."},
+                                      "wall direction is estimated and the "
+                                      "normal field is smoothed before the "
+                                      "solve. This is the surface "
+                                      "regularisation: raise it for a smoother "
+                                      "surface. It no longer sets the lumen "
+                                      "test — that is poisson_core_um."},
+        poisson_core_um={"widget_type": "FloatSlider", "min": 0.0, "max": 15.0,
+                         "step": 0.25,
+                         "tooltip": "poisson: the lumen DETECTION scale in µm. "
+                                    "A lumen is only seen where its inscribed "
+                                    "radius exceeds 2x this, and only oriented "
+                                    "where it reaches 4x somewhere — so it is "
+                                    "a floor on the caliber the method can "
+                                    "measure, and too large a value severs the "
+                                    "surface at a waist rather than failing "
+                                    "loudly. 0 follows poisson_smooth_um, "
+                                    "which is what every mesh on disk was "
+                                    "built under (docs/ISSUES.md P51)."},
         poisson_iso_pct={"widget_type": "FloatSlider", "min": 5.0, "max": 95.0,
                          "step": 1.0,
                          "tooltip": "poisson: which level of the solved field "
@@ -264,6 +277,7 @@ def build(state, viewer) -> list:
         min_component_um: float = 50.0,
         poisson_grid_um: float = 2.0,
         poisson_smooth_um: float = 5.0,
+        poisson_core_um: float = 0.0,
         poisson_iso_pct: float = 50.0,
         alpha_raster_um: float = 2.0,
     ):
@@ -276,7 +290,7 @@ def build(state, viewer) -> list:
     _BUILD_KNOBS = ("orientation", "n_bins", "r_smooth_bins", "alpha2d_um",
                     "subsample_um", "alpha3d_um", "fill_lumen", "close_um",
                     "min_component_um", "poisson_grid_um", "poisson_smooth_um",
-                    "poisson_iso_pct", "alpha_raster_um")
+                    "poisson_core_um", "poisson_iso_pct", "alpha_raster_um")
 
     def _sync_method_visibility(*_):
         live = LIVE_PARAMS.get(controls["method"].value, _BUILD_KNOBS)
@@ -309,6 +323,7 @@ def build(state, viewer) -> list:
         min_component_um = float(controls["min_component_um"].value)
         poisson_grid_um = float(controls["poisson_grid_um"].value)
         poisson_smooth_um = float(controls["poisson_smooth_um"].value)
+        poisson_core_um = float(controls["poisson_core_um"].value)
         poisson_iso_pct = float(controls["poisson_iso_pct"].value)
         alpha_raster_um = float(controls["alpha_raster_um"].value)
         state.setdefault("run_settings", {})["vessel_mesh"] = {
@@ -319,6 +334,7 @@ def build(state, viewer) -> list:
             "r_smooth_bins": r_smooth_bins,
             "poisson_grid_um": poisson_grid_um,
             "poisson_smooth_um": poisson_smooth_um,
+            "poisson_core_um": poisson_core_um,
             "poisson_iso_pct": poisson_iso_pct,
             "alpha_raster_um": alpha_raster_um}
 
@@ -341,6 +357,7 @@ def build(state, viewer) -> list:
                 close_um=close_um, min_component_um=min_component_um,
                 poisson_grid_um=poisson_grid_um,
                 poisson_smooth_um=poisson_smooth_um,
+                poisson_core_um=poisson_core_um,
                 poisson_iso_pct=poisson_iso_pct,
                 alpha_raster_um=alpha_raster_um, extras=extras)
             return out, extras
@@ -1495,7 +1512,7 @@ def build(state, viewer) -> list:
 
         The rule inside a group is: inputs above the button, outputs and
         display-only controls below it, save/load last. `setDuration(0)` because
-        the collapse animation resizes badly inside the QScrollArea [P50] put
+        the collapse animation resizes badly inside the QScrollArea [P52] put
         around every tab.
         """
         coll = QCollapsible(title)

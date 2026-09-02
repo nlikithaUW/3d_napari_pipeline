@@ -150,6 +150,11 @@ MESH_DEFAULTS = {
     "min_component_um": 50.0,
     "poisson_grid_um": vessel_poisson.DEFAULT_GRID_UM,
     "poisson_smooth_um": vessel_poisson.DEFAULT_SMOOTH_UM,
+    # The lumen detection scale, split out of poisson_smooth_um on 2026-09-02
+    # ([P51]). 0 = follow poisson_smooth_um, which is what every mesh on disk
+    # was built under — so this default changes no artifact, which is the whole
+    # reason it is 0 and not a number someone liked.
+    "poisson_core_um": vessel_poisson.DEFAULT_CORE_UM,
     "poisson_iso_pct": vessel_poisson.DEFAULT_ISO_PCT,
     # The grid the alpha solid is rasterized onto for
     # `METHOD_ALPHA_POISSON`. Defaults to the Poisson grid so the solve
@@ -406,6 +411,7 @@ def resolve_params(args) -> dict:
         "close_um": args.close_um, "min_component_um": args.min_component_um,
         "poisson_grid_um": args.poisson_grid_um,
         "poisson_smooth_um": args.poisson_smooth_um,
+        "poisson_core_um": args.poisson_core_um,
         "poisson_iso_pct": args.poisson_iso_pct,
         "alpha_raster_um": args.alpha_raster_um,
     }
@@ -792,8 +798,13 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
             for n in extras["info"].get("notes", []):
                 notes.append(n)
         if kind == "empty" or verts is None or len(verts) == 0:
+            # `notes` carries the reconstruction's own account of why nothing
+            # came back — `lumen_core`'s refusal, which now names the largest
+            # inscribed radius it measured against the one it needed ([P51]).
+            # Dropping them here threw that away at exactly the moment it was
+            # the only thing worth reading.
             return "failed", [f"the mesh has no vertices. "
-                              f"{_existing_mesh_note(mesh_out)}."]
+                              f"{_existing_mesh_note(mesh_out)}.", *notes]
         if faces is None or len(faces) == 0:
             m = params["mesh_all"]["method"]
             if m == METHOD_ALPHA3D:
@@ -805,7 +816,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                 hint = ("loosen the fill / orientation, or lower "
                         "min_component_um")
             return "failed", [f"{len(verts):,} vertices but 0 faces — {hint}. "
-                              f"{_existing_mesh_note(mesh_out)}."]
+                              f"{_existing_mesh_note(mesh_out)}.", *notes]
         n_surf = int(np.unique(faces).size)
         _p(f"mesh: {len(verts):,} verts ({n_surf:,} on the surface), "
            f"{len(faces):,} faces  [{timings['mesh_s']:.1f} s]")
@@ -1325,6 +1336,16 @@ def main() -> None:
     # physical one (CLAUDE.md, "headless equivalents of a slider").
     g.add_argument("--poisson-grid-um", type=float, default=None)
     g.add_argument("--poisson-smooth-um", type=float, default=None)
+    g.add_argument("--poisson-core-um", type=float, default=None,
+                   help="poisson: the lumen DETECTION scale in um, separate "
+                        "from the surface smoothing scale. A lumen is only "
+                        "seen where its inscribed radius exceeds 2x this, and "
+                        "only oriented where it reaches 4x somewhere, so this "
+                        "is a floor on the caliber the method can measure. "
+                        "0 (the default) follows --poisson-smooth-um, which is "
+                        "what every mesh on disk was built under. Lower it on "
+                        "a vessel with a narrow waist; see docs/ISSUES.md P51. "
+                        "No upper bound.")
     g.add_argument("--poisson-iso-pct", type=float, default=None)
     g.add_argument("--alpha-raster-um", type=float, default=None,
                    help="grid the alpha solid is rasterized onto for "

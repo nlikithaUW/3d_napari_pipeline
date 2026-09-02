@@ -122,7 +122,8 @@ true of the code and data on that date and may not be true now.
 | [P49](#p49) | The wall-shear layer painted every branch on one colour scale, but τ/µQ is comparable only within a branch | **S2** | **fixed** 2026-08-28 — 9× spread across three edges; the split is now solved, see [I10](#i10) |
 | [P50](#p50) | The histogram canvas can be squeezed to nothing, so every slider move printed a `constrained_layout` warning | S4 | **fixed** 2026-08-28 — minimum canvas size; log noise only |
 | [I10](#i10) | The junction flow split **is** recoverable — R̂ = ∫ds/Q̂ from the sections already solved | idea | **implemented** 2026-08-28 — supersedes part of [P49](#p49); validated against the analytic network |
-| [P50](#p50) | Tabs clipped anything past the window bottom; the Vessel mesh knobs rendered with no names | S3 | **fixed** 2026-08-28 — all tabs scroll; 48 controls labelled and tooltipped |
+| [P52](#p52) | Tabs clipped anything past the window bottom; the Vessel mesh knobs rendered with no names | S3 | **fixed** 2026-08-28 — all tabs scroll; 48 controls labelled and tooltipped |
+| [P51](#p51) | `poisson_smooth_um` was three scales in one knob; the detection one silently severed a tapering vessel | **S2** | **fixed** 2026-09-02 — 46% of `04step_003` was under the detection floor at the default; knob split, old behaviour is the default and rebuilds byte-identical |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -7320,7 +7321,7 @@ reconstruction at the crotch rather than the solver.
   that it *is* computed and was being hidden; working out what would make it
   trustworthy is what turned up the resistance route.
 
-## P50 — the tabs clip anything past the bottom of the window, and the Vessel mesh knobs rendered with no names
+## P52 — the tabs clip anything past the bottom of the window, and the Vessel mesh knobs rendered with no names
 
 | | |
 |---|---|
@@ -7374,3 +7375,118 @@ alone rather than changed on principle.
 **History**
 - 2026-08-28 — reported by the user ("the bottom buttons are getting clipped …
   not all sliders are labeled/explained") and fixed the same day.
+- 2026-09-02 — **renumbered P50 → P52.** This entry was opened as `P50` on the
+  same day as the histogram-canvas entry, which already held that ID, so two
+  issues shared one number and both anchored `#p50` — the table's link to this
+  one landed on the other. IDs are meant to be permanent, so the collision is
+  recorded here rather than quietly repaired: anything written between
+  2026-08-28 and 2026-09-02 citing "P50" for tab clipping means this entry.
+
+---
+
+## P51 — `poisson_smooth_um` was three scales in one knob, and the lumen-detection one silently severed a tapering vessel
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-09-02 (the knob is split); the parameter still has no validated value on any image |
+| **Severity** | **S2** — a caliber floor and a truncated centerline, both silent: the build reports success and the missing half of the vessel is not counted anywhere |
+| **Opened** | 2026-09-02 (user report: "it is capped for one thing and ends 100px before the cadherin ends") |
+| **Last verified** | 2026-09-02 (`V3b_CorrectSettings_40xWater_04step_003`, `cadherin_labels.npz` of 2026-08-24, min_size 12) |
+| **Resolved** | 2026-09-02 |
+| **Where** | `pipeline/vessel_poisson.py::lumen_core` (`deep = D > 2σ`, `keep = D >= 4σ`) and `::reconstruct`; the new knob reaches it through `vessel_mesh.build_mesh`, `batch_mesh --poisson-core-um` and the Vessel mesh tab |
+| **Affects** | every Poisson-family reconstruction on a vessel whose inscribed radius varies by more than ~2×, and therefore `caliber_um`, `area_um2`, the centerline extent, and every per-adhesion join that reads them. **No existing artifact changes** — the new knob defaults to the old behaviour |
+
+`smooth_um` was doing three unrelated jobs at once:
+
+1. the structure-tensor width in `sheet_normals` — how far to look to decide
+   which way the wall faces;
+2. the Gaussian applied to the splatted normal field before the DCT solve — the
+   **surface regularisation**, i.e. how lumpy the mesh is;
+3. in `lumen_core`, the scale that decides **what counts as lumen at all**:
+   candidates are the components of `D > 2σ`, kept only if they reach `D ≥ 4σ`
+   somewhere.
+
+Job 3 makes `2σ` a **floor on the inscribed radius the method can see**. Jobs 1
+and 2 want a large value on a noisy wall. On a vessel that tapers, job 3 wants a
+small one. They were the same number, so on `04step_003` no setting satisfied
+both.
+
+**The measurement.** That vessel's inscribed lumen radius (distance transform of
+the z-enclosed region, 0.325 µm voxels) runs **1.2 µm at the waist to 31.2 µm at
+the wide end**. What each σ then costs:
+
+| `poisson_smooth_um` | % of length below 2σ (invisible to the trace) | % below 4σ (cannot seed a core) |
+|---|---|---|
+| 2.99 | 25.3 % | 50.6 % |
+| 4 | 35.9 % | 63.7 % |
+| **5** (the default) | **46.4 %** | 67.7 % |
+| 6 | 50.7 % | 74.3 % |
+| 15 | — | 100 % — refuses outright, "no lumen core found" |
+
+At the default, **46 % of this vessel's length is below the detection floor.**
+The surface is severed at x ≈ 40–60 µm (a 10 µm bin with *zero* vertices), the
+material below x = 40 µm is left as an orphan stub, and the centerline
+consequently starts at x = 64.0 µm instead of 34.8 µm — a 29 µm retreat, ~90 px,
+which is what the user saw. The cadherin mask itself reaches x = 0.0 with 1,861
+voxels within 2 px of that face, so the wall is present and it is the
+reconstruction that stops.
+
+Nothing reports this. The build prints "31,239 verts … 435 µm of centerline" and
+exits 0. The only trace is `WARN: 1 centerline endpoint(s) stop inside the
+volume`, which reads as a lumen reconstructed short and not as half the vessel
+being under the detection scale.
+
+**The two settings the user had tried, measured against each other:**
+
+| | mean dihedral | caliber min | centerline x reaches | severed |
+|---|---|---|---|---|
+| smooth 2.99 | 3.02° | 5.8 µm | 34.8 µm | no |
+| smooth 5 | 2.47° | 3.9 µm | **64.0 µm** | **yes** |
+
+— i.e. exactly the trade the coupling forces: coverage or smoothness, never both.
+
+**Fix.** `core_um` is split out as the lumen **detection** scale
+(`poisson_core_um` in `build_mesh`, the tab and `batch_mesh`). `smooth_um` keeps
+jobs 1 and 2. **0 means "follow `smooth_um`"**, so the default reproduces every
+mesh on disk — verified byte-identical: rebuilding `04step_003` at the recorded
+parameters through the changed code produced `vessel_mesh.npz` and
+`vessel_graph.npz` that `cmp` reports identical to the pre-change build.
+
+Decoupled, the same image does better on **both** axes at once:
+
+| | mean dihedral | caliber min | centerline x reaches | severed |
+|---|---|---|---|---|
+| smooth 2.99, core = follow | 3.02° | 5.8 µm | 34.8 µm | no |
+| smooth 5, core = follow (old default) | 2.47° | 3.9 µm | 64.0 µm | yes |
+| **smooth 5, core 3** | **2.16°** | 7.8 µm | **15.3 µm** | no |
+| smooth 5, core 2.5 | 2.19° | 8.7 µm | 13.3 µm | no |
+| smooth 5, core 2 | 2.20° | 5.5 µm | 15.3 µm | no |
+
+At `core 3` both centerline endpoints are field-of-view crops, where before one
+was an interior terminus. **Read the caliber medians with care**: they fall
+(27.3 → 18.0 µm) not because the lumen shrank but because the trace now covers
+the narrow half that used to be invisible. That is the defect, restated as a
+number: the old median was taken over the wide part alone.
+
+**What this does not fix.** There is still no validated value for either knob on
+any image ([P26](#p26)), and `core_um` is now a second parameter with the same
+problem. It is also **not** the cause of the other failure on this image: the
+alpha complex plugs the waist independently of any of this — at `alpha3d_um` 15
+the alpha solid fills **81–85 %** of the waist lumen (measured by rasterizing at
+0.65 µm and asking what fraction of true lumen voxels came out solid), and
+bridging the wall's 8–10 µm gaps and keeping a 6.5 µm lumen open are
+requirements that cross. That has no fix in the current code and is not claimed
+to have one here.
+
+**Related:** [P24](#p24) (the z-containment the enclosure test rests on),
+[P26](#p26) (no validated parameter set), [P46](#p46) (the other place a
+sub-voxel wall position mattered).
+
+**History**
+- 2026-09-02 — user reported a build that first refused outright
+  (`poisson_smooth_um = 15`, needing an inscribed radius of 60 µm from a vessel
+  whose largest is 31.2 µm), then, lowered to 5, produced a capped surface
+  ending ~100 px inside the cadherin. Diagnosed as one knob carrying three
+  scales, split the same day. The refusal message now reports the largest
+  inscribed radius it actually measured against the radius it required, so the
+  next occurrence says whether *any* value could have passed.

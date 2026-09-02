@@ -471,17 +471,18 @@ LIVE_PARAMS = {
     METHOD_ALPHA2D: ("orientation", "alpha2d_um", "fill_lumen", "close_um",
                      "min_component_um"),
     METHOD_ALPHA3D: ("subsample_um", "alpha3d_um", "min_component_um"),
-    METHOD_POISSON: ("poisson_grid_um", "poisson_smooth_um", "poisson_iso_pct",
-                     "min_component_um"),
+    METHOD_POISSON: ("poisson_grid_um", "poisson_smooth_um", "poisson_core_um",
+                     "poisson_iso_pct", "min_component_um"),
     METHOD_ALPHA_POISSON: ("subsample_um", "alpha3d_um", "alpha_raster_um",
                            "poisson_grid_um", "poisson_smooth_um",
-                           "poisson_iso_pct", "min_component_um"),
+                           "poisson_core_um", "poisson_iso_pct",
+                           "min_component_um"),
 }
 
 ALL_PARAMS = ("method", "orientation", "n_bins", "r_smooth_bins", "alpha2d_um",
               "subsample_um", "alpha3d_um", "fill_lumen", "close_um",
               "min_component_um", "poisson_grid_um", "poisson_smooth_um",
-              "poisson_iso_pct", "alpha_raster_um")
+              "poisson_core_um", "poisson_iso_pct", "alpha_raster_um")
 
 
 def live_params(method: str) -> tuple[str, ...]:
@@ -504,6 +505,7 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
                min_component_um,
                poisson_grid_um=vessel_poisson.DEFAULT_GRID_UM,
                poisson_smooth_um=vessel_poisson.DEFAULT_SMOOTH_UM,
+               poisson_core_um=vessel_poisson.DEFAULT_CORE_UM,
                poisson_iso_pct=vessel_poisson.DEFAULT_ISO_PCT,
                alpha_raster_um=vessel_poisson.DEFAULT_GRID_UM,
                extras=None):
@@ -544,8 +546,10 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
 
     Not every argument is read — see `LIVE_PARAMS`. Alpha 3D ignores
     `orientation`, `n_bins`, `r_smooth_bins`, `alpha2d_um`, `fill_lumen` and
-    `close_um` entirely; Poisson ignores everything but its own three knobs and
-    `min_component_um`.
+    `close_um` entirely; Poisson ignores everything but its own four knobs and
+    `min_component_um`. ``poisson_core_um`` is the lumen **detection** scale;
+    0 means "follow ``poisson_smooth_um``", the behaviour every mesh on disk was
+    built under ([P51](docs/ISSUES.md#p51)).
     """
     # **Not binarised here.** `mask` may be a continuous wall field
     # (`denoise.local_contrast_score`, `docs/ISSUES.md` [P28]); only Poisson can
@@ -581,6 +585,7 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
         verts, faces, vals, normals, info = vessel_poisson.reconstruct(
             field, scale, grid_um=float(poisson_grid_um),
             smooth_um=float(poisson_smooth_um),
+            core_um=float(poisson_core_um),
             iso_pct=float(poisson_iso_pct),
             min_component_um=float(min_component_um),
             extras=lumen)
@@ -624,6 +629,7 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
             solid, (float(alpha_raster_um),) * 3,
             grid_um=float(poisson_grid_um),
             smooth_um=float(poisson_smooth_um),
+            core_um=float(poisson_core_um),
             iso_pct=float(poisson_iso_pct),
             min_component_um=float(min_component_um),
             extras=lumen)

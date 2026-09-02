@@ -69,18 +69,45 @@ def _is_oom(exc) -> bool:
     return status in (cudaErrorMemoryAllocation, cudaErrorAlreadyMapped)
 
 
-def _free_pools() -> None:
+def free_pools() -> None:
     """Drain the cupy memory pools, tolerating a sticky CUDA error.
 
-    Called from inside an exception handler. After a sticky error every
-    subsequent CUDA call — including these — raises, so an unguarded drain
-    replaces the original exception with a traceback pointing at the cleanup.
+    Two callers, for two different reasons.
+
+    ``_fallback`` calls it from inside an exception handler. After a sticky
+    CUDA error every subsequent CUDA call — including these — raises, so an
+    unguarded drain replaces the original exception with a traceback pointing
+    at the cleanup. Hence the bare ``except``.
+
+    The GUI calls it at the end of every step (``gui/widgets.py::with_after``).
+    cupy's default pool keeps every block it has ever allocated for the life of
+    the process, so a step that filtered a volume holds that VRAM forever —
+    against a napari canvas that has to allocate GL textures for the *next*
+    image out of the same device. A failed GL allocation is not reported to
+    Python; it surfaces as an ``access violation`` in a later ``glDrawArrays``
+    ([P48](docs/ISSUES.md#p48)). Draining is per *step*, never per op: within a
+    step the pool's reuse is the point of having one.
     """
     try:
         cp.get_default_memory_pool().free_all_blocks()
         cp.get_default_pinned_memory_pool().free_all_blocks()
     except Exception:
         pass
+
+
+def device_memory_mb():
+    """(free, total) device memory in MB, or ``None`` without a GPU.
+
+    Reported at image load so that a later GL fault has a number next to it
+    rather than a guess — see ``free_pools``.
+    """
+    if not HAS_GPU:
+        return None
+    try:
+        free_b, total_b = cp.cuda.runtime.memGetInfo()
+    except Exception:
+        return None
+    return free_b / 1e6, total_b / 1e6
 
 
 def _fallback(exc, what: str) -> None:
@@ -91,7 +118,7 @@ def _fallback(exc, what: str) -> None:
     """
     if not _is_oom(exc):
         raise exc
-    _free_pools()
+    free_pools()
     print(f"  gpu: {what} fell back to CPU ({type(exc).__name__}: {exc})",
           flush=True)
 

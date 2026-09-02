@@ -8,6 +8,7 @@ import numpy as np
 from magicgui.widgets import ComboBox, Container, FileEdit, PushButton
 from napari.qt.threading import thread_worker
 
+from .. import gpu
 from ..fret import compute_fret_volume, load_force_lut, resample_fret_outputs
 from ..io import fret_configured, load_params, load_stack, to_isotropic
 from .widgets import percentile_limits, pyramid_views, with_after
@@ -71,6 +72,20 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
     def _done(result):
         (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
          clover_native, ruby_native) = result
+
+        # Give the device its room back *before* the layer churn below, not
+        # after. `with_after` drains at the end of every step, but this handler
+        # is itself the step: it removes one image's worth of napari layers and
+        # allocates the next image's, and those GL textures come out of the same
+        # VRAM that cupy's pool is sitting on from the previous image's filters.
+        # A GL allocation that fails raises nothing here — it surfaces later as
+        # an `access violation` inside `glDrawArrays` ([P48]). The free/total
+        # line is printed so the next such fault has a number beside it.
+        gpu.free_pools()
+        mem = gpu.device_memory_mb()
+        if mem is not None:
+            print(f"  vram  {mem[0]:.0f} / {mem[1]:.0f} MB free "
+                  f"(after draining the cupy pools)", flush=True)
         print(f"  raw   shape={raw_shape} voxel(z,y,x)={raw_voxel} µm "
               f"({raw_nbytes/1e6:.1f} MB)", flush=True)
         print(f"  iso   shape={stack.data.shape} dtype={stack.data.dtype} "

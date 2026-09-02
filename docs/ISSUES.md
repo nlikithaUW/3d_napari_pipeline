@@ -116,8 +116,13 @@ true of the code and data on that date and may not be true now.
 | [I09](#i09) | RF inference is dominated by `_eigh3x3` on the CPU (~52%) | idea | open — **~2× available, exact**; profiled, three proposals rejected on measurement |
 | [P44](#p44) | The RF's training annotations were never saved; the model cannot be retrained | **S2** | open — **blocks [P03](#p03)'s hypothesis and its fix**; escalates [H02](#h02) |
 | [P45](#p45) | `batch_mesh` crashed on every invocation — two names used, never imported | S3 | **fixed** 2026-08-26 — every mesh artifact since `fa8d895` came from the GUI |
-| [P46](#p46) | A digitized wall is longer than the wall it stands for, so absolute τ reads ~5% low | S3 | open — **quantified, common-mode**; cancels in the within-segment profile, not in Pa |
+| [P46](#p46) | A digitized wall is longer than the wall it stands for, so absolute τ reads ~5% low | S3 | **fixed** 2026-08-28 — sections cut from χ, not from the binary lumen; force balance 1.041 → **0.996** on real sections |
 | [P47](#p47) | Emptying the cell-mesh slice `Shapes` layer poisons its mesh with NaN and faults the GL draw | S3 | **fixed** 2026-08-26 — a second, unguarded `add_surface` fixed in the same change |
+| [P48](#p48) | cupy's pool holds VRAM for the life of the process, so loading a second image faults the GL draw | S3 | **mitigated** 2026-08-28 — cause not confirmed; the pools are now drained per step |
+| [P49](#p49) | The wall-shear layer painted every branch on one colour scale, but τ/µQ is comparable only within a branch | **S2** | **fixed** 2026-08-28 — 9× spread across three edges; the split is now solved, see [I10](#i10) |
+| [P50](#p50) | The histogram canvas can be squeezed to nothing, so every slider move printed a `constrained_layout` warning | S4 | **fixed** 2026-08-28 — minimum canvas size; log noise only |
+| [I10](#i10) | The junction flow split **is** recoverable — R̂ = ∫ds/Q̂ from the sections already solved | idea | **implemented** 2026-08-28 — supersedes part of [P49](#p49); validated against the analytic network |
+| [P50](#p50) | Tabs clipped anything past the window bottom; the Vessel mesh knobs rendered with no names | S3 | **fixed** 2026-08-28 — all tabs scroll; 48 controls labelled and tooltipped |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -6749,12 +6754,12 @@ rebuild does not reproduce them. Image 6's saved untagged graph is one edge of
 
 | | |
 |---|---|
-| **Status** | open — **quantified, common-mode, not corrected** |
+| **Status** | **fixed** 2026-08-28 — the section is now cut from χ and the wall goes where the field says |
 | **Severity** | S3 |
 | **Opened** | 2026-08-26 |
 | **Last verified** | 2026-08-26 (analytic disc and rectangle, `docs/scratch/shear/solver_check.py`) |
-| **Resolved** | — |
-| **Where** | `pipeline/shear.py` — `section_contour`, `wall_profile`; inherited by `lumen_graph.cross_section`'s `perim_um` |
+| **Resolved** | 2026-08-28 |
+| **Where** | `pipeline/shear.py` — `solve_shape_function`, `section_contour`, `wall_profile`; `lumen_graph.cross_section`'s `field=`/`level=` |
 | **Affects** | `perim_um`, `hydraulic_diam_um`, `tau_hat_*`, and any absolute τ in Pa. **Not** `tau_rel_1_um3` read as a within-segment profile |
 
 The shear solve runs on a **pixelated** cross-section, and a pixelated boundary
@@ -6770,7 +6775,9 @@ rectangle, whose walls are axis-aligned and therefore not digitized at all,
 `Q̂` lands within 0.08% and the wall profile within 1% — which is how we know
 this is the boundary representation and not the solver.
 
-**Why it is left uncorrected.** It is common-mode: it multiplies every section by
+**Why it was left uncorrected** (until 2026-08-28 — the reasoning below is what
+the entry argued while it was open, and the "real fix" paragraph after it is the
+one that was taken). It is common-mode: it multiplies every section by
 roughly the same factor, so it cancels in the within-segment τ ratio, and by
 [DIRECTION](DIRECTION.md) §4.1 the within-segment profile is where the entire
 spatial hypothesis lives. It does **not** cancel in an absolute Pa number, and
@@ -6781,7 +6788,7 @@ has; picking between them is not a decision to make by eye
 ([P26](#p26)).
 
 **The real fix, if it is ever worth it,** is to stop handing the solve a binary
-mask: `vessel_poisson` already produces a smooth indicator χ, and cutting the
+mask — *this is what was done; see the fix section below*: `vessel_poisson` already produces a smooth indicator χ, and cutting the
 section from χ with linear interpolation would give a sub-voxel wall with no
 digitization bias at all. That changes `cross_section`'s input contract, and it
 would have to change it for the area and the extents too, or the section the
@@ -6794,7 +6801,68 @@ recorded per section as `force_balance` and needs no ground truth. On image 6 it
 runs 0.993–1.077 over 60 usable sections — i.e. the residual is this bias and
 nothing larger is hiding under it.
 
-**Related:** [P24](#p24), [P26](#p26).
+### Fixed 2026-08-28 — three changes, and only all three together work
+
+The fix is the one this entry proposed: stop handing the solve a binary mask.
+`lumen_graph.cross_section` now samples **χ** on the cut plane with linear
+interpolation and thresholds *that*, so the section carries the region and the
+smooth field whose level curve is its true wall — the same curve the displayed
+mesh is made of, since marching cubes interpolates the same χ at the same
+level. It needed three changes, and the order they were found in is worth
+recording because two of them look optional and are not:
+
+1. **The contour comes off the field** (`section_contour(level_field=)`). On
+   the disc the perimeter error goes 4.4% → **0.03%**, and stops growing with
+   resolution.
+2. **The solve stops where the field says** (`solve_shape_function`,
+   Shortley-Weller with the crossing fraction θ per direction, instead of a
+   fixed half pixel). Doing (1) *without* this made τ **25% low** — the
+   perimeter then described the real wall while û was still confined by the
+   staircase, so the two were solving different ducts. Q̂ goes to **0.00%**.
+3. **The τ fit measures distance to the contour, not to its nearest vertex**
+   (`_dist_to_segments`). Handed an exact analytic û, the old fit read
+   **+10.8%** on the disc: a pixel 0.1 px from the wall but half a vertex
+   spacing along it recorded 3-5× too far, and those near-wall pixels are
+   exactly what sets the linear coefficient.
+
+With all three, on the analytic disc (exact answers, not this repo's numbers):
+
+| step | perim %err | τ %err | Q̂ %err | force balance | τ spread |
+|---|---|---|---|---|---|
+| 2.00 | 0.03 | 0.79 | 0.07 | 1.0219 | 0.9% |
+| 1.00 | 0.01 | 0.42 | 0.01 | 1.0107 | 0.6% |
+| 0.50 | 0.00 | 0.20 | 0.00 | 1.0049 | 0.3% |
+| 0.25 | 0.00 | 0.10 | 0.00 | 1.0016 | 0.2% |
+
+It **converges** — τ halves with the step — where the binary version did not.
+And the spurious circumferential scatter on a shape that has none collapses
+from **14-24% to 0.2-0.9%**, which matters more than the mean: §7.4 reads the
+variation of τ *around* a section, and most of what was there was digitization.
+
+**On the real sections** (`04step_003`, 88 sections, same mesh, same graph):
+perimeter **−11.2%**, `hydraulic_diam_um` **+11.3%**, τ̂ **+6.2%**, τ/µQ
+**+10.6%**, area −1.3%, extents −0.3 to −0.9%. The staircase cost more here
+than on a disc because the measured sections are more convoluted than a circle.
+The check that carries this without any ground truth is the force balance:
+median **1.041 → 0.9958**, p10-p90 tightening from 1.028-1.060 to 0.991-1.005.
+
+**A prediction that was wrong, recorded because it was made out loud.** The
+axial banding in the shear layer was expected to be mostly digitization, on the
+grounds that an oblique plane re-dices a voxel grid. It is not: along edge 2 the
+consecutive-section jump in Q̂ is 9.4% before and 9.3% after, and in τ/µQ 9.1%
+→ 8.2%. The banding is real section-to-section variation in the reconstructed
+lumen, not an artifact of the cut, and whatever explains it is still open.
+
+Cost: the graph step goes 2.7 s → 4.4 s on this image.
+
+**Default changed.** `build_graph(section_from_field=True)`. Every shear,
+perimeter and D_h number produced before 2026-08-28 is on the old wall and is
+not comparable with one produced after; `section_from_field=False` reproduces
+the old behaviour exactly. `vessel_recon.json` records which was used.
+
+**Related:** [P24](#p24), [P26](#p26), [P49](#p49) (whose junction-zone and
+per-edge findings are unaffected — they are about which sections to believe and
+how to scale them, not about where the wall is).
 
 **History**
 - 2026-08-26 — opened when `solver_check.py` measured it. Two τ estimators were
@@ -6802,6 +6870,12 @@ nothing larger is hiding under it.
   wrong way; first-layer closed form, ±28% scatter on a digitized curve); the
   near-wall quadratic fit that shipped is what left this as the only bias
   standing.
+- 2026-08-28 — **fixed**, from a user asking why the vessel mesh was not being
+  used for the shear. It already was, in the sense that the mesh and the
+  sections are the same level set of the same χ; what the sections were not
+  using was χ's sub-voxel precision. Closing it turned up two further biases
+  (the solve's wall position, the fit's distance measure) that the original
+  entry had not separated, and one prediction about the banding that was wrong.
 
 ---
 
@@ -6944,3 +7018,359 @@ in the layer model, upstream of vispy, and needs no GL at all to observe.
   `VectorsVisual` is a single `Mesh`, not a `Compound` of five, and its
   placeholder fires only when its own data is empty. It was dropped because the
   overlay is not needed, and no layer is safer than a safe one.
+- 2026-08-28 — **a further `access violation` is *not* this entry.** A crash on
+  a Vessel-Mesh-only session (cadherin, mesh, shear, then load a second image)
+  faulted in `glDrawArrays(GL_TRIANGLE_FAN, 0, 4)`. Neither the tab nor the
+  visual is P47's: the deleted overlay is gone from the code (only `loader.py`'s
+  comment names it), and a 4-vertex fan is vispy's own `Widget._picking_mesh`.
+  Recorded as [P48](#p48). What P47 contributes to it is the method, not the
+  mechanism — read the GL command before theorising about the data.
+
+
+## P48 — cupy's memory pool holds VRAM for the life of the process, and a later GL allocation faults the draw
+
+| | |
+|---|---|
+| **Status** | **mitigated** 2026-08-28 — the cause is *not* confirmed |
+| **Severity** | S3 |
+| **Opened** | 2026-08-28 |
+| **Last verified** | 2026-08-28 (user-reported traceback; one occurrence) |
+| **Where** | `pipeline/gpu.py::free_pools`, `pipeline/gui/widgets.py::with_after`, `pipeline/gui/loader.py::_done` |
+| **Affects** | the napari GUI only — it faults a draw. **No exported number is wrong because of this.** |
+
+Loading a second image after a full Vessel Mesh session — cadherin filter,
+vessel mesh, shear — crashed the draw:
+
+    OSError: exception: access violation reading 0x000000000000002C
+
+**What the traceback identifies, with certainty.** The faulting draw is
+`DRAW program 7, 'triangle_fan', (0, 4)`, under `ViewBox -> CompoundVisual.draw
+-> MeshVisual.draw`. Four vertices in one fan, `cull_face` and `depth_test`
+disabled, is vispy's `Widget._picking_mesh` (`vispy/scene/widgets/widget.py:52`
+— the only `triangle_fan` in vispy or napari outside `Rectangle`/`Ellipse`). It
+is drawn only inside `SceneCanvas._render_picking`, which is where the
+traceback is (`crop=(611.7, 1115.7, 1, 1)`, the 1×1 read under the cursor).
+`_render_picking` is reached from `_process_mouse_event -> visual_at` on a
+`mouse_press` or `mouse_wheel`; **napari never calls `visual_at` itself**, so
+the trigger is a click or a scroll on the canvas after the load, and the frame
+that faults draws nothing of ours at all.
+
+So this is not [P47](#p47) recurring, and not a geometry defect:
+`gui/widgets.py::finite_surface` cannot help, and neither can sanitizing
+anything else we hand a layer. Two innocent built-in visuals now — P47's
+3-vertex `Shapes` placeholder and this 4-vertex picking quad, in two different
+tabs — say the **GL context is already bad when the frame starts**, and the
+fault lands on whatever draws next.
+
+**The hypothesis, unconfirmed.** `gpu.py` drained the cupy memory pools only
+inside the OOM handler (`_fallback`). cupy's default pool otherwise keeps every
+block it has ever allocated for the life of the process, so the cadherin
+windowed filters' VRAM stays held. Loading a second image then allocates a
+second image's worth of GL textures — 5 channels × pyramid levels, plus three
+mask layers — out of the same device, and the picking pass in this traceback
+creates a fresh FBO with 1731×1192 colour and depth renderbuffers immediately
+before it faults. **A failed GL allocation reports nothing to Python**; it
+surfaces as exactly this fault on a later draw.
+
+**Mitigation.** `_free_pools` is now public `gpu.free_pools`, and is called:
+
+- from `gui/widgets.py::with_after`, the one wrapper every worker completion in
+  the app passes through (49 call sites) — so the drain is once per **step**,
+  never per op, and it cannot drift between tabs;
+- from `loader.py::_done` *before* the layer churn, since that handler is itself
+  the step that frees one image's GL textures and allocates the next image's.
+
+`_done` also prints `gpu.device_memory_mb()` as a free/total line, so a
+recurrence arrives with a number beside it.
+
+**This is a mitigation, not a fix, and the honest confidence is low.** The
+reading of the faulting draw is solid; the *cause* is one of two candidates and
+was not measured before changing the code, at the user's request to fix it
+directly. The competing candidate is a stale GL buffer left by the wholesale
+`viewer.layers.remove` loop in `loader.py` — a vispy object-deletion race —
+which this change does nothing about. If the crash recurs:
+
+| next probe | tells you |
+|---|---|
+| `nvidia-smi -l 1` across the same sequence, plus the new vram line | whether the device was ever near full |
+| the same sequence at `pyramid_levels=1` | halves the GL texture footprint with the compute untouched; if the crash goes, it is memory |
+| load a second image with **no** prior GPU work, then click | whether the layer churn alone suffices, i.e. the deletion race |
+
+**Related:** [P47](#p47) (the same `OSError` on a different built-in visual, and
+where the method of reading the GL command comes from).
+
+**History**
+- 2026-08-28 — opened from a user-reported traceback and mitigated the same day.
+  Faulting visual identified from the GLIR command; cause hypothesised, not
+  measured. Pool drain added at the two choke points above.
+
+## P49 — the wall-shear surface painted every branch on one colour scale, but τ/µQ is comparable only within one branch
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-28 (display and record); the underlying flow split remains unknowable from geometry |
+| **Severity** | S2 — a picture that invited a comparison the quantity cannot support, at the one place the program cares most about |
+| **Opened** | 2026-08-28 |
+| **Last verified** | 2026-08-28 (`V3b_..._04step_003`, tag `shear`, 27,682 wall points over 88 sections) |
+| **Resolved** | 2026-08-28 |
+| **Where** | `pipeline/gui/vessel_mesh.py::_show_shear`; `pipeline/batch_mesh.py`'s `vessel_shear.npz` record; `pipeline/lumen_graph.py::build_graph`'s `extras["wall"]` |
+| **Affects** | the `Vessel wall shear` layer and `vessel_recon.json`'s `tau_rel_1_um3_median`. **Not** the solve — `pipeline/shear.py` is untouched and its numbers are unchanged |
+
+`tau_rel_1_um3` is τ̂(θ)/Q̂, and it is readable without a flow rate only because
+**Q is conserved along an unbranched segment** ([DIRECTION](DIRECTION.md) §4.1).
+At a Y that premise fails: the split between daughters rides on h³ and is not
+recoverable from geometry (§4.2). So each edge of the graph carries its **own**
+unknown µQ, and the quantity is comparable within an edge and not across one.
+
+The layer nevertheless drew all edges on a single turbo scale with shared 2–98%
+contrast limits, and the JSON recorded one pooled `tau_rel_1_um3_median` over
+all of them. On `04step_003` the three edges' medians are **8.91e-05, 5.33e-05
+and 1.01e-05** — a **9× spread** that is not a measurement of anything, since
+each is defined up to a different constant. The practical effect is worse than
+"uninterpretable": edge 2 carries 20,396 of the 26,704 drawn points and its
+whole dynamic range is compressed into the bottom ~11% of the colour bar by two
+short edges whose scale it has no relation to. The vessel looked flat and the
+branches looked hot.
+
+**This is not the solver.** `force_balance` is 1.02–1.06 across these sections
+and the mean τ̂ reproduces A/P to 0.1% on an analytic disc (14.29 against
+14.27), which is the identity ∮τ dP = A demands. The defect is entirely in how
+the field was displayed and recorded.
+
+**Two things that turned up while confirming it**, both worth keeping in mind
+before reading the layer:
+
+- **τ̂ and τ/µQ move in opposite directions at a constriction, and only one of
+  them is the physical comparison.** `tau_hat_mean_um` **is** A/P by force
+  balance, i.e. it is held at constant *pressure gradient*: on the sections
+  within 25 µm of this image's junction it reads **8.5 against 14.4** elsewhere
+  — low, because a narrow duct passes less flow at fixed dp/ds. `tau_rel_1_um3`
+  holds *flow* fixed and reads **146e-6 against 32e-6** — high, which is the
+  answer a constriction should give. A viewer on τ̂ sees the crotch go dark and
+  reasonably concludes the solve is wrong.
+- **The axial banding in the layer is Q̂, not shear.** Along edge 2, consecutive
+  sections differ by a median of 2.6% in τ̂ (p90 7.5%) but **9.1% in τ/µQ**
+  (p90 23.8%, max 46%), because Q̂ itself jumps 9.4% (p90 29.7%, max 98%) as the
+  oblique cut re-dices a pixelated lumen and Q̂ ∝ roughly A². The per-section
+  scalar divisor is what the eye reads as stripes.
+
+**Fix.** Display-only, plus the record; no number in `shear.py` moved.
+
+- The layer normalises **per edge** by default — each edge divided by its own
+  median, so colour means "relative to this edge" — and prints the per-edge
+  medians in the raw unit every time, so the absolute scale is not lost, only
+  kept off the colour bar. Unticking restores the raw scale *and prints the
+  warning*, rather than silently going back to the misleading picture.
+- A `hide_junction_ratio` control (default **2.0** local calibers, the same
+  form as `crop_ratio` and for [P23](#p23)'s reason) greys the zone where the
+  per-section fully developed duct model does not apply at all — no flow split,
+  no inertia, no entrance length. On this image it hides 3,062 points and takes
+  vertex coverage 88% → 82%; the 21 µm stub at the junction disappears
+  entirely, which is correct, since every one of its sections is within two
+  calibers of the Y.
+- `vessel_recon.json` records `tau_rel_1_um3_median_by_edge` — **one entry per
+  edge and no pooled figure**. A reader who wants one number for the vessel has
+  to say which edge, which is the honest state of the quantity.
+- `extras["wall"]` (and therefore `vessel_shear.npz`) now carries
+  `dist_junction_um` and `caliber_um` per wall point, so the file stands on its
+  own. Reading them out of `vessel_graph.npz` instead would have worked right
+  up until someone loaded a shear file without its graph beside it — and the
+  same per-adhesion join that will read this file needs the same two columns to
+  know which rows it may compare.
+- The rebuild is **byte-identical** on every pre-existing array (verified on
+  `04step_003`: `tau_hat_um`, `tau_rel_1_um3`, `q_hat_um4`, `seg_len_um`,
+  `points_zyx_um`, all flags), so this adds two columns and changes none.
+
+**What is not fixed here.** The flow split itself — see the correction below.
+
+> **Superseded in part, 2026-08-28 (same day).** This entry originally said the
+> split "stays unknown until someone supplies a perfusion rate", on the strength
+> of §4.2's "rides on h³ and is not recoverable". That is true of the closed
+> form and **false of the vessel**: the per-section solve already gives Q̂ at
+> every station, so R̂ = ∫ds/Q̂ is computable and Kirchhoff gives the split. See
+> [I10](#i10). Per-edge normalisation is still the honest fallback when there is
+> no graph beside the shear file, and it is still what the tab does then — but
+> it is no longer the best available answer, and the layer now defaults to the
+> solved split.
+
+**Related:** [P46](#p46) (the other τ bias, and common-mode where this one is
+not), [P23](#p23) (why the new knob is a ratio), [P24](#p24).
+
+**History**
+- 2026-08-28 — opened and fixed the same day. Found while chasing a user report
+  of "big holes and weird bands" in the shear layer. The holes turned out to be
+  a separate thing — one napari control dropping the `section_clipped` and
+  `censored` flags together, split into two controls in the same session, since
+  4 of 88 sections are clipped against 23 censored and no section is both. The
+  bands were Q̂. This is what was underneath both.
+
+## P50 — The histogram canvas collapses in a crowded tab, and every redraw prints a `constrained_layout` warning
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-28 |
+| **Severity** | S4 — log noise; nothing computed or exported is affected |
+| **Opened** | 2026-08-28 |
+| **Last verified** | 2026-08-28 (measured, below) |
+| **Where** | `pipeline/gui/widgets.py::Histogram` |
+| **Affects** | the console log only |
+
+The GUI repeatedly printed:
+
+    constrained_layout not applied because axes sizes collapsed to zero.
+    Try making figure larger or Axes decorations smaller.
+
+`view.py::_wrap` stacks a tab's controls and its `Histogram.canvas` in one
+`QVBoxLayout`. The canvas had **no minimum size**, so on a tab whose control
+stack is tall — Vessel Mesh most of all, and it grew again on 2026-08-28 — Qt
+gives the canvas whatever is left, which can be a few pixels. `Histogram.update`
+is wired to the size sliders through `debounce`, so the warning printed on every
+slider move and buried the pipeline's own output.
+
+Measured threshold, at 100 dpi, by shrinking the figure until the warning stops:
+
+| decorations | clean at or above |
+|---|---|
+| default 10 pt labels (before) | 72 px of figure height |
+| 7–9 pt labels (after) | 62 px |
+
+**Fix.** `self.canvas.setMinimumSize(180, 170)` in `Histogram.__init__`, so the
+layout cannot squeeze it below roughly 2.4× the threshold, plus smaller tick,
+label and title fonts — which suit a dock panel anyway and buy the extra 10 px
+of margin. `tick_params` is re-applied inside `update` because `ax.clear()`
+resets it. Verified: a `canvas.resize(300, 60)` now yields a 3.0 × 1.7 in
+figure and zero warnings, where the unclamped canvas gave 0.6 in and two
+warnings per draw.
+
+**History**
+- 2026-08-28 — reported by the user while working on [P48](#p48); fixed the same
+  day.
+
+## I10 — the flow split at a junction is recoverable after all, from the resistances the section solve already computes
+
+**Opened** 2026-08-28 · **Status** implemented 2026-08-28 · **Relates to**
+[P49](#p49), [P46](#p46) · **Where** `pipeline/shear.py::edge_resistance`,
+`::flow_split`; consumed by the Vessel Mesh tab's `edge scaling` control and
+recorded by `batch_mesh` as `flow` in `vessel_recon.json`
+
+[DIRECTION](DIRECTION.md) §4.2 says the split between two daughters "rides on
+h³ and is not recoverable" — and [P49](#p49) was built around accepting that,
+normalising each edge by its own median because each carried its own unknown
+µQ. **That is true of the closed form and false of the vessel.** You cannot read
+the split off a caliber, but you do not have to: `dp/ds = -µQ/Q̂(s)` means the
+resistance of a branch is
+
+    R̂ = ∫ ds / Q̂(s)          [µm⁻³, per unit viscosity]
+
+and `Q̂` is already solved at every station. R̂ is an integral over numbers this
+project has had since §4.3 landed. Kirchhoff on the three edges then gives the
+split, and the only thing left unknown is **one global µQ for the whole vessel**
+instead of one per edge — which is exactly what P49's per-edge normalisation was
+papering over.
+
+On `V3b_..._04step_003` (R̂ in µm⁻³): edge 0 (the 21 µm stub) **4.91e-04**,
+edge 1 (128 µm) **1.09e-03**, edge 2 (283 µm) **3.35e-03**. With the widest
+opening as inlet and the terminus treated as open, the split is
+**0.69 / 0.31**. Applying it collapses the per-edge median spread from **9×**
+(8.91e-05 : 9.89e-05 : 1.41e-05 — three different scales, no physical content)
+to **4.4×** (6.15e-05 : 3.07e-05 : 1.41e-05) — and that residual spread now
+*means* something: the narrow daughters carry more shear than the wide parent,
+which is what a constriction should do.
+
+**Validated against the analytic network, not against itself.** For a parent in
+series with two parallel daughters the answer is `Q₁/Q₂ = R₂/R₁` exactly;
+`flow_split` reproduces it to machine precision at three resistance ratios, and
+a non-open endpoint correctly carries zero. The Kirchhoff residual at every free
+node is reported per solve (2e-16 here).
+
+**Three assumptions, all of them the caller's and none inferable from an image.**
+
+1. **All outlets sit at one pressure.** A statement about the rig — the
+   daughters drain to a common reservoir. If they do not, the ratios change and
+   nothing here would notice.
+2. **Which opening is the inlet.** Not in the data. The tab offers the openings
+   and defaults to the widest; `batch_mesh` refuses to pick and records **every**
+   scenario (5 on this image), the same doctrine as `mesh_score` — scoring is
+   not choosing.
+3. **Whether a terminus endpoint is an opening or a dead end.** §5.1 expects no
+   real terminus in this dataset, so open is the default — but on this image it
+   is the difference between the stub taking **69%** of the flow and taking
+   **none**, so both are recorded.
+
+**The weakness to watch is `span_frac`, and it is not small.** The integrand is
+1/Q̂, so the *narrowest* station dominates R̂ — and the narrowest station is also
+the one most likely to be clipped. Resistances are therefore integrated over
+**all** finite sections rather than over the display-filtered ones, and the
+fraction of each edge the sections actually span travels beside the number
+(95–99% here). Drop the clipped and censored sections instead and edge 0's
+resistance becomes undefined outright and edge 1 falls 11% on 62% coverage;
+that is the size of the sensitivity, and it is why the fraction is reported and
+not folded in.
+
+**What this does not do.** It does not make the *junction* shear right — the
+per-section solve is still fully developed duct flow and still knows nothing of
+a dividing streamline (see [P49](#p49)'s junction zone). It puts the branches on
+one scale; it does not model the crotch. That needs a 3D Stokes solve on the
+lumen, which is a different piece of work and whose limiting factor would be the
+reconstruction at the crotch rather than the solver.
+
+**History**
+- 2026-08-28 — proposed and implemented the same day, prompted by the user
+  asking why shear is not computed in the junction itself. The honest answer was
+  that it *is* computed and was being hidden; working out what would make it
+  trustworthy is what turned up the resistance route.
+
+## P50 — the tabs clip anything past the bottom of the window, and the Vessel mesh knobs rendered with no names
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-08-28 |
+| **Severity** | S3 — no wrong number, but controls that cannot be reached or identified |
+| **Opened** | 2026-08-28 (user report) |
+| **Last verified** | 2026-08-28 |
+| **Where** | `pipeline/view.py::_wrap`; `pipeline/gui/vessel_mesh.py`'s outer `Container` |
+| **Affects** | the napari app only. No headless path, no artifact |
+
+Two unrelated defects in the same tab, both reported together.
+
+**The bottom was unreachable.** `_wrap` stacked each tab's widgets in a plain
+`QVBoxLayout` inside a dock widget. A dock is only as tall as the napari window,
+and a Qt layout does not shrink its children to fit — it clips whatever is past
+the edge, with no scrollbar and no indication that anything is missing. The
+Vessel mesh tab's save/load buttons were off the bottom. Measured heights of the
+ten tabs' contents: **Vessel mesh 1654 px**, Adhesion RF 961, Nuclei 854,
+Measure 831, and the rest under 700 — so this was going to happen to three tabs
+on a short screen and had already happened to one.
+
+Fixed in `_wrap`, so **every** tab scrolls rather than the one that overflowed:
+which tab overflows depends on the screen and on how many controls a tab has
+grown. Horizontal scrolling is off and the inner widget is resizable, so the
+controls still track the dock's width and only the vertical axis scrolls.
+
+**The knobs had no names on them.** The Vessel mesh tab's outer `Container` was
+built with `labels=False`, which tells magicgui to draw no name beside a widget.
+Every `label=` in the tab was correct and none of them reached the screen, so
+eleven sliders and combo boxes — `spur_ratio`, `crop_ratio`, `section_span`,
+`curvature_radius_um` and the rest — appeared as bare unlabelled controls.
+Checkboxes were unaffected, their text being drawn inside the widget, which is
+why this was easy to miss.
+
+Labels are now on for that tab, and **every one of its 48 controls carries a
+tooltip** — the 14 build knobs (which had none at all), the graph and shear
+knobs, the buttons and the file paths. The tooltips say what a knob does *and*
+what going wrong with it costs, because several of these have a documented
+failure mode rather than a smooth trade-off: `section_span` below the section's
+aspect ratio clips every section it measures; `curvature_radius_um` has no
+settled value on the interpolating meshes at all ([P24](#p24)); the two shear
+measures move in **opposite** directions at a constriction ([P49](#p49)).
+
+**The other tabs were checked and are not affected in the same way.** Six more
+use `labels=False`, but between them they hide only five labels, all of them
+file paths sitting directly beside their own Save/Load buttons
+(`nuclei` ×3, `cadherin`, `measure`). Vessel mesh was the outlier because it is
+the only tab with eleven named non-checkbox controls at its top level. Left
+alone rather than changed on principle.
+
+**History**
+- 2026-08-28 — reported by the user ("the bottom buttons are getting clipped …
+  not all sliders are labeled/explained") and fixed the same day.

@@ -365,9 +365,14 @@ def lumen_core(occ: np.ndarray, h_um: float, smooth_um: float):
         # them. Their union is what gets used, which is the same answer either
         # way.
         info["notes"].append(
-            f"NOTE: the lumen came out as {len(kept)} z-enclosed fragments "
-            f"(one lumen, or two past a Y junction, cut wherever the wall is "
-            f"missing from a z column). Their union is used.")
+            f"NOTE: the lumen **core** came out as {len(kept)} fragments, cut "
+            f"wherever the wall drops out of a z column. This is a count of "
+            f"seed fragments, not of lumens: the core only picks which "
+            f"super-level components are lumen and which way the normals "
+            f"face. Their union is used, and the lumen itself is labelled "
+            f"with plain 3D connectivity and is not fragmented by this — see "
+            f"`lumen_graph.lumen_volume`'s `n_components_kept` for the number "
+            f"of lumen components, which is the one that matters.")
     return core, info
 
 

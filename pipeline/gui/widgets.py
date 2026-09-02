@@ -11,6 +11,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from qtpy.QtCore import QTimer
 
+from .. import gpu
+
 
 def call_all(*fns, label: str = "step") -> None:
     """Call each non-None callable in order; a failure is reported, not raised.
@@ -39,6 +41,11 @@ def with_after(handler, after=None, label: str = "step"):
     raises, then calls ``after`` from a ``finally``.
 
     Handlers wrapped here must NOT call ``after`` themselves.
+
+    Every worker completion in the app goes through here, which makes it the one
+    place that can drain the cupy memory pools once per *step* — see
+    ``gpu.free_pools``. It runs before ``after`` so a chained next step, and any
+    napari layer the handler just added, face a device with the room back.
     """
     @wraps(handler)
     def _wrapped(*args, **kwargs):
@@ -48,6 +55,7 @@ def with_after(handler, after=None, label: str = "step"):
             print(f"{label}: handler failed —\n{traceback.format_exc()}",
                   flush=True)
         finally:
+            gpu.free_pools()
             call_all(after, label=label)
     return _wrapped
 
@@ -195,13 +203,27 @@ def debounce(ms: int):
 class Histogram:
     """Small matplotlib canvas with one redraw method for log10 size hists."""
 
+    # Minimum canvas size, in px. Each tab stacks its controls and this canvas
+    # in one QVBoxLayout (`view.py::_wrap`), so a tall control stack squeezes
+    # the canvas — with no minimum it collapses to a few px and matplotlib
+    # prints "constrained_layout not applied because axes sizes collapsed to
+    # zero" on *every* redraw, which is once per slider move via `debounce`.
+    # The floor is the decorations (title, both axis labels, two sets of ticks)
+    # plus room for the bars, at the reduced font sizes set below.
+    MIN_W, MIN_H = 180, 170
+
     def __init__(self, title: str, xlabel: str, color: str = "steelblue"):
         self._title = title
         self._xlabel = xlabel
         self._color = color
         self.fig = Figure(figsize=(4, 2.4), constrained_layout=True)
         self.ax = self.fig.add_subplot(111)
+        # Smaller decorations for the same reason: this canvas lives in a dock
+        # panel, not on a page, and the default 10 pt labels are most of the
+        # height budget.
+        self.ax.tick_params(labelsize=7)
         self.canvas = FigureCanvas(self.fig)
+        self.canvas.setMinimumSize(self.MIN_W, self.MIN_H)
         self.clear()
 
     def clear(self) -> None:
@@ -217,8 +239,9 @@ class Histogram:
     ) -> None:
         ax = self.ax
         ax.clear()
-        ax.set_xlabel(self._xlabel)
-        ax.set_ylabel("count")
+        ax.tick_params(labelsize=7)          # `clear` resets tick params
+        ax.set_xlabel(self._xlabel, fontsize=8)
+        ax.set_ylabel("count", fontsize=8)
         v = np.asarray(values) if values is not None else np.array([])
         if log:
             v = v[np.isfinite(v) & (v > 0)]
@@ -230,5 +253,5 @@ class Histogram:
                 ax.axvline(x, color="crimson", lw=2, label=threshold_label or "")
                 if threshold_label:
                     ax.legend(loc="upper right", fontsize=8)
-        ax.set_title(self._title)
+        ax.set_title(self._title, fontsize=9)
         self.canvas.draw_idle()

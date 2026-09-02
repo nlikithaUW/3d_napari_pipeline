@@ -11,9 +11,11 @@ import sys
 from pathlib import Path
 
 import napari
+from qtpy.QtCore import Qt
 from napari.settings import get_settings
 from napari.utils.triangulation_backend import TriangulationBackend
-from qtpy.QtWidgets import QTabWidget, QWidget, QVBoxLayout
+from qtpy.QtWidgets import (
+    QScrollArea, QTabWidget, QWidget, QVBoxLayout)
 
 from .gui import (
     adhesion_rf,
@@ -37,16 +39,37 @@ DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
 
 
 def _wrap(parts) -> QWidget:
-    """Stack one or more widgets (magicgui Container or Qt) into a QWidget."""
+    """Stack one or more widgets (magicgui Container or Qt) into a **scrolling**
+    QWidget.
+
+    The scroll area is the whole point. A dock widget is only as tall as the
+    napari window, and the tabs have outgrown that — the Vessel mesh tab alone
+    carries the mesh controls, the curvature controls, the graph controls and
+    the shear controls, and its save/load buttons were being cut off the bottom
+    with no way to reach them. Without a scroll area a Qt layout does not
+    shorten its children; it simply clips whatever does not fit, silently.
+
+    Applied to **every** tab rather than to the one that overflowed, because
+    which tab overflows depends on the screen and on how many controls a tab has
+    grown since anyone last looked. Horizontal scrolling stays off and the inner
+    widget is made resizable, so the widgets still track the dock's width and
+    only the vertical axis scrolls.
+    """
     if not isinstance(parts, (list, tuple)):
         parts = [parts]
-    w = QWidget()
-    lay = QVBoxLayout(w)
+    inner = QWidget()
+    lay = QVBoxLayout(inner)
     lay.setContentsMargins(4, 4, 4, 4)
     for p in parts:
         lay.addWidget(p.native if hasattr(p, "native") else p)
     lay.addStretch(1)
-    return w
+
+    area = QScrollArea()
+    area.setWidget(inner)
+    area.setWidgetResizable(True)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    area.setFrameShape(QScrollArea.NoFrame)
+    return area
 
 
 def _disable_quickedit() -> None:

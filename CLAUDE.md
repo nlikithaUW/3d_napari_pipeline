@@ -210,8 +210,11 @@ where the fibroblasts are.
   caliber** rather than an absolute length (P23), endpoints classified as
   field-of-view **crop** vs real terminus, and — the payoff — **cross-sections
   cut perpendicular to the axis**, which is the in-plane caliber §8A.2 could not
-  measure by any route and which the shear estimate needs. Pure functions, no
-  Qt. **It chooses nothing**: `censored`, `section_clipped` and the z-face
+  measure by any route and which the shear estimate needs. Those sections are
+  cut **out of χ by interpolation, not out of the binarised lumen**
+  (`section_from_field`, on by default since 2026-08-28): the surface and the
+  section are then the same curve to sub-voxel precision, and P46 is the size of
+  what the binary cut was discarding. Pure functions, no Qt. **It chooses nothing**: `censored`, `section_clipped` and the z-face
   warning are flags for the caller, not filters it applies.
 - `shear.py` — **wall shear stress on a cross-section, from geometry alone**
   (`docs/DIRECTION.md` §4.3). A 2D Poisson solve per section — `µ∇²u = dp/ds`,
@@ -222,19 +225,35 @@ where the fibroblasts are.
   along an unbranched segment is fixed by geometry with no flow rate, viscosity
   or pressure. **Flow direction is not needed**: the axis comes from the
   centerline tangent and `τ_w = µ|∇u|` is even in the sign along it — direction
-  only matters at a junction (the split rides on h³) and for upstream/downstream
-  asymmetry. It returns the **full per-boundary-point profile**, not a
+  only matters at a junction and for upstream/downstream asymmetry — and the
+  junction split is **no longer unknown**: `edge_resistance` integrates
+  R̂ = ∫ds/Q̂ over the sections already solved and `flow_split` runs Kirchhoff on
+  the graph, leaving one global µQ for the whole vessel instead of one per edge
+  ([I10](docs/ISSUES.md#i10)). It takes three inputs no image contains — the
+  outlets at a common pressure, which opening is the inlet, whether a terminus
+  is an opening — so `batch_mesh` records every scenario and chooses none. It returns the **full per-boundary-point profile**, not a
   per-section scalar: τ varies 6-9× around one section, and §7.4 needs
   circumferential position to separate the U-shaped shear prediction from
   monotonic optical attenuation. **Validated against closed form, not against
   itself** — `docs/scratch/shear/solver_check.py`, the analytic disc and the
   rectangle's double sine series; two τ estimators were killed by it before the
   one that shipped. `force_balance` (∮τ dP = A, exact) is a per-section health
-  check that needs no ground truth. The one residual bias is
-  [P46](docs/ISSUES.md#p46) and it is common-mode. Pure functions, no `gpu.*`.
+  check that needs no ground truth, and it is what pinned [P46](docs/ISSUES.md#p46):
+  the section is cut from **χ**, not from the binarised lumen, so the wall goes
+  where the field says rather than on a pixel edge. Sub-voxel throughout —
+  contour, solve boundary (Shortley-Weller on the crossing fraction) and the
+  fit's distance-to-wall — because doing any one of the three alone makes τ
+  *worse*, not better. Force balance on the real sections runs 0.996 against
+  1.041 before. **Numbers from before 2026-08-28 are on the old wall and are
+  not comparable**; `section_from_field=False` reproduces them.
+  Pure functions, no `gpu.*`.
   `vertex_field` + `covered_faces` carry the wall points onto a mesh for
   display — **nearest measured point, never interpolated, and un-measured wall
-  is not drawn**. Both the Vessel Mesh tab's `Vessel wall shear` layer and
+  is not drawn**. The layer's controls are one-per-flag and that is deliberate
+  ([P49](docs/ISSUES.md#p49)): `section_clipped` (not a measurement, dropped),
+  `censored` (the premise fails, not the solve — shown, with a count) and a
+  junction zone (the model does not apply at all) mean different things, and one
+  control for all of them hid a third of the wall. Both the Vessel Mesh tab's `Vessel wall shear` layer and
   `batch_mesh --shear`'s coverage note call them, and both read the one
   `vessel_shear.npz`. That file is deliberately separate from
   `vessel_graph.npz` because it is **ragged** — one row per wall point, not per

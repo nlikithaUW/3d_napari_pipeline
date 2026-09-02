@@ -377,9 +377,18 @@ without retyping it; explicit flags still override.
 | `--kappa-window-um` | Arc-length window for the 3D path-curvature fit |
 | `--section-every-um` | Cut a perpendicular cross-section every this many µm. Between cuts the section columns are NaN, never interpolated |
 | `--section-span` | Sample the cut plane out to this many local inscribed radii. The inscribed radius is the *minor* semi-axis, so this must exceed the aspect ratio or every section is clipped |
+| `--shear` / `--no-shear` | Solve §4.3's wall shear on every section and write `vessel_shear.npz` — one row per **wall point**, not per section. Off by default, since it is extra work per section |
+| `--section-from-field` / `--no-section-from-field` | Cut the sections out of the solved field χ by interpolation (default, sub-voxel wall) or out of the binarised lumen as builds before 2026-08-28 did. The binary cut is a measured bias, not a cheaper approximation: perimeter ~11% long, force balance ~1.04 instead of ~1.00 ([P46](docs/ISSUES.md#p46)) |
 | `--from-settings PATH` | Seed every parameter from a settings or recon JSON |
 | `--suggest-alpha` | One Delaunay per image; prints a suggested `alpha3d_um`, writes nothing |
 | `--dry-run` / `--check-only` | Resolve parameters and exit / describe the folders and exit |
+
+With `--shear` the run also records, per image: the number of wall points and
+how many are clipped and censored **separately**, the median τ/µQ **per edge and
+with no pooled figure** — it carries a different unknown µQ on each edge — and
+the branch resistances `R̂ = ∫ds/Q̂` with the flow split they imply, under
+**every** inlet-and-terminus scenario rather than one chosen for you
+([I10](docs/ISSUES.md#i10)).
 
 Each run writes a **`vessel_recon.json`** beside its outputs recording the git
 SHA, the scale and where it came from, the input mask's size and mtime, the
@@ -467,6 +476,8 @@ untouched by that re-export.**
 
 | Column(s) | Problem | ID |
 |---|---|---|
+| `lumen_*`, `caliber_um`, and every vessel-geometry artifact | **Anything built before 2026-08-28 measured the wall in the wrong place.** The cross-sections were cut out of the *binarised* lumen, so every wall landed on a pixel edge; a staircase is longer than the curve it stands for, by 4.4% on a test disc and **11% on the real sections**, and it got *worse* with resolution rather than better. Sections are now cut out of the solved field χ by interpolation. Perimeter −11.2%, hydraulic diameter +11.3%, wall shear +6 to +11%; the free force-balance check moves 1.041 → **0.996**. **Rebuild before comparing anything geometric across that date** | [P46](docs/ISSUES.md#p46) |
+| wall shear, as displayed or joined | **τ/µQ is comparable within one branch and not across one**, and the layer used to paint all of them on a single colour scale — the three branches of `04step_003` span 9×. The branch resistances now solve the flow split, which puts them on one scale, but that rests on three assumptions no image contains: the outlets at a common pressure, which opening is the inlet, and whether an endpoint that stops inside the volume is an opening or a dead end. Shear **at** a junction is a separate matter and is not modelled at all — the solve is fully developed duct flow, and a zone of ~2 calibers around a junction is hidden by default | [P49](docs/ISSUES.md#p49), [I10](docs/ISSUES.md#i10) |
 | `path_curv_*`, `dist_junction_um`, `caliber_um`, `lumen_*` | **New columns, and they need a Poisson-family mesh.** They come from the 3D centerline graph, which is built on the reconstructed lumen; with no `vessel_graph.npz` beside the image they all export blank. On two of the six images (`V3b_..._04step_001`, `V3b_..._04step_002`) the fitted lumen leaks out through the top/bottom of the stack, so the graph invents junctions and 44–56% of cross-sections are clipped — their caliber is a lower bound and their junction count is wrong. The other four are right | [P32](docs/ISSUES.md#p32) |
 | *all vessel-geometry columns* | **The cadherin mask discards real wall.** The 8–10 µm "gaps" the reconstruction has to bridge are mostly not holes: the raw channel carries signal 0–1 µm from the detected wall's own radius, at ~4.5× the lumen noise against ~2× for no-wall controls — replicated on five of six images. The mask is a dashed copy of a continuous ring, so every method is being asked to invent geometry the data already contains. **The local threshold is not the culprit** (it passes 100% of that wall); the global intensity floor and the `min_size` component filter delete it, 15–41% and 59–85% respectively | [P28](docs/ISSUES.md#p28), [P19](docs/ISSUES.md#p19) |
 | `curv_mean`, `curv_k1`, `curv_k2`, `curv_gaussian` | **Do not use any CSV exported before 2026-08-11.** A destroyed triangle winding, plus an away-from-centroid normal flip that overrode the winding on 44% of surface vertices, made the curvature fitting frame near-random; correlation between the old column and the corrected one is ρ = +0.069 (54.8% sign agreement — a coin flip). **Fixed 2026-08-10**: the columns are now self-consistent (κ2 99.5% consistent sign on the re-export, face-normal coherence 0.21 → 0.97). Re-export any other image before using these columns. **But see the row below — self-consistent is not the same as measuring the vessel** | [P01](docs/ISSUES.md#p01) |

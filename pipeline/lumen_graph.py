@@ -594,7 +594,9 @@ def cross_section(lumen: np.ndarray, origin_um: np.ndarray, h_um: float,
                   point_um: np.ndarray, tangent: np.ndarray,
                   radius_um: float, span: float = DEFAULT_SECTION_SPAN,
                   step_um: float | None = None,
-                  extras: dict | None = None) -> dict:
+                  extras: dict | None = None,
+                  field: np.ndarray | None = None,
+                  level: float | None = None) -> dict:
     """Cut the lumen with the plane through ``point_um`` normal to ``tangent``.
 
     Returns area, the two principal extents, aspect, and whether the section ran
@@ -613,9 +615,23 @@ def cross_section(lumen: np.ndarray, origin_um: np.ndarray, h_um: float,
     is what `D_h = 4A/P` needs — §4.2's algebra could not be evaluated
     numerically anywhere in this project before it existed.
 
+    **``field`` is χ and ``level`` its iso-level — hand them over.** Without
+    them the plane is cut out of the *binarised* lumen with nearest-neighbour
+    sampling, and every wall in the section lands on a pixel edge. That
+    staircase is not a rounding error: it makes the wall 4-5% longer than the
+    surface it stands for at **every** resolution, and the shear solved inside
+    it inherits that ([P46](docs/ISSUES.md#p46)). With them, the plane is cut
+    out of χ by linear interpolation and the mask is `plane > level`, so the
+    section carries both the region *and* the smooth field whose level curve is
+    its true wall — which is the same curve the displayed mesh is made of, since
+    marching cubes interpolates the same χ at the same level. `shear` then puts
+    the wall where the field says rather than at the pixel edge, and the disc
+    test goes from 4.4% long and 4% low in τ to **0.03% and 0.8%**, converging
+    with step where the old one did not converge at all.
+
     ``extras``, if given, is filled with the section **mask** and the frame it
     lives in (``u``, ``v``, ``step_um``, ``center_rc``, ``point_um``,
-    ``tangent``). That is what `shear.solve_section` runs on and what
+    ``tangent``), plus ``field``/``level`` when they were supplied. That is what `shear.solve_section` runs on and what
     `shear.contour_to_3d` needs to put a wall point back in the image frame.
     It is an optional out-dict for the same reason `vessel_mesh.build_mesh`
     uses one: the return value has consumers that destructure it, and a mask is
@@ -650,10 +666,22 @@ def cross_section(lumen: np.ndarray, origin_um: np.ndarray, h_um: float,
     idx = (pos - np.asarray(origin_um, float)[None, None, :]) / h_um
     inside_vol = np.all((idx >= 0) &
                         (idx <= np.asarray(lumen.shape) - 1), axis=-1)
-    samp = ndi.map_coordinates(lumen.astype(np.uint8),
-                               np.moveaxis(idx, -1, 0).reshape(3, -1),
-                               order=0, mode="constant", cval=0)
-    sec = samp.reshape(A.shape).astype(bool)
+    plane = None
+    if field is not None and level is not None:
+        # Linear interpolation, and a cval well below the level so anything
+        # sampled outside the volume reads as solidly outside rather than as
+        # whatever `cval=0` happens to mean for this field.
+        lo = float(np.nanmin(field)) - 1.0
+        plane = ndi.map_coordinates(
+            np.asarray(field, float),
+            np.moveaxis(idx, -1, 0).reshape(3, -1),
+            order=1, mode="constant", cval=lo).reshape(A.shape)
+        sec = plane > float(level)
+    else:
+        samp = ndi.map_coordinates(lumen.astype(np.uint8),
+                                   np.moveaxis(idx, -1, 0).reshape(3, -1),
+                                   order=0, mode="constant", cval=0)
+        sec = samp.reshape(A.shape).astype(bool)
     if not sec[m, m]:
         # The centre is not in the lumen: the point sits on a skeleton voxel
         # that the plane cut obliquely out of. Take the nearest component.
@@ -671,14 +699,29 @@ def cross_section(lumen: np.ndarray, origin_um: np.ndarray, h_um: float,
     if len(yy) < 3:
         return out
 
+    plane_sel = None
+    if plane is not None:
+        # Only the selected component's wall. The field is blanked outside a
+        # one-pixel dilation of `sel`, so the level curve just outside the
+        # component's boundary pixels survives while a neighbouring component's
+        # does not. Dilating by exactly one is the smallest window that keeps
+        # the crossing and the largest that cannot reach a component a pixel
+        # away.
+        lo = float(np.nanmin(plane)) - 1.0
+        plane_sel = np.where(ndi.binary_dilation(sel), plane, lo)
+
     if extras is not None:
         extras.update({"mask": sel, "step_um": step, "u": u, "v": v,
                        "center_rc": (float(m), float(m)),
                        "point_um": np.asarray(point_um, float).copy(),
-                       "tangent": t.copy()})
+                       "tangent": t.copy(),
+                       "field": plane_sel,
+                       "level": (None if plane_sel is None else float(level))})
 
     out["area_um2"] = float(len(yy) * step * step)
-    out["perim_um"] = _shear.section_contour(sel, step)["perim_um"]
+    out["perim_um"] = _shear.section_contour(
+        sel, step, plane_sel,
+        0.5 if plane_sel is None else float(level))["perim_um"]
     a = (yy - m) * step
     b = (xx - m) * step
     P = np.column_stack([a, b])
@@ -712,6 +755,7 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
                 crop_ratio: float = DEFAULT_CROP_RATIO,
                 crop_margin_um: float = DEFAULT_CROP_MARGIN_UM,
                 kappa_window_um: float = DEFAULT_KAPPA_WINDOW_UM,
+                section_from_field: bool = True,
                 section_every_um: float = DEFAULT_SECTION_EVERY_UM,
                 section_span: float = DEFAULT_SECTION_SPAN,
                 compute_shear: bool = False,
@@ -737,6 +781,13 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
     joining an adhesion to the shear at its nearest luminal wall point.
 
     ``compute_shear`` adds §4.3's per-section wall-shear solve (`shear.py`).
+
+    ``section_from_field`` cuts the cross-sections out of **χ** rather than out
+    of the binarised lumen — see `cross_section`. On by default: it is the same
+    surface either way, but the binary cut throws away the sub-voxel precision
+    the Poisson solve already produced, and [P46](docs/ISSUES.md#p46) is the
+    size of what it throws away. Set it False to reproduce a pre-2026-08-28
+    build.
     **Default off, and that is a decision**: `batch.py` and the tab run at
     defaults, so turning it on here would change every headless run and
     invalidate the artifacts already produced. It is opt-in for the same reason
@@ -750,6 +801,7 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
         "crop_margin_um": float(crop_margin_um),
         "kappa_window_um": float(kappa_window_um),
         "section_every_um": float(section_every_um),
+        "section_from_field": bool(section_from_field),
         "section_span": float(section_span),
         "compute_shear": bool(compute_shear)}}
 
@@ -841,7 +893,10 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
                                         and extras is not None) else None
         sec_rows = _sections_along(lumen, origin_um, h_um, pts, tang, cal, s,
                                    section_every_um, section_span,
-                                   compute_shear, wall_rows)
+                                   compute_shear, wall_rows,
+                                   field=(chi if section_from_field else None),
+                                   level=(float(iso_level) if section_from_field
+                                          else None))
         if wall_rows is not None:
             WALL.append((sum(len(x) for x in P), wall_rows))
         P.append(pts)
@@ -929,12 +984,22 @@ def build_graph(chi: np.ndarray, iso_level: float, h_um: float,
                 "edge_id": out["edge_id"][idx],
                 "section_clipped": out["section_clipped"][idx],
                 "censored": out["censored"][idx],
+                # Carried per wall point so the file stands on its own. A
+                # consumer of `tau_rel_1_um3` **must** be able to tell which
+                # edge a point is on and how near a junction it is: τ/µQ is
+                # normalised by conservation of Q, which holds along an
+                # unbranched segment and fails at a Y, where the split rides
+                # on h³ and is not recoverable (§4.2, [P49]). Reading those
+                # out of `vessel_graph.npz` instead would work right up until
+                # someone loads a shear file without its graph beside it.
+                "dist_junction_um": out["dist_junction_um"][idx],
+                "caliber_um": out["caliber_um"][idx],
             }
         else:
             wall = {"points_zyx_um": np.zeros((0, 3), np.float32),
                     "point_index": np.zeros(0, np.int64)}
             for k in ("tau_hat_um", "tau_rel_1_um3", "q_hat_um4", "seg_len_um",
-                      "s_um"):
+                      "s_um", "dist_junction_um", "caliber_um"):
                 wall[k] = np.zeros(0, np.float32)
             wall["edge_id"] = np.zeros(0, np.int32)
             wall["section_clipped"] = np.zeros(0, bool)
@@ -980,7 +1045,8 @@ _SEC_DTYPE = np.dtype([(n, "f8") for n in _SEC_FLOATS + _SHEAR_FLOATS]
 
 
 def _sections_along(lumen, origin_um, h_um, pts, tang, cal, s,
-                    every_um, span, compute_shear=False, wall_out=None):
+                    every_um, span, compute_shear=False, wall_out=None,
+                    field=None, level=None):
     """Cross-sections every ``every_um`` of arc length; NaN in between.
 
     Left NaN rather than interpolated on purpose: an interpolated cross-section
@@ -1004,13 +1070,16 @@ def _sections_along(lumen, origin_um, h_um, pts, tang, cal, s,
     for i in take:
         ex: dict = {} if compute_shear else None
         r = cross_section(lumen, origin_um, h_um, pts[i], tang[i],
-                          float(cal[i]), span, extras=ex)
+                          float(cal[i]), span, extras=ex,
+                          field=field, level=level)
         for name in _SEC_FLOATS:
             rows[name][i] = r[name]
         rows["clipped"][i] = r["clipped"]
         rows["touches_domain"][i] = r["touches_domain"]
         if compute_shear and ex:
-            sh = _shear.solve_section(ex["mask"], ex["step_um"])
+            sh = _shear.solve_section(
+                ex["mask"], ex["step_um"], ex.get("field"),
+                0.5 if ex.get("level") is None else float(ex["level"]))
             for name in _SHEAR_FLOATS:
                 rows[name][i] = sh[name]
             if wall_out is not None and len(sh["contour_rc"]):

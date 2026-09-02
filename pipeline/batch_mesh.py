@@ -211,6 +211,14 @@ GRAPH_DEFAULTS = {
     # is an extra computation per section, and turning it on here would change
     # every headless run at defaults. Same doctrine as `--steps score`.
     "compute_shear": False,
+    # Cut the sections out of χ rather than out of the binarised lumen
+    # ([P46]). **On by default and that is the decision**: the binary cut is a
+    # measured bias (perimeter −11%, force balance 1.041 → 0.996 on real
+    # sections), not a cheaper approximation, and leaving it on would keep
+    # producing numbers that are wrong in a known direction. It does change
+    # every headless run at defaults, so an artifact from before 2026-08-28 is
+    # not comparable with one from after — which is why the flag is recorded.
+    "section_from_field": True,
 }
 # The radii P24's plateau table was measured at, so a `--steps score` run is
 # directly comparable to the evidence already on record.
@@ -263,6 +271,13 @@ def _mtime(p: Path) -> str:
 # --------------------------------------------------------------------------- #
 # Scale from the OME header — no pixels decoded
 # --------------------------------------------------------------------------- #
+
+def _round(x, nd=6):
+    """A float for JSON, or None when it is not finite. Keeps a NaN from
+    reaching `json.dump`, which writes a bare `NaN` that is not valid JSON."""
+    x = float(x)
+    return round(x, nd) if np.isfinite(x) else None
+
 
 def _nanmed(a):
     """Median ignoring NaN, or None when everything is NaN — the sections are
@@ -439,7 +454,8 @@ def resolve_params(args) -> dict:
         "kappa_window_um": args.kappa_window_um,
         "section_every_um": args.section_every_um,
         "section_span": args.section_span,
-        "compute_shear": args.compute_shear}
+        "compute_shear": args.compute_shear,
+        "section_from_field": args.section_from_field}
     for key, default in GRAPH_DEFAULTS.items():
         graph[key], source[f"graph.{key}"] = _pick(
             explicit_graph[key], seed_graph, default, key)
@@ -1010,9 +1026,17 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                                    wall["tau_rel_1_um3"],
                                    float(wall["max_dist_um"]))
             cov = float(np.isfinite(f).mean())
-        good = ~(wall["section_clipped"] | wall["censored"])
+        # The two flags are reported apart, not as one "usable" count: they
+        # mean different things (extent is a lower bound vs the lumen leaves
+        # the frame) and the napari tab now filters on them separately, so a
+        # combined figure here would be the two paths speaking different
+        # languages about the same arrays.
+        clipped = wall["section_clipped"]
+        censored = wall["censored"]
+        good = ~(clipped | censored)
         _p(f"wall shear: {len(wall['points_zyx_um']):,} wall points "
-           f"({int(good.sum()):,} neither clipped nor censored); "
+           f"({int(clipped.sum()):,} clipped, {int(censored.sum()):,} "
+           f"censored, {int(good.sum()):,} neither); "
            f"{100 * cov:.0f}% of mesh vertices within "
            f"{wall['max_dist_um']:g} um of one")
         _p(f"wrote {sp.name}")
@@ -1021,8 +1045,67 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
             "n_usable": int(good.sum()),
             "max_dist_um": float(wall["max_dist_um"]),
             "vertex_coverage": (None if not np.isfinite(cov) else round(cov, 4)),
-            "tau_rel_1_um3_median": _nanmed(wall["tau_rel_1_um3"][good]),
+            "n_clipped": int(clipped.sum()),
+            "n_censored": int(censored.sum()),
+            # **Per edge, and no pooled median.** τ/µQ is normalised by
+            # conservation of Q, which holds along an unbranched segment and
+            # fails at a Y — each edge carries its own unknown µQ, so a median
+            # over all of them is a mixture of scales rather than a number
+            # ([P49], docs/DIRECTION.md §4.2). One entry per edge; a reader
+            # who wants the whole vessel in one figure has to say which edge.
+            "tau_rel_1_um3_median_by_edge": {
+                str(int(e)): _nanmed(
+                    wall["tau_rel_1_um3"][good & (wall["edge_id"] == e)])
+                for e in np.unique(wall["edge_id"])},
         }
+        # The resistance network, and the flow split it determines ([I10]).
+        # **Recorded, not applied**: it multiplies the per-edge τ/µQ onto a
+        # common scale, and which opening is the inlet is a fact about the rig
+        # that no image contains. So every inlet choice is reported and the
+        # caller picks — the same doctrine as `mesh_score`, which scores and
+        # does not choose. Termini are reported both ways for the same reason;
+        # §5.1 expects none of them to be real, but that is an expectation.
+        # The lumen's own component count, beside the core's fragment count.
+        # `lumen_core`'s note reads alarmingly (13 fragments here) and is about
+        # the **seed**; this is the number of connected lumen components the
+        # graph was actually built on, and it is usually 1.
+        li = cl.get("lumen_info") if cl is not None else None
+        if isinstance(li, dict):
+            recon["lumen"] = {
+                k: li[k] for k in ("n_components_super_level",
+                                   "n_components_kept", "n_voxels_lumen",
+                                   "n_voxels_super_level", "selected_by")
+                if k in li}
+
+        if cl is not None and len(np.asarray(cl["edges"], int)):
+            res = shear.edge_resistance(cl["edge_id"], cl["s_um"],
+                                        cl["q_hat_um4"])
+            deg = np.asarray(cl["node_degree"], int)
+            ekind = np.asarray(cl["node_endpoint_kind"]).astype(str)
+            ends = np.nonzero(deg == 1)[0]
+            rec = {"r_hat_1_um3_by_edge": {
+                str(e): {"r_hat_1_um3": _round(v["r_hat_1_um3"]),
+                         "n_sections": v["n_sections"],
+                         "span_frac": _round(v["span_frac"])}
+                for e, v in res.items()}, "splits": {}}
+            rr = {e: v["r_hat_1_um3"] for e, v in res.items()}
+            for term_open in (True, False):
+                opens = ends if term_open else ends[ekind[ends] == "crop"]
+                for inlet in opens:
+                    fs = shear.flow_split(cl["edges"], rr, int(inlet), opens)
+                    if not fs.get("q_rel"):
+                        continue
+                    key = (f"inlet_{int(inlet)}_termini_"
+                           f"{'open' if term_open else 'closed'}")
+                    rec["splits"][key] = {
+                        str(k): _round(v) for k, v in fs["q_rel"].items()}
+            recon["flow"] = rec
+            if rec["splits"]:
+                first = sorted(rec["splits"])[0]
+                _p(f"flow split: {len(rec['splits'])} inlet/terminus "
+                   f"scenario(s); e.g. {first} -> "
+                   + ", ".join(f"edge {k}: {v:+.3f}"
+                               for k, v in rec["splits"][first].items()))
 
     if cl is not None:
         pp = _out(saved, "vessel_graph", single_tag, ".npz")
@@ -1306,6 +1389,18 @@ def main() -> None:
                    help="absolute floor under --crop-ratio, in um.")
     g.add_argument("--kappa-window-um", type=float, default=None,
                    help="arc-length window for the 3D path curvature fit.")
+    g.add_argument("--section-from-field", dest="section_from_field",
+                   action="store_true", default=None,
+                   help="cut cross-sections out of the solved field chi with "
+                        "linear interpolation instead of out of the binarised "
+                        "lumen, so the wall is sub-voxel (docs/ISSUES.md P46). "
+                        "On by default.")
+    g.add_argument("--no-section-from-field", dest="section_from_field",
+                   action="store_false",
+                   help="cut sections out of the binarised lumen, as builds "
+                        "before 2026-08-28 did. Reproduces an old artifact; "
+                        "its perimeter runs ~11%% long and its force balance "
+                        "~1.04 instead of ~1.00.")
     g.add_argument("--section-every-um", type=float, default=None,
                    help="cut a perpendicular cross-section every this many um "
                         "of arc length. Between cuts the section columns are "

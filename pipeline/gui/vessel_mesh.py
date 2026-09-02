@@ -74,21 +74,92 @@ def build(state, viewer) -> Container:
                      "log10(circumradius µm)", "darkorange")
     state.setdefault("hists", []).append(hist)
 
+    # Every knob carries a tooltip saying what it does **and** what it costs
+    # when it is wrong. A slider with only a name on it is a slider nobody can
+    # set on purpose, and these are not self-explanatory: half of them are inert
+    # for any given method, and several have a documented failure mode rather
+    # than a smooth trade-off.
     @magicgui(
         call_button="Build vessel mesh",
-        method={"widget_type": "ComboBox", "choices": METHODS},
-        orientation={"widget_type": "ComboBox", "choices": ORIENTATIONS},
-        n_bins={"widget_type": "Slider", "min": 16, "max": 720, "step": 1},
-        r_smooth_bins={"widget_type": "Slider", "min": 0, "max": 50, "step": 1},
-        alpha2d_um={"widget_type": "FloatSlider", "min": 0.5, "max": 30.0, "step": 0.5},
-        subsample_um={"widget_type": "FloatSlider", "min": 0.0, "max": 5.0, "step": 0.25},
-        alpha3d_um={"widget_type": "FloatSlider", "min": 1.0, "max": 80.0, "step": 0.5},
-        close_um={"widget_type": "FloatSlider", "min": 0.0, "max": 5.0, "step": 0.25},
-        min_component_um={"widget_type": "FloatSlider", "min": 0.0, "max": 500.0, "step": 5.0},
-        poisson_grid_um={"widget_type": "FloatSlider", "min": 0.65, "max": 6.0, "step": 0.325},
-        poisson_smooth_um={"widget_type": "FloatSlider", "min": 1.0, "max": 15.0, "step": 0.5},
-        poisson_iso_pct={"widget_type": "FloatSlider", "min": 5.0, "max": 95.0, "step": 1.0},
-        alpha_raster_um={"widget_type": "FloatSlider", "min": 0.325, "max": 6.0, "step": 0.325},
+        method={"widget_type": "ComboBox", "choices": METHODS,
+                "tooltip": "How the gaps in the cadherin wall are closed into "
+                           "a surface. The three interpolating methods pass "
+                           "through the mask; 'poisson' fits a smooth field to "
+                           "it and is the only family that also solves for a "
+                           "lumen volume, which the centerline graph and every "
+                           "shear number below are built on."},
+        orientation={"widget_type": "ComboBox", "choices": ORIENTATIONS,
+                     "tooltip": "Which plane the per-slice methods work in. "
+                                "'both (OR)' unions the two. Ignored entirely "
+                                "by the 3D methods."},
+        n_bins={"widget_type": "Slider", "min": 16, "max": 720, "step": 1,
+                "tooltip": "polar only: how many angular bins the wall radius "
+                           "is sampled into per slice. More bins follow the "
+                           "wall more closely and are noisier."},
+        r_smooth_bins={"widget_type": "Slider", "min": 0, "max": 50, "step": 1,
+                       "tooltip": "polar only: how many neighbouring angular "
+                                  "bins the radius is smoothed over. 0 is no "
+                                  "smoothing."},
+        alpha2d_um={"widget_type": "FloatSlider", "min": 0.5, "max": 30.0,
+                    "step": 0.5,
+                    "tooltip": "alpha 2D only: the alpha radius, in µm, within "
+                               "one slice. A gap wider than this is left open."},
+        subsample_um={"widget_type": "FloatSlider", "min": 0.0, "max": 5.0,
+                      "step": 0.25,
+                      "tooltip": "alpha 3D: keep one wall point per cube of "
+                                 "this size before building the alpha complex, "
+                                 "which is what makes it affordable. 0 keeps "
+                                 "every voxel. Must stay well below alpha3d_um "
+                                 "or the complex is built on points further "
+                                 "apart than the radius meant to connect them."},
+        alpha3d_um={"widget_type": "FloatSlider", "min": 1.0, "max": 80.0,
+                    "step": 0.5,
+                    "tooltip": "alpha 3D: the alpha radius in µm. This is the "
+                               "widest wall gap that gets bridged; the gaps in "
+                               "this data run 8-10 µm."},
+        close_um={"widget_type": "FloatSlider", "min": 0.0, "max": 5.0,
+                  "step": 0.25,
+                  "tooltip": "Radius of a morphological closing applied to the "
+                             "filled slice, in µm. 0 is off."},
+        min_component_um={"widget_type": "FloatSlider", "min": 0.0,
+                          "max": 500.0, "step": 5.0,
+                          "tooltip": "Discard reconstructed pieces smaller "
+                                     "than this across, in µm. Removes "
+                                     "detached fragments; set it above the "
+                                     "vessel and it removes the vessel."},
+        poisson_grid_um={"widget_type": "FloatSlider", "min": 0.65, "max": 6.0,
+                         "step": 0.325,
+                         "tooltip": "poisson: the cell size of the coarse grid "
+                                    "the field is solved on, in µm. This is "
+                                    "the resolution of everything downstream — "
+                                    "the surface, the lumen, the "
+                                    "cross-sections and the shear. Cost grows "
+                                    "as the cube as it shrinks."},
+        poisson_smooth_um={"widget_type": "FloatSlider", "min": 1.0,
+                           "max": 15.0, "step": 0.5,
+                           "tooltip": "poisson: the width in µm over which the "
+                                      "wall direction is estimated. It also "
+                                      "sets the lumen test: a vessel whose "
+                                      "inscribed radius is under 4x this "
+                                      "cannot be oriented at all and the build "
+                                      "refuses rather than guessing."},
+        poisson_iso_pct={"widget_type": "FloatSlider", "min": 5.0, "max": 95.0,
+                         "step": 1.0,
+                         "tooltip": "poisson: which level of the solved field "
+                                    "becomes the surface, as a percentile of "
+                                    "the field sampled where the cadherin "
+                                    "actually is. 50 puts the surface at the "
+                                    "middle of the wall. Higher shrinks the "
+                                    "lumen, lower grows it — and the lumen "
+                                    "size drives the shear."},
+        alpha_raster_um={"widget_type": "FloatSlider", "min": 0.325, "max": 6.0,
+                         "step": 0.325,
+                         "tooltip": "alpha 3D solid -> poisson only: the voxel "
+                                    "size the alpha solid is filled in at "
+                                    "before it is handed to the Poisson fit."},
+        fill_lumen={"tooltip": "Per-slice methods: fill the interior of each "
+                               "slice's wall before meshing, so the result is "
+                               "a solid cross-section rather than a ring."},
     )
     def controls(
         method: str = METHOD_ALPHA_POISSON,
@@ -276,7 +347,9 @@ def build(state, viewer) -> Container:
         w.errored.connect(with_after(_err, after, "Vessel mesh"))
         w.start()
 
-    suggest_w = PushButton(text="Suggest alpha_um (3D)")
+    suggest_w = PushButton(
+        text="Suggest alpha_um (3D)",
+        tooltip="Build one Delaunay triangulation of the subsampled wall points and print a suggested alpha3d_um, with a histogram. Builds no mesh and changes no setting.")
 
     def _suggest(*_):
         arr = _cadh_mask_array(state)
@@ -323,9 +396,14 @@ def build(state, viewer) -> Container:
     suggest_w.changed.connect(_suggest)
 
     # ---- Save / load the built vessel mesh (verts + faces) ----
-    mesh_path_w = FileEdit(value="vessel_mesh.npz", label="mesh_path", mode="w")
-    save_mesh_w = PushButton(text="Save vessel mesh")
-    load_mesh_w = PushButton(text="Load vessel mesh")
+    mesh_path_w = FileEdit(
+        tooltip="Where 'Save vessel mesh' writes and 'Load vessel mesh' reads. Relative names resolve beside the current image.",value="vessel_mesh.npz", label="mesh_path", mode="w")
+    save_mesh_w = PushButton(
+        text="Save vessel mesh",
+        tooltip="Write the built mesh to the path above, beside this image.")
+    load_mesh_w = PushButton(
+        text="Load vessel mesh",
+        tooltip="Read a mesh back from the path above and draw it. It does not rebuild, so the sliders may not describe what you are looking at.")
 
     def _save_mesh(*_):
         cache = state.get("vessel_mesh_cache") or {}
@@ -397,13 +475,20 @@ def build(state, viewer) -> Container:
     # ---- Per-vertex curvature (local quadric fit at a physical radius) ----
     CURV_CHOICES = {"mean (H)": "mean", "κ1 max": "k1",
                     "κ2 min": "k2", "gaussian (K)": "gaussian"}
-    curv_measure_w = ComboBox(choices=list(CURV_CHOICES.keys()),
+    curv_measure_w = ComboBox(
+        tooltip="Which curvature of the fitted surface is drawn.",choices=list(CURV_CHOICES.keys()),
                               value="mean (H)", label="curvature")
     curv_radius_w = FloatSlider(value=5.0, min=1.0, max=50.0, step=0.5,
-                                label="curvature_radius_um")
+                                label="curvature_radius_um",
+        tooltip='Radius in µm of the neighbourhood the surface curvature is fitted over. There is no right value on this data: the answer tracks this slider instead of settling, which is what docs/ISSUES.md P24 is about. Read a curvature from here only if it holds steady as you move this.')
     curv_smooth_w = Slider(value=10, min=0, max=50,
-                           label="curvature_smooth_iter")
-    curv_btn = PushButton(text="Compute curvature")
+                           label="curvature_smooth_iter",
+        tooltip='How many smoothing passes the mesh gets before curvature is fitted. 0 is none.')
+    curv_btn = PushButton(
+        text="Compute curvature",
+        tooltip="Fit curvature on the mesh currently built or loaded, and draw "
+                "it as its own layer. Read curvature_radius_um's tooltip "
+                "first — the value depends on it.")
     CURV_LAYER = "Vessel curvature"
 
     def _show_curvature():
@@ -500,30 +585,82 @@ def build(state, viewer) -> Container:
     # Every knob is a **ratio or a window**, not an absolute length. The old
     # `open_um` / `prune_um` were absolute and [P23] records them amputating
     # exactly the tapering, high-shear regions the program is about.
-    spur_ratio_w = FloatSlider(value=lumen_graph.DEFAULT_SPUR_RATIO,
-                               min=0.0, max=4.0, step=0.1, label="spur_ratio")
-    crop_ratio_w = FloatSlider(value=lumen_graph.DEFAULT_CROP_RATIO,
-                               min=0.0, max=6.0, step=0.25, label="crop_ratio")
-    kappa_win_w = FloatSlider(value=lumen_graph.DEFAULT_KAPPA_WINDOW_UM,
-                              min=5.0, max=120.0, step=5.0,
-                              label="kappa_window_um")
-    sec_every_w = FloatSlider(value=lumen_graph.DEFAULT_SECTION_EVERY_UM,
-                              min=1.0, max=40.0, step=1.0,
-                              label="section_every_um")
-    sec_span_w = FloatSlider(value=lumen_graph.DEFAULT_SECTION_SPAN,
-                             min=1.0, max=8.0, step=0.25, label="section_span")
+    spur_ratio_w = FloatSlider(
+        value=lumen_graph.DEFAULT_SPUR_RATIO, min=0.0, max=4.0, step=0.1,
+        label="spur_ratio",
+        tooltip="A dead-end branch shorter than this many local vessel radii "
+                "is treated as a bump on the reconstruction and removed. A "
+                "ratio and not a length, so it means the same thing at a 40 µm "
+                "caliber and at a 5 µm waist. 1.0 reads 'a stub that does not "
+                "reach as far as the vessel is wide'. 0 prunes nothing.")
+    crop_ratio_w = FloatSlider(
+        value=lumen_graph.DEFAULT_CROP_RATIO, min=0.0, max=6.0, step=0.25,
+        label="crop_ratio",
+        tooltip="Two jobs. A centerline end within this many local radii of "
+                "the edge of the image is where the vessel leaves the field of "
+                "view, rather than a real vessel ending. And every section "
+                "within that distance is flagged `censored`, because the lumen "
+                "there is no longer fully imaged. 2.0 is not arbitrary: the "
+                "centerline of a tube cut off by a flat plane stops about one "
+                "radius short of the cut, so a smaller value calls every "
+                "cropped end a real terminus.")
+    kappa_win_w = FloatSlider(
+        value=lumen_graph.DEFAULT_KAPPA_WINDOW_UM, min=5.0, max=120.0,
+        step=5.0, label="kappa_window_um",
+        tooltip="Arc length, in µm, over which the bend of the centerline is "
+                "fitted. It is a second derivative, so it is meaningless below "
+                "the vessel width and is smoothed away far above it; 40 µm is "
+                "about one diameter here.")
+    sec_every_w = FloatSlider(
+        value=lumen_graph.DEFAULT_SECTION_EVERY_UM, min=1.0, max=40.0,
+        step=1.0, label="section_every_um",
+        tooltip="Cut a cross-section every this many µm along the vessel. "
+                "Between cuts nothing is measured and nothing is interpolated, "
+                "so this is literally how coarse the shear map is along the "
+                "axis. It is also the distance a mesh vertex may be from a "
+                "measured wall point before it is left uncoloured. Cutting "
+                "closer is a real measurement and costs seconds.")
+    sec_span_w = FloatSlider(
+        value=lumen_graph.DEFAULT_SECTION_SPAN, min=1.0, max=8.0, step=0.25,
+        label="section_span",
+        tooltip="How far out the cutting plane is sampled, as a multiple of "
+                "the local inscribed radius. That radius is the *short* "
+                "half-width of the section, so this must exceed the section's "
+                "width-to-height ratio or the cut runs off the sampled disc "
+                "and the section is flagged `clipped` — its size then being a "
+                "lower bound rather than a measurement.")
     # §4.3's wall-shear solve, matching `batch_mesh --shear`. Present here for
     # the standing rule that the GUI and the headless path must not drift: a
     # check that exists in only one of them is how P36 and the alpha3d_um case
     # happened. Off by default in both.
-    shear_w = CheckBox(value=False, text="wall shear (sec 4.3)")
+    shear_w = CheckBox(
+        value=False, text="wall shear (sec 4.3)",
+        tooltip="Solve the flow in every cross-section and get the wall shear "
+                "around each one. Off by default because it is extra work per "
+                "section. Nothing below in the shear group does anything until "
+                "this has been run once.")
+    # Present here only so the tab and `batch_mesh --no-section-from-field`
+    # cannot disagree about what a section is. On in both; unticking reproduces
+    # a pre-2026-08-28 build, which is the only reason it is a control at all.
+    sec_field_w = CheckBox(
+        value=True, text="cut sections from chi (sub-voxel wall)",
+        tooltip="On: the cut plane is sampled from the solved field chi by "
+                "interpolation and the wall is its level curve, so the "
+                "section's wall is the same curve the displayed mesh is made "
+                "of. Off: the plane is cut from the binarised lumen and every "
+                "wall lands on a pixel edge — perimeter ~11% long, force "
+                "balance ~1.04 instead of ~1.00 (docs/ISSUES.md P46).")
     graph_color_w = ComboBox(
+        tooltip="Which per-station quantity colours the centerline points. "
+                "A view of the graph only; nothing here feeds a calculation.",
         choices=["caliber_um", "kappa_1_um", "kappa_xy_1_um", "tau_rel_1_um3",
                  "tau_hat_mean_um", "hydraulic_diam_um", "lumen_area_um2",
                  "lumen_major_um", "lumen_minor_um", "lumen_aspect",
                  "dist_junction_um", "dist_crop_um", "censored"],
         value="caliber_um", label="colour by")
-    graph_btn = PushButton(text="Compute 3D centerline graph (lumen)")
+    graph_btn = PushButton(
+        text="Compute 3D centerline graph (lumen)",
+        tooltip="Trace the vessel centerline through the solved lumen, cut a cross-section every section_every_um along it, and — with 'wall shear' ticked — solve the flow in each. Needs a Poisson-family method, since the interpolating ones never solve for a lumen volume.")
 
     GRAPH_LAYER = "Vessel centerline (3D graph)"
     GRAPH_PATH_LAYER = "Vessel centerline path"
@@ -600,6 +737,7 @@ def build(state, viewer) -> Container:
                 "kappa_window_um": float(kappa_win_w.value),
                 "section_every_um": float(sec_every_w.value),
                 "section_span": float(sec_span_w.value),
+                "section_from_field": bool(sec_field_w.value),
                 "compute_shear": bool(shear_w.value)}
 
     def _compute_graph(*_, after=None):
@@ -690,10 +828,181 @@ def build(state, viewer) -> Container:
     # will join to. Nothing here feeds a calculation.
     SHEAR_CHOICES = {"τ / µQ (relative)": "tau_rel_1_um3",
                      "τ̂ (shape function, µm)": "tau_hat_um"}
-    shear_measure_w = ComboBox(choices=list(SHEAR_CHOICES.keys()),
-                               value="τ / µQ (relative)", label="wall shear")
-    shear_drop_w = CheckBox(value=True,
-                            text="drop clipped / censored sections")
+    shear_measure_w = ComboBox(
+        choices=list(SHEAR_CHOICES.keys()), value="τ / µQ (relative)",
+        label="wall shear",
+        tooltip="Which quantity is painted on the surface. 'τ / µQ' holds the "
+                "flow rate fixed and is the one to compare along a vessel: it "
+                "rises where the vessel narrows, as it should. 'τ̂' holds the "
+                "pressure gradient fixed instead, which inverts that — a "
+                "narrow section passes less flow and reads LOW. τ̂ is also "
+                "exactly the section's area divided by its perimeter, by force "
+                "balance, so it carries no information the geometry columns "
+                "do not already have.")
+    # Two flags, two boxes. They were one box until 2026-08-28 and that hid the
+    # difference between them: on 04step_003, 4 of 88 sections are `clipped`
+    # and 23 are `censored`, and no section is both, so a single control that
+    # dropped 34% of the wall points read as "the solver failed here".
+    #
+    #  - **clipped** — the section contour ran off the edge of the sampling
+    #    disc (`section_span` x caliber) or the volume, so its extent is a
+    #    lower bound. Not a measurement; dropped by default. On 04step_003 all
+    #    four are the stub at the Y junction, where the inscribed radius
+    #    collapses to ~10 um while the cut plane spans 65-75 um across both
+    #    arms.
+    #  - **censored** — the section sits within `crop_ratio` calibers of a
+    #    field-of-view crop. That is a statement about the *premise*, not the
+    #    solve: `force_balance` there is 1.033 against 1.044 in the interior
+    #    and `wall_ok_frac` is 1.000, so the solve is healthy and the section
+    #    may simply not be the whole vessel. Shown by default, because hiding
+    #    a 70 um cuff of wall that has real signal on it is the more
+    #    misleading of the two errors — but Q ~ A^2, so the absolute
+    #    tau / uQ out there is not to be trusted even though the
+    #    circumferential *shape* probably is. The summary line says how much
+    #    of what is drawn is censored, every time, so that caveat cannot go
+    #    quiet.
+    shear_drop_clipped_w = CheckBox(
+        value=True, text="drop clipped sections (contour ran off the disc)",
+        tooltip="The section contour reached the edge of the sampling disc "
+                "(section_span x caliber) or of the volume, so its extent is "
+                "a lower bound rather than a measurement. Usually the stub at "
+                "a junction, where the inscribed radius collapses but the cut "
+                "plane still spans both arms.")
+    shear_drop_censored_w = CheckBox(
+        value=False, text="drop censored sections (near a field-of-view crop)",
+        tooltip="The section sits within crop_ratio calibers of a "
+                "field-of-view crop, so the lumen leaves the image here and "
+                "the section may not be the whole vessel. The solve itself is "
+                "healthy (force_balance ~1.03, wall_ok_frac 1.000); it is the "
+                "premise that is flagged. Q ~ A^2, so absolute tau / uQ out "
+                "there is untrustworthy even where the circumferential shape "
+                "is not.")
+
+    # τ/µQ is normalised by **conservation of Q**, which holds along an
+    # unbranched segment and fails at a Y: the split between daughters rides on
+    # h³ and is not recoverable from geometry (docs/DIRECTION.md §4.2). So each
+    # edge of the graph carries its own unknown µQ, and painting all of them on
+    # one colour scale invites exactly the comparison the quantity cannot
+    # support — [P49](docs/ISSUES.md#p49). Two controls, both display-only:
+    #
+    #  - **normalise per edge** divides each edge by its own median, so the
+    #    colour means "relative to this edge" and no cross-edge reading is
+    #    implied. The per-edge medians are printed, so the absolute scale is
+    #    not lost, only kept off the colour bar.
+    #  - **hide near junctions** greys the zone where the per-section duct
+    #    model does not apply at all — no flow split, no inertia, no entrance
+    #    length — the same way censoring greys the mouths. As a ratio of the
+    #    local caliber, for [P23]'s reason.
+    # How the edges are put on a common scale. Three answers, in decreasing
+    # order of how much they claim:
+    #
+    #  - **flow split** solves the resistance network (`shear.edge_resistance`
+    #    + `shear.flow_split`) and multiplies each edge by its own relative
+    #    flow. §4.2 says the split "rides on h³ and is not recoverable from
+    #    geometry" — true of the closed form, not of the vessel: the per-
+    #    section solve gives the conductance of every station, so R̂ = ∫ds/Q̂
+    #    is an integral we can evaluate and Kirchhoff does the rest. This
+    #    leaves **one** unknown µQ for the whole vessel instead of one per
+    #    edge, which is what [P49](docs/ISSUES.md#p49) was working around.
+    #  - **per edge median** claims nothing and shows only within-edge
+    #    structure. The safe fallback, and what is used when there is no graph
+    #    beside the shear file.
+    #  - **raw** is the old picture, and prints why it is misleading.
+    SHEAR_SCALES = ["flow split (Kirchhoff)", "per edge median", "raw"]
+    shear_scale_w = ComboBox(
+        choices=SHEAR_SCALES, value=SHEAR_SCALES[0], label="edge scaling",
+        tooltip="How the branches are put on one colour scale. Each branch "
+                "carries its own unknown flow rate, so the raw numbers are "
+                "comparable within a branch and not across one. 'flow split' "
+                "computes each branch's resistance and solves for the flows, "
+                "which makes them comparable; 'per edge median' divides each "
+                "branch by its own middle value and claims nothing about how "
+                "they compare; 'raw' is neither and prints a warning.")
+    shear_inlet_w = ComboBox(
+        choices=[-1], value=-1, label="inlet node",
+        tooltip="Which opening the flow enters through. This is a fact about "
+                "the perfusion rig and is not in the image, so it is a control "
+                "and not an inference; the choices are the graph's own node "
+                "numbers, shown as red/blue/yellow points by the graph layer. "
+                "It only affects 'flow split'. Defaults to the widest opening.")
+    shear_terminus_open_w = CheckBox(
+        value=True, text="treat a terminus endpoint as an opening",
+        tooltip="An endpoint that stops inside the volume is a dead end and "
+                "carries no flow. docs/DIRECTION.md §5.1 expects no real "
+                "vessel terminus in this dataset, so one usually means the "
+                "lumen was reconstructed short — open by default. Untick to "
+                "see how much the split depends on it; on 04step_003 it is "
+                "the difference between the stub taking 69% of the flow and "
+                "taking none.")
+    shear_junction_ratio_w = FloatSlider(
+        value=2.0, min=0.0, max=6.0, step=0.25, label="hide_junction_ratio",
+        tooltip="Hide wall points within this many local calibers of a "
+                "junction. The solve is a fully developed per-section duct "
+                "flow; at a Y none of its assumptions hold and Q is not even "
+                "conserved. 0 shows them anyway.")
+
+    def _open_nodes(g):
+        """Endpoint nodes that flow may enter or leave through.
+
+        A crop endpoint is where the vessel leaves the field of view, so it is
+        an opening. A terminus stops inside the volume; that is a dead end
+        unless it is a lumen reconstructed short, which docs/DIRECTION.md §5.1
+        says is the likely case here — hence the checkbox rather than a rule.
+        """
+        deg = np.asarray(g["node_degree"], int)
+        kind = np.asarray(g["node_endpoint_kind"]).astype(str)
+        ends = np.nonzero(deg == 1)[0]
+        if shear_terminus_open_w.value:
+            return ends
+        return ends[kind[ends] == "crop"]
+
+    def _sync_inlet_choices(g):
+        """Offer the openings as inlet choices; default the widest.
+
+        The inlet is a fact about the rig, not about the image, so it is a
+        control and not an inference. The default is the largest-caliber
+        opening — the trunk of a Y usually is — and the choice is printed with
+        the split every time, because the split depends on it.
+        """
+        opens = [int(n) for n in _open_nodes(g)]
+        if not opens:
+            shear_inlet_w.choices = [-1]
+            return
+        cal = np.asarray(g.get("node_caliber_um", []), float)
+        cur = int(shear_inlet_w.value) if shear_inlet_w.value is not None else -1
+        shear_inlet_w.choices = opens
+        if cur not in opens:
+            widest = max(opens, key=lambda n: (cal[n] if n < len(cal)
+                                               else -np.inf))
+            shear_inlet_w.value = widest
+
+    def _flow_split():
+        """Relative flow per edge, or None when it cannot be solved.
+
+        Resistances come from **all** finite sections, not from the ones the
+        display filters kept: dropping a clipped section punches a hole in
+        ∫ds/Q̂, and since the integrand is 1/Q̂ the hole is exactly where the
+        integral is largest. The flags travel with the answer instead — the
+        printed `span_frac` says how much of each edge the sections cover.
+        """
+        g = state.get("vessel_graph")
+        if not g or "edges" not in g or "q_hat_um4" not in g:
+            return None
+        edges = np.asarray(g["edges"], int)
+        if not len(edges):
+            return None
+        _sync_inlet_choices(g)
+        opens = _open_nodes(g)
+        inlet = int(shear_inlet_w.value)
+        if inlet not in set(int(n) for n in opens):
+            return None
+        R = shear.edge_resistance(g["edge_id"], g["s_um"], g["q_hat_um4"])
+        fs = shear.flow_split(edges, {e: v["r_hat_1_um3"]
+                                      for e, v in R.items()}, inlet, opens)
+        if not fs.get("q_rel"):
+            return None
+        fs["r_table"] = [(e, R[e]["r_hat_1_um3"], R[e]) for e in sorted(R)]
+        return fs
 
     def _show_shear():
         wall = state.get("vessel_shear")
@@ -705,16 +1014,88 @@ def build(state, viewer) -> Container:
             return
         pts = np.asarray(wall["points_zyx_um"], float)
         vals = np.asarray(wall[SHEAR_CHOICES[shear_measure_w.value]], float)
-        if shear_drop_w.value:
-            keep = ~(np.asarray(wall["section_clipped"], bool)
-                     | np.asarray(wall["censored"], bool))
-            pts, vals = pts[keep], vals[keep]
+        clipped = np.asarray(wall["section_clipped"], bool)
+        censored = np.asarray(wall["censored"], bool)
+        keep = np.ones(len(pts), bool)
+        if shear_drop_clipped_w.value:
+            keep &= ~clipped
+        if shear_drop_censored_w.value:
+            keep &= ~censored
+        # The junction zone. `dist_junction_um` is all-NaN on an unbranched
+        # image (three of six are), and absent from a shear file written
+        # before [P49] — neither is an error, both mean "no zone to hide".
+        dj = np.asarray(wall.get("dist_junction_um", []), float)
+        cal = np.asarray(wall.get("caliber_um", []), float)
+        near_junction = np.zeros(len(pts), bool)
+        jr = float(shear_junction_ratio_w.value)
+        if jr > 0 and len(dj) == len(pts) and len(cal) == len(pts):
+            with np.errstate(invalid="ignore"):
+                near_junction = np.isfinite(dj) & (dj <= jr * cal)
+            keep &= ~near_junction
+        elif jr > 0 and len(pts) and len(dj) != len(pts):
+            print("Wall shear: this shear file predates the per-point "
+                  "junction distance, so 'hide_junction_ratio' is inactive. "
+                  "Re-run the graph to record it.", flush=True)
+
+        n_all = len(pts)
+        edge = np.asarray(wall.get("edge_id", np.zeros(n_all)), int)
+        pts, vals, cens_kept = pts[keep], vals[keep], censored[keep]
+        edge_kept = edge[keep] if len(edge) == n_all else np.zeros(len(pts), int)
         if not len(pts):
-            print("Wall shear: no usable wall points — every section is "
-                  "clipped or censored. Untick the filter to see them "
-                  "anyway; they are measured against a wall that is not "
-                  "there.", flush=True)
+            print(f"Wall shear: no wall points left — of {n_all:,}, "
+                  f"{int(clipped.sum()):,} are clipped, "
+                  f"{int(censored.sum()):,} censored and "
+                  f"{int(near_junction.sum()):,} within {jr:g} calibers of a "
+                  "junction. Untick a filter or set the ratio to 0 to see "
+                  "them anyway; each control's tooltip says what it means.",
+                  flush=True)
             return
+
+        # Putting the edges on a common scale. Done on the **values**, before
+        # they are carried to vertices, so a vertex takes the scaled number of
+        # the point it is nearest to rather than a blend of two edges'.
+        scale_mode = str(shear_scale_w.value)
+        edge_meds: list[tuple[int, float, int]] = []
+        split_note = ""
+        if scale_mode == "flow split (Kirchhoff)":
+            fs = _flow_split()
+            if fs is None:
+                scale_mode = "per edge median"
+                split_note = ("no centerline graph beside this shear file, so "
+                              "the flow split cannot be solved — fell back to "
+                              "the per-edge median")
+            else:
+                for i in fs["q_rel"]:
+                    m = edge_kept == i
+                    if m.any():
+                        edge_meds.append((int(i), abs(fs["q_rel"][i]),
+                                          int(m.sum())))
+                        vals = np.where(m, vals * abs(fs["q_rel"][i]), vals)
+                missing = sorted({int(e) for e in np.unique(edge_kept)}
+                                 - set(fs["q_rel"]))
+                # An edge with no solved flow is **hidden, not drawn at zero**:
+                # zero is a value and it would read as "no shear here" when
+                # what happened is that the network solve had nothing to say.
+                if missing:
+                    keep_e = ~np.isin(edge_kept, missing)
+                    pts, vals = pts[keep_e], vals[keep_e]
+                    cens_kept, edge_kept = cens_kept[keep_e], edge_kept[keep_e]
+                    split_note = (f"edge(s) {missing} carry no solved flow and "
+                                  f"are not drawn")
+                if not len(pts):
+                    print("Wall shear: the flow split left no edge with a "
+                          "usable scale. Switch 'edge scaling' to per-edge "
+                          "median.", flush=True)
+                    return
+                fs_info = fs
+        if scale_mode == "per edge median":
+            for e in np.unique(edge_kept):
+                m = edge_kept == e
+                med = float(np.nanmedian(vals[m])) if np.isfinite(
+                    vals[m]).any() else np.nan
+                edge_meds.append((int(e), med, int(m.sum())))
+                if np.isfinite(med) and med > 0:
+                    vals = np.where(m, vals / med, vals)
         per_vertex = shear.vertex_field(verts, pts, vals,
                                         float(wall["max_dist_um"]))
         keep_faces = shear.covered_faces(faces, per_vertex)
@@ -740,14 +1121,67 @@ def build(state, viewer) -> Container:
               f"{len(faces):,} faces drawn. Nearest measured point within "
               f"{wall['max_dist_um']:g} µm; the rest is not drawn because it "
               f"was not measured.", flush=True)
+        if split_note:
+            print(f"  NOTE: {split_note}.", flush=True)
+        if scale_mode == "flow split (Kirchhoff)" and edge_meds:
+            body = ", ".join(f"edge {e}: x{q:.3f} ({n:,} pts)"
+                             for e, q, n in edge_meds)
+            print(f"  scaled by the solved flow split, inlet node "
+                  f"{fs_info['inlet_node']}, "
+                  f"{'termini open' if shear_terminus_open_w.value else 'termini closed'}"
+                  f" — one µQ now covers the whole vessel instead of one per "
+                  f"edge ([P49], [I10]). Relative flow: {body}. Resistances "
+                  f"R̂ = ∫ds/Q̂ in µm^-3: "
+                  + ", ".join(f"edge {e}: {r:.3g} (sections span "
+                              f"{100 * v['span_frac']:.0f}% of it)"
+                              for e, r, v in fs_info["r_table"]) + ".",
+                  flush=True)
+            for n in fs_info.get("notes", []):
+                print(f"  {n}", flush=True)
+        elif scale_mode == "per edge median" and edge_meds:
+            body = ", ".join(f"edge {e}: {med:.3g} ({n:,} pts)"
+                             for e, med, n in edge_meds)
+            print(f"  normalised per edge — colour is x the edge's own "
+                  f"median. This claims nothing about how the branches "
+                  f"compare; the flow-split option does. Medians in the raw "
+                  f"unit: {body}.", flush=True)
+        elif len(np.unique(edge_kept)) > 1:
+            print(f"  {len(np.unique(edge_kept))} edges on one colour scale, "
+                  f"**raw**. τ/µQ carries a separate unknown µQ per edge, so "
+                  f"read each branch on its own and no colour across the "
+                  f"junction ([P49]). 'flow split' solves for the missing "
+                  f"factors and makes them comparable ([I10]).", flush=True)
+        if near_junction.any():
+            print(f"  {int(near_junction.sum()):,} point(s) hidden within "
+                  f"{jr:g} calibers of a junction, where the fully developed "
+                  f"per-section duct model does not apply.", flush=True)
+        # Always, not only when it is large: what is on screen is a mix of two
+        # populations and the colour does not distinguish them.
+        if cens_kept.any():
+            print(f"  {int(cens_kept.sum()):,} of the {len(pts):,} points "
+                  f"drawn ({100 * cens_kept.mean():.0f}%) are **censored** — "
+                  f"within `crop_ratio` calibers of a field-of-view crop, "
+                  f"where the section may not be the whole vessel. Q ~ A², so "
+                  f"read their circumferential shape, not their absolute "
+                  f"τ / µQ.", flush=True)
 
     shear_measure_w.changed.connect(lambda *_: _show_shear())
-    shear_drop_w.changed.connect(lambda *_: _show_shear())
+    shear_drop_clipped_w.changed.connect(lambda *_: _show_shear())
+    shear_drop_censored_w.changed.connect(lambda *_: _show_shear())
+    shear_scale_w.changed.connect(lambda *_: _show_shear())
+    shear_inlet_w.changed.connect(lambda *_: _show_shear())
+    shear_terminus_open_w.changed.connect(lambda *_: _show_shear())
+    shear_junction_ratio_w.changed.connect(lambda *_: _show_shear())
 
-    shear_path_w = FileEdit(value="vessel_shear.npz", label="shear_path",
+    shear_path_w = FileEdit(
+        tooltip="Where the wall-shear point cloud is written and read. Kept separate from the graph file because it has one row per wall point rather than per centerline point.",value="vessel_shear.npz", label="shear_path",
                             mode="w")
-    save_shear_w = PushButton(text="Save wall shear")
-    load_shear_w = PushButton(text="Load wall shear")
+    save_shear_w = PushButton(
+        text="Save wall shear",
+        tooltip="Write the wall-shear point cloud: one row per wall point, with its position, its shear and its flags.")
+    load_shear_w = PushButton(
+        text="Load wall shear",
+        tooltip="Read a wall-shear point cloud back and paint it on the current mesh.")
 
     def _save_shear(*_):
         wall = state.get("vessel_shear")
@@ -796,10 +1230,15 @@ def build(state, viewer) -> Container:
     # session (only the mesh geometry is saved with the mesh; curvature and the
     # centerline are separate). Surface curvature -> the 4 per-vertex arrays;
     # path curvature -> the centerline points, κ and branch nodes. ----
-    curv_path_w = FileEdit(value="vessel_curvature.npz", label="curv_path",
+    curv_path_w = FileEdit(
+        tooltip="Where the per-vertex surface curvature is written and read.",value="vessel_curvature.npz", label="curv_path",
                            mode="w")
-    save_curv_w = PushButton(text="Save curvature")
-    load_curv_w = PushButton(text="Load curvature")
+    save_curv_w = PushButton(
+        text="Save curvature",
+        tooltip="Write the per-vertex curvature to the path above.")
+    load_curv_w = PushButton(
+        text="Load curvature",
+        tooltip="Read per-vertex curvature back. It must have been computed on the mesh now loaded, or its length will not match.")
 
     def _save_curv(*_):
         curv = (state.get("vessel_mesh_cache") or {}).get("curvature")
@@ -842,10 +1281,15 @@ def build(state, viewer) -> Container:
         finally:
             call_all(after, label="Load curvature")
 
-    path_curv_path_w = FileEdit(value="vessel_graph.npz",
+    path_curv_path_w = FileEdit(
+        tooltip="Where the centerline graph is written and read.",value="vessel_graph.npz",
                                 label="graph_path", mode="w")
-    save_path_curv_w = PushButton(text="Save centerline graph")
-    load_path_curv_w = PushButton(text="Load centerline graph")
+    save_path_curv_w = PushButton(
+        text="Save centerline graph",
+        tooltip="Write the centerline graph: points, edges, per-station geometry and the cross-section columns.")
+    load_path_curv_w = PushButton(
+        text="Load centerline graph",
+        tooltip="Read a centerline graph back and draw it.")
 
     def _save_path_curv(*_):
         g = state.get("vessel_graph")
@@ -912,18 +1356,33 @@ def build(state, viewer) -> Container:
 
     # Apply the visibility rule once at build time (`suggest_w` exists by now).
     _sync_method_visibility()
+    # The call button is made by `@magicgui` and takes no options there, so its
+    # tooltip is set on the widget afterwards.
+    controls.call_button.tooltip = (
+        "Build the vessel surface from the Cadherin tab's current mask, with "
+        "the method and knobs above. The knobs a method does not read are "
+        "hidden rather than left on screen looking operative.")
 
     return (Container(widgets=[controls, suggest_w,
                               mesh_path_w, save_mesh_w, load_mesh_w,
                               curv_measure_w, curv_radius_w, curv_smooth_w,
                               curv_btn, curv_path_w, save_curv_w, load_curv_w,
                               spur_ratio_w, crop_ratio_w, kappa_win_w,
-                              sec_every_w, sec_span_w, shear_w,
+                              sec_every_w, sec_span_w, sec_field_w, shear_w,
                               graph_color_w,
                               graph_btn,
-                              shear_measure_w, shear_drop_w,
+                              shear_measure_w, shear_drop_clipped_w,
+                              shear_drop_censored_w, shear_scale_w,
+                              shear_inlet_w, shear_terminus_open_w,
+                              shear_junction_ratio_w,
                               shear_path_w, save_shear_w, load_shear_w,
                               path_curv_path_w, save_path_curv_w,
                               load_path_curv_w],
-                     labels=False),
+                     # **Labels on.** With `labels=False` a magicgui Container
+                     # draws no name beside a slider or a combo, so every knob
+                     # in this tab that is not a checkbox (whose text is drawn
+                     # inside it) appeared as a bare unlabelled control. The
+                     # `label=` values were all there and none of them reached
+                     # the screen.
+                     labels=True),
             hist.canvas)

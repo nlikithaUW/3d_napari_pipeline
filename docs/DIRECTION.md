@@ -224,6 +224,30 @@ conservation, and does **not** rescue the split at the crotch. The crotch is the
 structure this program cares about most, so that is where lumen accuracy has to
 be earned — see §3.1 for how far the design geometry can be trusted to supply it.
 
+> **Corrected 2026-08-28 — the split *is* recoverable, and this section was
+> read too pessimistically for two days.** "It rides on h³" says you cannot get
+> the split from a *caliber*, and that is true. It does not say you cannot get
+> it at all. The per-section solve of §4.3 already returns `Q̂` at every station,
+> and `dp/ds = −µQ/Q̂` makes the resistance of a branch an integral over numbers
+> the pipeline has had since §4.3 landed:
+>
+>     R̂ = ∫ ds / Q̂(s)        [µm⁻³, per unit viscosity]
+>
+> Kirchhoff on the graph then gives the split, leaving **one** global µQ unknown
+> for the whole vessel rather than one per branch. Implemented in
+> `shear.edge_resistance` / `shear.flow_split`, validated against the analytic
+> parallel-resistance answer `Q₁/Q₂ = R₂/R₁` to machine precision, and recorded
+> as [I10](ISSUES.md#i10). Three assumptions are the caller's and none is in the
+> image: the outlets sit at a common pressure, which opening is the inlet, and
+> whether an endpoint that stops inside the volume is an opening or a dead end.
+> `batch_mesh` records every scenario rather than choosing one.
+>
+> What this does **not** do is make the shear *at* the crotch right. That is a
+> separate failure — the per-section model is fully developed duct flow and
+> knows nothing of a dividing streamline — and the sensitivity to lumen accuracy
+> this section warns about is unchanged. It puts the branches on one scale; it
+> does not model the junction.
+
 Both results assume fully developed flow in a locally uniform duct. Turns, tapers
 and the junction itself violate that, which is why the paper solves numerically
 rather than algebraically.
@@ -290,9 +314,20 @@ builds the binary section internally and then discards it. Two additions:
 > **Validated against closed form, not against itself** ([I03](ISSUES.md#i03)'s
 > doctrine): `docs/scratch/shear/solver_check.py` solves the disc analytically
 > and the rectangle by its double sine series. `Q̂` lands within 0.08% and the
-> wall profile within 1% on the rectangle. The disc is 5% low for a reason that
-> is not the solver — [P46](ISSUES.md#p46), a digitized wall is longer than the
-> wall it stands for, and it is common-mode.
+> wall profile within 1% on the rectangle.
+>
+> **The disc used to be 5% low and is now 0.2%** ([P46](ISSUES.md#p46), fixed
+> 2026-08-28). The cause was never the solver: the section was cut out of the
+> *binarised* lumen, so every wall landed on a pixel edge and a staircase is
+> longer than the curve it stands for — 4.4% at 2 µm and **5.2% at 0.25 µm**,
+> i.e. worse with resolution, because it is a property of the representation.
+> The section is now cut out of **χ** by interpolation and the wall is its level
+> curve, which is the same curve the displayed mesh is made of. That required
+> three changes together — the contour, the solve's boundary (Shortley-Weller on
+> the crossing fraction) and the fit's distance-to-wall — because any one alone
+> makes τ worse rather than better. On the real sections the free force-balance
+> check moves **1.041 → 0.996**. Numbers from before that date are on the old
+> wall and are not comparable with ones after.
 >
 > **The circumferential variation is not a detail.** On an aspect-1.8 rectangle
 > the solved τ varies **9× around the perimeter**, and on image 6's real
@@ -341,9 +376,15 @@ pixels: the staircase estimate overestimates a smooth boundary by up to 4/π.
   boundary contributes a straight edge that is not a wall, and the solve would
   impose no-slip on it. Images 4 and 5 clip 44–56% of their sections (§8C.3), so
   they are out until [P32](ISSUES.md#p32) is fixed.
-- **Junctions are excluded, not approximated.** Q is conserved only along an
-  unbranched segment; the split at a Y rides on h³ (§4.2) and is not recoverable
-  from geometry alone.
+- **Junctions are excluded, not approximated** — but for the *model*, not for
+  the split. Q is conserved only along an unbranched segment, and the
+  per-section solve is fully developed duct flow, which at a Y has no dividing
+  streamline, no inertia and no entrance length. The napari layer hides a zone
+  of `hide_junction_ratio` (default 2.0) local calibers around a junction for
+  that reason ([P49](ISSUES.md#p49)). The **split** between daughters, which
+  §4.2 used to call unrecoverable, is now solved from the branch resistances
+  ([I10](ISSUES.md#i10)) — that is what makes τ/µQ comparable *across* a
+  junction, and it says nothing about the shear *at* one.
 - **Fully developed flow fails at turns, tapers and the crotch** — §4.2's
   closing caveat, and the reason the reference paper solves numerically. Treating
   each section as locally uniform is a lubrication approximation whose error
@@ -1707,7 +1748,50 @@ whether the endothelium was confluent at 7 days ([P39](ISSUES.md#p39)).
 
 # History
 
-- **2026-08-25c** (latest) — **the adhesion map was stale, re-running it changed
+- **2026-08-28** (latest) — **the wall the shear was solved on was the wrong
+  one, and the flow split was recoverable all along.** Three things, all of them
+  found by pulling on a user's report that the shear layer "has big holes even
+  though the vessel mesh looks good".
+
+  **The holes were a display filter, not missing data.** One napari control was
+  dropping the `section_clipped` and `censored` flags together; on
+  `04step_003` 4 of 88 sections are clipped and 23 are censored and no section
+  is both, so ticking it hid a third of the wall — a ~70 µm blank cuff at each
+  field-of-view mouth. Split into two controls
+  ([P49](ISSUES.md#p49)). The same entry records a real defect underneath: the
+  layer painted all three branches on **one colour scale** while τ/µQ carries a
+  separate unknown µQ per branch, and the three edges' medians span **9×**, so
+  the longest branch — 76% of the wall points — was compressed into the bottom
+  tenth of the colour bar.
+
+  **§4.2's "the split rides on h³ and is not recoverable" was read too
+  pessimistically, and this file said so in three places.** True of a closed
+  form in a caliber; false of this vessel, because §4.3's per-section solve
+  already returns `Q̂` at every station and `R̂ = ∫ds/Q̂` is therefore a
+  computable resistance. Kirchhoff gives the split, and **one** global µQ
+  replaces one per branch ([I10](ISSUES.md#i10)). §4.2 and §7 corrected in
+  place.
+
+  **[P46](ISSUES.md#p46) is fixed, and it was bigger than the entry claimed.**
+  The sections were cut out of the *binarised* lumen, so every wall sat on a
+  pixel edge; they are now cut out of χ by interpolation, with the wall at its
+  level curve — the same curve the displayed mesh is made of. It took three
+  changes together (contour, solve boundary, and the fit's distance-to-wall);
+  any one alone makes τ **worse**. On the analytic disc the perimeter error goes
+  4.4% → 0.03% and now converges, and the spurious circumferential scatter on a
+  shape that has none collapses from 14–24% to 0.2–0.9% — which matters more
+  than the mean, because §7.4 reads the variation *around* a section. On the real
+  sections: perimeter −11.2%, D_h +11.3%, τ/µQ +10.6%, and the free force-balance
+  check 1.041 → **0.996**. **Every shear, perimeter and D_h number produced
+  before this date is on the old wall and is not comparable with one after.**
+
+  **A prediction recorded because it was wrong.** The axial banding in the layer
+  was expected to be mostly digitization and to largely disappear with the above.
+  It did not: the consecutive-section jump in `Q̂` along the long edge is 9.4%
+  before and 9.3% after. It is real section-to-section variation in the
+  reconstructed lumen and remains unexplained.
+
+- **2026-08-25c** — **the adhesion map was stale, re-running it changed
   nothing, and [P03](ISSUES.md#p03)'s planned fix is refuted.** New **§8F**.
   Every adhesion artifact predated the 2026-08-24 clover-gate fix; re-detection
   with a 30× wider gate gave a bit-identical `proba >= 0.5` set, so the gate was
@@ -1790,7 +1874,7 @@ whether the endothelium was confluent at 7 days ([P39](ISSUES.md#p39)).
   as a candidate independent endothelial label for §8C.5, and
   [P39](ISSUES.md#p39) opens on 7 days being short for a confluent monolayer.
 
-- **2026-08-25** (latest) — **read `docs/papers/ncomms8858.pdf`** (Zheng, Chen &
+- **2026-08-25** — **read `docs/papers/ncomms8858.pdf`** (Zheng, Chen &
   Lopez, Nat Commun 6:7858, 2015), the lab's own account of this microvessel
   system, and recorded two things it changes. **§3.1**: the pattern design file
   §3 has been asking for is a *prior*, not the lumen — the mould defines the

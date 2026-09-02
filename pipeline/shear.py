@@ -68,7 +68,9 @@ from skimage import measure
 # (1) the solve
 # --------------------------------------------------------------------------- #
 
-def solve_shape_function(mask: np.ndarray, step_um: float) -> np.ndarray:
+def solve_shape_function(mask: np.ndarray, step_um: float,
+                         level_field: np.ndarray | None = None,
+                         level: float = 0.5) -> np.ndarray:
     """``û`` with ``∇²û = -1`` inside ``mask`` and ``û = 0`` on the wall.
 
     Five-point stencil on the mask pixels. **The wall is taken at the cell
@@ -85,6 +87,20 @@ def solve_shape_function(mask: np.ndarray, step_um: float) -> np.ndarray:
     effective height by one pixel and `Q̂` by 5.8%, since Q̂ ∝ H³. That version
     was written first and `solver_check.py` is what caught it.
 
+    **With ``level_field``, the wall goes where the field says instead.** The
+    half-pixel rule above is right only when the wall really is at the pixel
+    face, and on a curved wall it is not: it is somewhere between the last
+    inside pixel and the first outside one. Given the continuous field the mask
+    was thresholded from, the crossing fraction θ is known per direction, and
+    the stencil becomes the Shortley-Weller one for unequal spacing —
+    ``u = 0`` at θ·step rather than at 0.5·step.
+
+    This has to move together with `section_contour`'s ``level_field``. The two
+    are one change: measuring the true wall length while solving inside the
+    staircase makes τ **worse**, not better (25% low on the disc), because the
+    solve and the perimeter would then be describing different ducts. Moving
+    both puts every number on the real wall — see [P46](docs/ISSUES.md#p46).
+
     Returns an array the shape of ``mask``, in µm², zero outside.
     """
     mask = np.asarray(mask, bool)
@@ -97,33 +113,95 @@ def solve_shape_function(mask: np.ndarray, step_um: float) -> np.ndarray:
     idx = -np.ones(mask.shape, np.int64)
     idx[mask] = np.arange(n)
 
-    rows = [np.arange(n)]
-    cols = [np.arange(n)]
-    diag = np.full(n, -4.0)
-    for axis, shift in ((0, 1), (0, -1), (1, 1), (1, -1)):
+    def _neighbour(axis, shift):
+        """Index of the neighbour in one direction, -1 where there is none."""
         nb = np.roll(idx, shift, axis=axis)
         # A roll wraps; the wrapped edge is outside the duct either way, so
         # blank it rather than letting the far side of the image be a neighbour.
         sl = [slice(None), slice(None)]
         sl[axis] = 0 if shift == 1 else -1
         nb[tuple(sl)] = -1
-        j = nb[mask]
-        ok = j >= 0
-        rows.append(np.arange(n)[ok])
-        cols.append(j[ok])
-        # Mirror the missing neighbours: u_ghost = -u_i puts zero at the face.
-        diag -= ~ok
-    vals = [diag] + [np.ones(len(r)) for r in rows[1:]]
+        return nb[mask]
 
+    if level_field is None:
+        rows = [np.arange(n)]
+        cols = [np.arange(n)]
+        diag = np.full(n, -4.0)
+        for axis, shift in ((0, 1), (0, -1), (1, 1), (1, -1)):
+            j = _neighbour(axis, shift)
+            ok = j >= 0
+            rows.append(np.arange(n)[ok])
+            cols.append(j[ok])
+            # Mirror the missing neighbours: u_ghost = -u_i puts zero at the
+            # face.
+            diag -= ~ok
+        vals = [diag] + [np.ones(len(r)) for r in rows[1:]]
+        A = sparse.coo_matrix(
+            (np.concatenate(vals),
+             (np.concatenate(rows), np.concatenate(cols))),
+            shape=(n, n)).tocsc()
+        x = spla.spsolve(A, np.full(n, -h * h))
+        u[mask] = x
+        return u
+
+    # Shortley-Weller. Per axis, the two spacings are `h` toward an interior
+    # neighbour and `θ·h` toward the wall, and
+    #     u_xx ≈ 2/(s₊+s₋) · [u₊/s₊ + u₋/s₋ − u_i(1/s₊ + 1/s₋)]
+    # with u = 0 on the wall side. θ comes from linear interpolation of the
+    # field to `level`, which is the same interpolation marching squares uses
+    # for the contour — so the wall the solve stops at and the wall
+    # `section_contour` measures are the same curve, not two.
+    f = np.asarray(level_field, float) - float(level)
+    fi = f[mask]
+    rows = [np.arange(n)]
+    cols = [np.arange(n)]
+    diag = np.zeros(n)
+    off_r, off_c, off_v = [], [], []
+    # θ below this is treated as this: a pixel centre sitting a thousandth of a
+    # cell from the wall would otherwise put 10⁶ on the diagonal and wreck the
+    # conditioning for a cell that carries no flow anyway.
+    THETA_MIN = 0.02
+    for axis in (0, 1):
+        jp, jm = _neighbour(axis, -1), _neighbour(axis, 1)
+        fp = np.where(jp >= 0, 0.0, _shift_field(f, axis, -1)[mask])
+        fm = np.where(jm >= 0, 0.0, _shift_field(f, axis, 1)[mask])
+        sp = np.where(jp >= 0, 1.0,
+                      np.clip(fi / np.maximum(fi - fp, 1e-12),
+                              THETA_MIN, 1.0)) * h
+        sm = np.where(jm >= 0, 1.0,
+                      np.clip(fi / np.maximum(fi - fm, 1e-12),
+                              THETA_MIN, 1.0)) * h
+        c = 2.0 / (sp + sm)
+        diag -= c * (1.0 / sp + 1.0 / sm)
+        for j, sj in ((jp, sp), (jm, sm)):
+            ok = j >= 0
+            off_r.append(np.arange(n)[ok])
+            off_c.append(j[ok])
+            off_v.append((c / sj)[ok])
     A = sparse.coo_matrix(
-        (np.concatenate(vals), (np.concatenate(rows), np.concatenate(cols))),
+        (np.concatenate([diag] + off_v),
+         (np.concatenate(rows + off_r), np.concatenate(cols + off_c))),
         shape=(n, n)).tocsc()
-    x = spla.spsolve(A, np.full(n, -h * h))
-    u[mask] = x
+    u[mask] = spla.spsolve(A, np.full(n, -1.0))
     return u
 
 
-def section_contour(mask: np.ndarray, step_um: float) -> dict:
+def _shift_field(f: np.ndarray, axis: int, shift: int) -> np.ndarray:
+    """`np.roll` with the wrapped edge blanked to a large negative value.
+
+    The wrapped edge is outside the duct by construction, so it must read as
+    "well outside" rather than as whatever happens to sit on the far side.
+    """
+    out = np.roll(f, shift, axis=axis)
+    sl = [slice(None), slice(None)]
+    sl[axis] = 0 if shift == 1 else -1
+    out[tuple(sl)] = -np.abs(f).max() - 1.0
+    return out
+
+
+def section_contour(mask: np.ndarray, step_um: float,
+                    level_field: np.ndarray | None = None,
+                    level: float = 0.5) -> dict:
     """The sub-pixel wall of a section: contour points, arc weights, perimeter.
 
     Split out so that **the perimeter `lumen_graph.cross_section` reports and
@@ -131,20 +209,50 @@ def section_contour(mask: np.ndarray, step_um: float) -> dict:
     estimates that drift. `D_h = 4A/P` is §4.2's whole input and P is not
     computed anywhere else in this project.
 
-    Marching squares at 0.5, so it is sub-pixel rather than a staircase; each
-    vertex owns half the edge on either side of it, so `seg_len_um` sums to the
+    Marching squares, so it is sub-pixel rather than a staircase; each vertex
+    owns half the edge on either side of it, so `seg_len_um` sums to the
     perimeter exactly. Multiple contours (a section with a hole, or a mask that
     the plane cut into pieces) are all returned and `n_contours` says so —
     deciding whether that is a defect belongs to the caller.
+
+    **``level_field`` is the fix for [P46](docs/ISSUES.md#p46) and it is worth
+    understanding why it works.** Run on a 0/1 ``mask``, marching squares can
+    only place a vertex on a pixel edge, so the contour it returns is a
+    staircase and its length is biased high — 4.4% on a digitized disc at 2 µm,
+    **5.2% at 0.25 µm**. It gets *worse* with resolution, because it is a
+    digitization bias and not a discretization error, and no amount of finer
+    sampling of a binary array removes it.
+
+    Hand it the **continuous** field the mask was thresholded from and the
+    contour becomes the real level curve, interpolated between pixels: the same
+    disc reads **0.03% at 2 µm and 0.00% at 0.5 µm**. The field costs nothing
+    to keep — `lumen_graph.cross_section` samples χ on the cut plane and
+    thresholds it, so it has both, and passing the one it already had is the
+    whole change.
+
+    ``mask`` still defines *which* region is being measured (the area, the
+    solve domain, and which component the caller selected); ``level_field``
+    only says where its wall is.
     """
     mask = np.asarray(mask, bool)
     h = float(step_um)
     out = {"contour_rc": np.zeros((0, 2)), "seg_len_um": np.zeros(0),
-           "perim_um": np.nan, "n_contours": 0}
+           "perim_um": np.nan, "n_contours": 0,
+           "segments_rc": np.zeros((0, 2, 2))}
     if not mask.any():
         return out
-    contours = measure.find_contours(np.pad(mask.astype(float), 1), 0.5)
-    rc, seg = [], []
+    if level_field is None:
+        contours = measure.find_contours(np.pad(mask.astype(float), 1), 0.5)
+    else:
+        # Below-level padding, so a section touching the array edge closes
+        # against the pad rather than running off it — the same role the pad
+        # plays in the binary branch.
+        f = np.asarray(level_field, float)
+        lo = float(min(np.nanmin(f), level)) - 1.0
+        f = np.where(np.isfinite(f), f, lo)
+        contours = measure.find_contours(
+            np.pad(f, 1, constant_values=lo), float(level))
+    rc, seg, segments = [], [], []
     for c in contours:
         c = c - 1.0                       # undo the pad
         closed = np.allclose(c[0], c[-1])
@@ -158,12 +266,47 @@ def section_contour(mask: np.ndarray, step_um: float) -> dict:
         seg.append(0.5 * (np.linalg.norm(nxt - pts, axis=1)
                           + np.linalg.norm(pts - prv, axis=1)) * h)
         rc.append(pts)
+        # The wall as **segments**, not only as vertices. `wall_profile` needs
+        # the distance from a pixel to the wall *curve*; the distance to the
+        # nearest vertex is a different quantity and it is badly wrong exactly
+        # where it matters most — a pixel 0.1 px from the wall but half a
+        # vertex-spacing along it reads 3-5x too far, and those near-wall
+        # pixels are what set the linear coefficient of the τ fit.
+        segments.append(np.stack([pts, nxt], axis=1))
     if not rc:
         return out
     out["contour_rc"] = np.concatenate(rc)
     out["seg_len_um"] = np.concatenate(seg)
     out["perim_um"] = float(out["seg_len_um"].sum())
     out["n_contours"] = len(rc)
+    out["segments_rc"] = np.concatenate(segments)
+    return out
+
+
+def _dist_to_segments(pts_rc: np.ndarray, segments_rc: np.ndarray,
+                      chunk: int = 4096) -> np.ndarray:
+    """Exact distance from each point to the nearest segment, in pixels.
+
+    Straight point-to-segment algebra, chunked over the points so the N x M
+    intermediate stays bounded. There is no approximation in here and no
+    tolerance to tune: the contour is a polyline and this is its distance
+    function.
+    """
+    P = np.asarray(pts_rc, float)
+    S = np.asarray(segments_rc, float)
+    if len(P) == 0 or len(S) == 0:
+        return np.full(len(P), np.inf)
+    A, B = S[:, 0, :], S[:, 1, :]
+    AB = B - A
+    L2 = np.einsum("ij,ij->i", AB, AB)
+    L2 = np.where(L2 > 0, L2, 1.0)
+    out = np.empty(len(P))
+    for k in range(0, len(P), chunk):
+        Q = P[k:k + chunk]
+        AP = Q[:, None, :] - A[None, :, :]
+        t = np.clip(np.einsum("ijk,jk->ij", AP, AB) / L2, 0.0, 1.0)
+        d = AP - t[..., None] * AB[None, :, :]
+        out[k:k + chunk] = np.sqrt(np.einsum("ijk,ijk->ij", d, d)).min(1)
     return out
 
 
@@ -180,7 +323,9 @@ DEFAULT_FIT_DEPTH_PX = 3.0
 
 def wall_profile(u_hat: np.ndarray, mask: np.ndarray, step_um: float,
                  fit_radius_px: float = DEFAULT_FIT_RADIUS_PX,
-                 fit_depth_px: float = DEFAULT_FIT_DEPTH_PX) -> dict:
+                 fit_depth_px: float = DEFAULT_FIT_DEPTH_PX,
+                 level_field: np.ndarray | None = None,
+                 level: float = 0.5) -> dict:
     """``|∇û|`` at sub-pixel points around the wall, plus the perimeter.
 
     The wall is the marching-squares 0.5 contour of ``mask`` — sub-pixel, and
@@ -216,20 +361,27 @@ def wall_profile(u_hat: np.ndarray, mask: np.ndarray, step_um: float,
     """
     mask = np.asarray(mask, bool)
     h = float(step_um)
-    out = dict(section_contour(mask, h))
+    out = dict(section_contour(mask, h, level_field, level))
     out["tau_hat_um"] = np.zeros(0)
     pts = out["contour_rc"]
     if len(pts) == 0:
         return out
 
     # Interior pixels within `fit_depth_px` of the wall, with their **true**
-    # distance to the contour rather than a nominal half pixel.
-    ctree = cKDTree(pts)
+    # distance to the contour rather than a nominal half pixel. The distance is
+    # to the contour *polyline*; using the nearest vertex instead reads 10%
+    # high on the analytic disc even when handed an exact û, because the
+    # closest pixels — the ones the linear coefficient rests on — are the ones
+    # a vertex spacing biases most.
     src = np.argwhere(mask).astype(float)
-    d_px, _ = ctree.query(src)
+    ctree = cKDTree(pts)
+    d_near, _ = ctree.query(src)                 # cheap prefilter, never used
+    near = d_near <= float(fit_depth_px) + 2.0   # as the fitted distance
+    src = src[near]
+    d_px = _dist_to_segments(src, out["segments_rc"])
     keep = d_px <= float(fit_depth_px)
     src, d_px = src[keep], d_px[keep]
-    u_src = u_hat[mask][keep]
+    u_src = u_hat[mask][near][keep]
     if len(src) < 4:
         out["tau_hat_um"] = np.full(len(pts), np.nan)
         return out
@@ -253,7 +405,9 @@ def wall_profile(u_hat: np.ndarray, mask: np.ndarray, step_um: float,
     return out
 
 
-def solve_section(mask: np.ndarray, step_um: float) -> dict:
+def solve_section(mask: np.ndarray, step_um: float,
+                  level_field: np.ndarray | None = None,
+                  level: float = 0.5) -> dict:
     """The whole per-section solve: ``û``, ``Q̂``, and τ̂ around the wall.
 
     Every returned quantity is the ``dp/ds = -1, µ = 1`` shape function, so
@@ -264,8 +418,8 @@ def solve_section(mask: np.ndarray, step_um: float) -> dict:
     """
     mask = np.asarray(mask, bool)
     h = float(step_um)
-    u = solve_shape_function(mask, h)
-    prof = wall_profile(u, mask, h)
+    u = solve_shape_function(mask, h, level_field, level)
+    prof = wall_profile(u, mask, h, level_field=level_field, level=level)
     area = float(mask.sum()) * h * h
     q_hat = float(u.sum()) * h * h
     w = prof["seg_len_um"]
@@ -417,3 +571,158 @@ def contour_to_3d(contour_rc: np.ndarray, extras: dict) -> np.ndarray:
     return (np.asarray(extras["point_um"], float)[None, :]
             + a[:, None] * np.asarray(extras["u"], float)[None, :]
             + b[:, None] * np.asarray(extras["v"], float)[None, :])
+
+
+# --------------------------------------------------------------------------- #
+# (4) along the vessel: resistance, and the flow split at a junction
+# --------------------------------------------------------------------------- #
+#
+# §4.2 says the flow split between two daughters "rides on h³ and is not
+# recoverable from geometry". That is true of the *closed form* — you cannot
+# read the split off a caliber — but it is not true of the vessel: the per-
+# section solve already gives the exact conductance of every station, so the
+# resistance of a branch is an integral this project can evaluate, and the
+# split follows from Kirchhoff. What is genuinely unrecoverable is the single
+# **global** µQ, not the ratios between branches.
+#
+# This is what retires [P49](docs/ISSUES.md#p49)'s per-edge unknowns: with the
+# split in hand, one scale covers the whole vessel and τ/µQ becomes comparable
+# across a junction, which per-edge normalisation only ever hid.
+
+def edge_resistance(edge_id, s_um, q_hat_um4, usable=None) -> dict:
+    """Hydraulic resistance of each edge, per unit viscosity → ``R̂`` in µm⁻³.
+
+    For fully developed flow ``dp/ds = -µQ/Q̂(s)``, so integrating along an
+    edge gives ``ΔP = µQ · ∫ds/Q̂`` and the bracket is a resistance that needs
+    no flow rate, no viscosity and no pressure — exactly the same trick that
+    makes `tau_rel_1_um3` readable, applied along the axis instead of around
+    the wall.
+
+    Trapezoid over the stations that actually carry a section, since the
+    sections are cut every `section_every_um` and NaN in between. ``usable``
+    (default: every finite station) drops stations the caller does not trust;
+    the flags are `lumen_graph`'s to supply, not this function's to invent.
+
+    **Read `span_frac` before using R̂.** The integrand is 1/Q̂, so a *narrow*
+    station contributes most, and a narrow station is also the one most likely
+    to be dropped as clipped. An edge whose sections span 60% of its length has
+    a resistance that is a lower bound, and by an unknown amount — which is why
+    the fraction is returned beside the number rather than folded into it.
+    """
+    edge_id = np.asarray(edge_id, int)
+    s = np.asarray(s_um, float)
+    q = np.asarray(q_hat_um4, float)
+    ok = np.isfinite(q) & (q > 0) & np.isfinite(s)
+    if usable is not None:
+        ok &= np.asarray(usable, bool)
+    out: dict[int, dict] = {}
+    for e in np.unique(edge_id):
+        on = edge_id == e
+        full = float(s[on].max() - s[on].min()) if on.any() else 0.0
+        sel = on & ok
+        n = int(sel.sum())
+        if n < 2:
+            out[int(e)] = {"r_hat_1_um3": np.nan, "n_sections": n,
+                           "span_um": 0.0, "length_um": full,
+                           "span_frac": 0.0}
+            continue
+        o = np.argsort(s[sel])
+        ss, qq = s[sel][o], q[sel][o]
+        span = float(ss[-1] - ss[0])
+        out[int(e)] = {
+            "r_hat_1_um3": float(np.trapezoid(1.0 / qq, ss)),
+            "n_sections": n, "span_um": span, "length_um": full,
+            "span_frac": (span / full) if full > 0 else np.nan}
+    return out
+
+
+def flow_split(edges, r_hat, inlet_node: int, open_nodes) -> dict:
+    """Relative flow in every edge, from the resistances and the topology.
+
+    A Kirchhoff solve: unknown pressures at the interior nodes, ``p = 1`` at
+    ``inlet_node`` and ``p = 0`` at every other node in ``open_nodes``,
+    conductance ``1/R̂`` on each edge. The absolute pressure drop is arbitrary,
+    so the answer is reported as ``q_rel`` **normalised to the inlet edge**:
+    the ratios are the content, the scale is not.
+
+    ``open_nodes`` is the caller's decision and it matters. An endpoint that is
+    a real vessel terminus is a dead end and carries no flow; one that is a
+    field-of-view crop is an opening. `lumen_graph` classifies them
+    (`node_endpoint_kind`), but [DIRECTION](docs/DIRECTION.md) §5.1 expects no
+    real terminus in this dataset, so an endpoint classified as a terminus is
+    usually a lumen reconstructed short — treat it as open unless there is a
+    reason not to, and say which was done.
+
+    **Every outlet is held at one pressure.** That is a statement about the rig
+    — the daughters drain to a common reservoir — and it is the assumption the
+    whole split rests on. If the outlets sit at different pressures the ratios
+    change and nothing here would notice.
+    """
+    edges = [(int(a), int(b)) for a, b in edges]
+    r = {int(k): float(v) for k, v in dict(r_hat).items()}
+    openset = {int(n) for n in open_nodes}
+    inlet = int(inlet_node)
+    out = {"q_rel": {}, "p": {}, "notes": [], "inlet_node": inlet,
+           "open_nodes": sorted(openset)}
+    if inlet not in openset:
+        out["notes"].append(
+            f"WARN: inlet node {inlet} is not one of the open nodes "
+            f"{sorted(openset)} — nothing can flow in.")
+        return out
+
+    live = [i for i, (a, b) in enumerate(edges)
+            if a >= 0 and b >= 0 and np.isfinite(r.get(i, np.nan))
+            and r.get(i, 0.0) > 0]
+    if not live:
+        out["notes"].append("WARN: no edge has a usable resistance.")
+        return out
+    nodes = sorted({n for i in live for n in edges[i]})
+    free = [n for n in nodes if n not in openset]
+    pos = {n: k for k, n in enumerate(free)}
+
+    # Σ_edges (p_a - p_b)/R = 0 at every free node; fixed nodes move to the RHS.
+    A = np.zeros((len(free), len(free)))
+    b = np.zeros(len(free))
+    for i in live:
+        na, nb = edges[i]
+        g = 1.0 / r[i]
+        for u, v in ((na, nb), (nb, na)):
+            if u in pos:
+                A[pos[u], pos[u]] += g
+                if v in pos:
+                    A[pos[u], pos[v]] -= g
+                else:
+                    b[pos[u]] += g * (1.0 if v == inlet else 0.0)
+    p = {n: (1.0 if n == inlet else 0.0) for n in openset}
+    if free:
+        try:
+            x = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            out["notes"].append(
+                "WARN: the pressure system is singular — the graph has a "
+                "component with no opening on it. No split.")
+            return out
+        p.update({n: float(x[pos[n]]) for n in free})
+
+    q = {}
+    for i in live:
+        na, nb = edges[i]
+        q[i] = (p.get(na, 0.0) - p.get(nb, 0.0)) / r[i]
+    inlet_edges = [i for i in live if inlet in edges[i]]
+    scale = max((abs(q[i]) for i in inlet_edges), default=0.0)
+    if scale <= 0:
+        out["notes"].append("WARN: no flow leaves the inlet node.")
+        return out
+    out["p"] = p
+    out["q_rel"] = {i: float(q[i] / scale) for i in live}
+    out["q_signed"] = {i: float(q[i] / scale) for i in live}
+    # Conservation is exact by construction at every free node; report the
+    # worst residual anyway, because it is free and it catches a topology the
+    # caller assembled wrong.
+    resid = 0.0
+    for n in free:
+        resid = max(resid, abs(sum(
+            (q[i] if edges[i][0] == n else -q[i])
+            for i in live if n in edges[i])) / scale)
+    out["max_node_residual"] = float(resid)
+    return out

@@ -41,7 +41,15 @@ METHODS = [METHOD_NIBLACK, METHOD_SAUVOLA, METHOD_BERNSEN]
 # ~5 on the WT stack, which leaves ~99% of (speckle) components in the mask and
 # wrecks the downstream vessel alpha shape; ~12 drops the speckle. Fully tunable
 # on the slider afterwards.
-MIN_SIZE_FLOOR = 12
+# 25, not 12, since 2026-09-02 — the operator's working value, and it is a
+# **measurement**, not a preference: at the new mask (floor_k 0, window_xy 101,
+# niblack_k 2) `V3_..._09step_001` keeps 17,297 components at 12 and 3,794 at
+# 25, and the extra speckle changes the auto alpha from 9.77 to 6.82 um, which
+# changes the solid, which loses the vessel's junction entirely — the graph
+# reads 1 edge / 0 junctions instead of 3 edges / 1 junction. The Y is ground
+# truth from the experimenter. min_size, alpha and topology are coupled now
+# that alpha is auto, so this floor is load-bearing rather than cosmetic.
+MIN_SIZE_FLOOR = 25
 
 
 def build(state, viewer) -> Container:
@@ -172,7 +180,7 @@ def build(state, viewer) -> Container:
         min_size={"widget_type": "Slider", "min": 0, "max": 5000},
         band_um={"widget_type": "FloatSlider", "min": 0.0, "max": 50.0, "step": 0.5},
     )
-    def filter_controls(min_size: int = 0, band_um: float = 0.0):
+    def filter_controls(min_size: int = MIN_SIZE_FLOOR, band_um: float = 0.0):
         _apply(min_size, band_um)
 
     @debounce(150)
@@ -190,19 +198,35 @@ def build(state, viewer) -> Container:
     @magicgui(
         call_button="Apply threshold + label",
         method={"widget_type": "ComboBox", "choices": METHODS},
-        window_xy={"widget_type": "Slider", "min": 5, "max": 101, "step": 1},
+        # Max 201, not 101. The shipped default is 101 and a slider ceiling is
+        # a widget limit, not a physical one — CLAUDE.md's rule is that a
+        # hand-tuned value sitting exactly at one may have been truncated
+        # rather than converged, so the ceiling must stay clear of the default.
+        window_xy={"widget_type": "Slider", "min": 5, "max": 201, "step": 1},
         niblack_k={"widget_type": "FloatSlider", "min": -1.0, "max": 4.0, "step": 0.05},
         sauvola_k={"widget_type": "FloatSlider", "min": 0.0, "max": 1.0, "step": 0.01},
         bernsen_contrast={"widget_type": "FloatSlider", "min": 0.0, "max": 1.0, "step": 0.01},
+        # 0 disables the global floor entirely and is now the default; the
+        # slider therefore has to reach it, which it does.
         floor_k={"widget_type": "FloatSlider", "min": 0.0, "max": 10.0, "step": 0.1},
     )
     def threshold_controls(
         method: str = METHOD_NIBLACK,
-        window_xy: int = 53,
+        # 101, not 53 — the operator's working value, adopted as the default on
+        # 2026-09-02. A wider window makes the local mean a better estimate of
+        # background under a large, dim, sparse structure like the far wall,
+        # where a 53-voxel window is partly inside the wall itself.
+        window_xy: int = 101,
         niblack_k: float = 2.0,
         sauvola_k: float = 0.2,
         bernsen_contrast: float = 0.15,
-        floor_k: float = 1.0,
+        # 0.0, not 1.0 — **no global intensity floor**, adopted 2026-09-02.
+        # The floor is what [P28] measures deleting 59-85% of the dim wall: it
+        # is a single global cut, so it removes the far wall wherever the stain
+        # is weak regardless of how well that wall stands out locally. With
+        # Niblack live the local term is doing the work and the floor is a
+        # backstop that costs more than it earns. **This changes every mask.**
+        floor_k: float = 0.0,
     ):
         # This body is the "Apply threshold + label" button action. Visibility
         # is driven separately off the `method` widget's `changed` signal, so

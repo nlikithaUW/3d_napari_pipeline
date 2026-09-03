@@ -101,7 +101,7 @@ true of the code and data on that date and may not be true now.
 | [I06](#i06) | Oriented-point implicit reconstruction — the plan of record | idea | **in progress — `alpha 3D solid -> poisson` is the direction of record as of 2026-08-21**, visually confirmed; three refinements open (bumps, runtime, Open3D) |
 | [I07](#i07) | Local thresholding on the clover channel | idea | **closed 2026-08-25 — premise refuted.** The gate was never binding; it is [P43](#p43)-removed, and [P03](#p03) is unaffected |
 | [I08](#i08) | "Refine with cadherin" is a dead end and should be removed | idea | open — **superseded by [I06](#i06); sole consumer of [P34](#p34)'s centroids** |
-| [P32](#p32) | The fitted lumen leaks through the z faces on images 4 and 5, wrecking the graph topology | S2 | open — **diagnosed and warned, not fixed** |
+| [P32](#p32) | The fitted surface is placed below the far wall — one global iso-level cannot hold both walls | **S1** | open — **cause corrected 2026-09-02**; the wall is present and the surface misses it. One fix built and **measured not to work** (far-wall fill, off by default). Images 4/5 set aside; **image 6 is affected mildly and is not** |
 | [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
 | [P34](#p34) | Cadherin tab computed per-component centroids eagerly for an off-path consumer | S3 | **fixed** — 34.45 s -> 0 at `floor_k` 3.0 |
 | [P35](#p35) | `alpha 3D` hangs forever on a permissive mask, with no warning | S3 | **mitigated** — guard landed 2026-08-24; it refuses instead of hanging |
@@ -124,6 +124,8 @@ true of the code and data on that date and may not be true now.
 | [I10](#i10) | The junction flow split **is** recoverable — R̂ = ∫ds/Q̂ from the sections already solved | idea | **implemented** 2026-08-28 — supersedes part of [P49](#p49); validated against the analytic network |
 | [P52](#p52) | Tabs clipped anything past the window bottom; the Vessel mesh knobs rendered with no names | S3 | **fixed** 2026-08-28 — all tabs scroll; 48 controls labelled and tooltipped |
 | [P51](#p51) | `poisson_smooth_um` was three scales in one knob; the detection one silently severed a tapering vessel | **S2** | **fixed** 2026-09-02 — 46% of `04step_003` was under the detection floor at the default; knob split, old behaviour is the default and rebuilds byte-identical |
+| [P53](#p53) | 61% of the wall points carrying a shear number are not standing on measured wall, and the existing flags do not catch it | **S1** | open — **measured 2026-09-02 on image 6**; one 180 µm stretch is sound, one whole branch is not; the τ *range* survives the filter |
+| [P54](#p54) | "Suggest alpha" and the `alpha3d_um` guard contradict each other on every V3 image — the button's value always trips the warning | S3 | open — **measured 2026-09-02**; suggest gives 9.5–10.0 at `subsample_um` 5.0, the guard demands ≥ 15.0. Both meshes are good; it is the advice that is broken |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -3987,18 +3989,24 @@ patches.
 ---
 
 <a id="p32"></a>
-## P32 — The fitted lumen leaks through the z faces on images 4 and 5, and the centerline graph then invents junctions
+## P32 — The fitted surface is placed below the far wall, so the lumen leaks through the z faces and the centerline graph invents junctions
 
 | | |
 |---|---|
-| **Status** | open — diagnosed and warned about, not fixed |
-| **Severity** | S2 |
+| **Status** | open — **cause corrected 2026-09-02**; the 2026-08-22 attribution below is wrong and is kept as record |
+| **Severity** | **S1** (raised 2026-09-02 from S2) — the surface is placed ~18 µm off the wall over a fifth of the mask, so `caliber_um`, `area_um2` and every τ derived from them are wrong there, not merely censored |
 | **Opened** | 2026-08-22 |
-| **Last verified** | 2026-08-22 (all six images, `alpha 3D solid -> poisson` at one recorded parameter set) |
+| **Last verified** | 2026-09-02 (`V3b_..._04step_001`, `cadherin_labels.npz` of 2026-08-24, `min_size` 12, recorded `alpha 3D solid -> poisson` parameters from `vessel_recon__alphapoisson.json`) |
 | **Resolved** | — |
-| **Where** | `pipeline/vessel_poisson.py` (the super-level set of χ), surfacing in `pipeline/lumen_graph.py::face_openings` |
-| **Affects** | the centerline graph's topology, and every caliber column, on `V3b_..._04step_001` and `V3b_..._04step_002` |
-| **Evidence** | `docs/DIRECTION.md` §8C.2 |
+| **Where** | `pipeline/vessel_poisson.py::reconstruct` — the single global `iso_level` (`_weighted_percentile` over the occupied cells); surfacing in `pipeline/lumen_graph.py::face_openings` |
+| **Affects** | the centerline graph's topology and every caliber column on `V3b_..._04step_001` and `V3b_..._04step_002`; **and, more mildly, `V3b_..._04step_003`** — the image the §8 shear result was measured on |
+| **Evidence** | `docs/DIRECTION.md` §8C.2 (the original); the 2026-09-02 History below (the correction) |
+
+> **The text from here to "Where a fix might come from" is the 2026-08-22
+> attribution and it is wrong.** It is kept, unedited, because it was what was
+> believed and acted on for six weeks. Read the 2026-09-02 History first: the
+> wall is *present*, the surface is placed ~18 µm outside it, and the z-face
+> leak is a symptom of a global iso-level on a drifting χ.
 
 The lumen `lumen_graph` builds on is `chi > iso_level`. Where the wall is
 missing from the mask, χ's super-level set bleeds through the hole. Some of that
@@ -4049,7 +4057,313 @@ and it should not be pressed into service as one.
 - [P19](#p19)/[P28](#p28): both images are mask-poor, and the leak is downstream
   of the missing wall.
 
-**Related:** [P24](#p24)(b), [P19](#p19), [P28](#p28), [P26](#p26), [I03](#i03).
+**Related:** [P24](#p24)(b), [P19](#p19), [P28](#p28), [P26](#p26), [P51](#p51),
+[I03](#i03), [I06](#i06).
+
+**History**
+
+- 2026-08-22 — opened, on the z-face voxel counts in the table above, and
+  attributed to **missing wall**: "where the wall is missing from the mask, χ's
+  super-level set bleeds through the hole". `lumen_graph.face_openings` was given
+  a warning and the entry was left as a mitigation.
+
+- 2026-09-02 — **the cause is wrong, and the defect is larger and less specific
+  than this entry claimed.** Opened on a user report that on `V3b_..._04step_001`
+  "the bottom of the vessel mesh is there, the mesh is not wrapping it properly".
+  It is. Scripts in `docs/scratch/p32/` (`stage1.py`–`stage11.py`); the numbers
+  below are the tracked record, measured against the **saved**
+  `vessel_mesh__alphapoisson.npz` unless a rebuild is named.
+
+  **1. The far wall is present and the surface misses it.** Distance from every
+  cadherin mask voxel to the nearest mesh vertex (300–400k sampled):
+
+  | z band (µm) | mask voxels | median | p90 | >10 µm |
+  |---|---|---|---|---|
+  | 10–20 | 14,986 | 2.34 | 4.66 | 0.7% |
+  | 20–30 | 107,178 | 2.42 | 5.25 | 0.7% |
+  | 30–70 | 189,378 | 2.5–3.5 | 7–13 | 4–17% |
+  | **70–80** | **83,320** | **18.38** | **55.35** | **60.2%** |
+
+  That band is **323,373 voxels, 21% of the whole mask**. It is not a hole: the
+  wall survives every stage (mask 20.9% of mass in the band → alpha solid 16.4%
+  → occupancy 16.4%), and a zy cut at x = 80 and x = 130 µm shows a **closed
+  ring** — near wall, both sides, far wall — with the level set running ~10 µm
+  outside the floor. So the 2026-08-22 sentence quoted above is false for this
+  image, and [P19](#p19)/[P28](#p28) are not the route in.
+
+  **2. The proximate cause is that χ drifts and `iso_level` is global.** χ
+  sampled at the mask voxels themselves; a correctly placed surface passes
+  *through* the wall, so "inside the fitted lumen" should be ≈50%:
+
+  | z band | median χ | % of wall inside the lumen |
+  |---|---|---|
+  | 20–30 (near wall) | 0.356 | **51.3%** |
+  | 30–70 | −0.02 … 0.26 | 32–46% |
+  | **70–80 (far wall)** | **1.492** | **82.6%** |
+
+  `iso_level` is 0.330. Sweeping it shows no global cut seats both walls:
+
+  | iso pct | level | z-face lumen | near wall inside | far wall inside |
+  |---|---|---|---|---|
+  | 50 (shipped) | 0.330 | 12,678 | 51.3% | 82.6% |
+  | 75 | 1.175 | 8,154 | 11.9% | 60.6% |
+  | 85 | 1.699 | 4,066 | 4.8% | 39.9% |
+
+  Seating the far wall needs ≈ the 82nd percentile, where the near wall is at
+  ~6% — the surface would sit well inside it. **The drift between the two walls
+  is larger than the wall-to-wall contrast**, which is the whole defect in one
+  number.
+
+  **3. Three candidate causes were tested and refuted.** Recorded because each
+  was a plausible fix and none of them is:
+
+  | hypothesis | test | result |
+  |---|---|---|
+  | orientation seed too small ([P51](#p51)'s lever) | `poisson_core_um` 5.0 → 1.5 | core grows **10×** (41,752 → 415,984 µm³, 5 → 38 fragments kept), far band median 7.89 → 5.77 µm, **z-face leak flat** 12,678 → 13,576 |
+  | the far wall sits in the boundary's smoothing halo | pad the domain 10/20/40 µm in z | **nothing**: far wall inside 82.6% → 86.9%, leak flat at ~12,700 |
+  | the far wall is too sparse to splat / the floor is missing | mask density; per-column floor test | 28.5 vs 34.6 voxels per occupied cell (**18%**, not enough), and a floor exists in **43–63% of occupied columns in every x slab** while "far wall inside" is 63–96% across the middle of the field |
+
+  So `poisson_core_um` is a real contributor to the *fit* and no part of the
+  *leak*, and the two ideas this entry previously suggested — a per-image
+  `poisson_smooth_um`, and a Neumann/Dirichlet condition on the z faces — are
+  both measured not to reach it.
+
+  **4. It is not confined to images 4 and 5.** `V3b_..._04step_002` shows it at
+  **both** ends (z 0–10 median 20.76 µm, 100% >5 µm; z 80–110 median 8–14 µm),
+  and `V3b_..._04step_003` — the unbranched image `docs/DIRECTION.md` §8's 75×
+  shear result was measured on — shows a milder form: z 40–80 median 4.2–5.7 µm
+  at p90 28–32 µm, with χ-at-wall swinging 21% → 64% across bands. The failure
+  on 4 and 5 is where the drift crosses the topology; the drift itself is
+  general.
+
+  **5. The mechanism, found on the fifth attempt: the far wall is *perforated*,
+  not absent, so its flux is too small to bring χ back down.** Two more
+  hypotheses died first, and both are worth recording because each was the
+  obvious next fix:
+
+  | hypothesis | test | result |
+  |---|---|---|
+  | the drift is a long-wavelength mode, so screen it | uniform screening `(∇² − λ⁻²)χ = ∇·V`, L = 200 → 20 µm (DCT-diagonal, still exact) | **worse**: near/far spread 31.3 → 51.7 points at L = 80, only recovering at L = 20 where the vessel is being cut apart. On image 6 it helps (36.9 → 20.0). Rejected |
+  | the far wall's normals are mis-oriented | `n·(toward core)` per band | **no**: 94.5% of far-wall normals already point into the lumen, rising to **99.7%** at `poisson_core_um` 2.0 |
+
+  The χ profile down z, averaged over the closed-ring columns (x 60–150 µm),
+  says what is actually happening:
+
+  | z (µm) | 0–16 | 30 | 32 | 50–56 | 70 | 78 | 82 |
+  |---|---|---|---|---|---|---|---|
+  | mean χ | −1.60 | +0.16 | +0.59 | **+1.98** | +1.55 | +0.98 | +0.77 |
+  | wall occupancy | 0.00 | **0.55** | 0.32 | 0.08 | 0.13 | **0.21** | 0.00 |
+
+  χ rises 3.6 across the near wall, crosses `iso_level` = 0.330 at z ≈ 31 —
+  exactly where the near wall is — plateaus in the lumen, and then **falls only
+  0.6 across the far wall and never re-crosses iso before the domain ends.**
+  That is the leak: not χ escaping through a hole, but χ never coming back down.
+
+  And the cause of the small step is *coverage*, not weight. The splat weight
+  `sheetness · occ` is the same on both walls (mean **0.749** far vs **0.787**
+  near; `occ` is 1.000 on both, the alpha solid being binary). What differs is
+  how many columns have a wall at all: the near wall peaks at **55%** of
+  closed-ring columns occupied, the far wall at **21%**. The far wall is
+  present everywhere and solid nowhere.
+
+  **6. What this argues for, corrected.** Not screening — that was measured and
+  is worse here. It re-implicates [P19](#p19)/[P28](#p28), but as an
+  **amplitude** problem rather than a hole problem, and it contradicts the
+  argument [P28](#p28) was downgraded on in 2026-08-24: "a false negative only
+  leaves a patch unconstrained, and Poisson approximates rather than
+  interpolates, so it bridges smoothly". That holds for *random* false
+  negatives. These are depth-systematic and all on one wall — which P28's own
+  entry flags as the caveat — and the bridge is not neutral: it moves the
+  surface 18 µm and swallows the wall it was meant to span.
+
+  **Caveat on the rebuild.** Stage 4 onward rebuilds the mesh without
+  `_guard_points` and gets 41,268 verts against the saved 43,452. The distance
+  table in (1) is against the saved artifact and agrees, so the finding does not
+  rest on the rebuild, but the rebuild's own numbers are not the shipped ones.
+
+- 2026-09-02 (later) — **the far-wall fill was built, measured, and does not
+  work.** Recorded in full because the reasoning behind it was sound and the
+  measurement is the only thing that killed it.
+
+  **The premise.** The surface sinks because four columns in five have a near
+  wall and no far wall, so nothing stops the level set. Interpolate the far wall
+  into those columns from the ones that measured it, and the surface should
+  stop. `vessel_mesh.fill_missing_floor` does exactly that: a column donates its
+  deepest wall voxel if it holds an empty run of at least `min_lumen_um` between
+  its first and last wall voxel; a column receives if it has wall, no such gap,
+  and a donor within `reach_um`; `thickness_um` of wall is painted at the
+  nearest donor's depth.
+
+  **It closes the vessel as designed and the surface does not follow.**
+
+  | mask | columns crossing the lumen | z-face lumen | far-wall distance |
+  |---|---|---|---|
+  | shipped, as-is | 9.8% | 12,678 | 8.46 µm |
+  | shipped, filled (8/40/1.5) | **67.0%** | 11,087 (−13%) | 8.59 µm |
+  | w100 k1.5 ms50, as-is | 18.5% | 14,915 | 14.81 µm |
+  | w100 k1.5 ms50, filled | **72.0%** | 13,695 (−8%) | 17.19 µm |
+
+  483k–759k voxels invented, closure up nearly sevenfold, and the leak falls by
+  a tenth while the surface sits no closer to the wall. **So column closure is
+  not the binding constraint**, which is what the fix assumed. Two untested
+  reasons: the remaining third of open columns may be sufficient on its own (the
+  failure is all-or-nothing, not proportional), or a floor placed at the nearest
+  donor's depth is wrong enough where donors are sparse that the fit ignores it.
+
+  **The code is kept, off by default** — `--fill-floor` plus
+  `--floor-min-lumen-um` / `--floor-reach-um` / `--floor-thickness-um`, recorded
+  per image in `vessel_recon.json`, invented voxels counted and excluded from
+  the mask `mesh_score` measures against. It is **not** in the napari tab: a
+  knob that does not deliver should not be offered for tuning. Kept so the
+  experiment stays re-runnable, on the same doctrine as [P28](#p28)'s continuous
+  field — not because it is an improvement.
+
+  **Status of the entry is unchanged: open, cause identified, no fix.** The
+  user's disposition as of this date is to **set images 4 and 5 aside** rather
+  than spend more on them, this being exploratory work. That is a reasonable
+  call on those two. It does **not** dispose of the entry, because item (4)
+  above measures the same drift on `V3b_..._04step_003` — the image the §8 shear
+  result rests on — where it is mild enough not to break the topology and
+  therefore not visible without the check that does not exist yet.
+
+---
+
+<a id="p53"></a>
+## P54 — "Suggest alpha" and the `alpha3d_um` guard give opposite advice, on every image in the V3 set
+
+| | |
+|---|---|
+| **Status** | open — measured, not fixed |
+| **Severity** | S3 — neither number produces a bad mesh here, so nothing downstream is wrong. What is wrong is that the tab tells the operator two incompatible things, and following either one makes the other complain |
+| **Opened** | 2026-09-02 |
+| **Last verified** | 2026-09-02 (all three `V3_*` images, at their own saved `cadherin_labels.npz` and `min_size`) |
+| **Resolved** | — |
+| **Where** | `cell_mesh.suggest_alpha_um` (behind the Vessel Mesh tab's "Suggest alpha" button and `batch_mesh --suggest-alpha`) against `vessel_mesh.check_alpha_vs_spacing` / `ALPHA_SPACING_FACTOR = 3.0` ([P20](#p20)) |
+| **Affects** | the operator's choice of `alpha3d_um`, on every image. No recorded artifact is wrong because of it |
+| **Evidence** | numbers below; reproduced with `voxel_subsample` + `tet_circumradii` + `suggest_alpha_um` at `subsample_um` 5.0 |
+
+At `subsample_um = 5.0`, the two disagree on **every** image in the set:
+
+| image | `min_size` | points | `suggest_alpha_um` | guard requires | verdict |
+|---|---|---|---|---|---|
+| `V3_..._04step_002` | 12 | 11,844 | **9.49** | ≥ 15.0 | WARN |
+| `V3_..._04step_003` | 12 | 10,101 | **9.95** | ≥ 15.0 | WARN |
+| `V3_..._09step_001` | 25 | 13,977 | **9.77** | ≥ 15.0 | WARN |
+
+The guard exists because alpha must exceed the point spacing simply to connect
+neighbours, and [P20](#p20) records "N verts, 0 faces" as the commonest way that
+fails. The suggestion is a statistic of the tetrahedron circumradii, which does
+not know what `subsample_um` was. So the button reliably proposes a value the
+checker reliably rejects, and there is no way to tell from the tab which to
+believe.
+
+**Both values build a good mesh here, and that is the point** — the
+contradiction is not protecting anything. On `09step_001` the operator's
+`alpha3d_um = 9.7` gives 67,263 verts / 133,472 faces and a graph of 3 edges,
+1 junction and 3 crop endpoints (652 µm of centerline); the recorded
+2026-08-22 build at `alpha3d_um = 15.0` gave the same topology and 647 µm. The
+`0 faces` failure the guard warns about did not occur at 9.7 on any of the
+three.
+
+Do not "fix" this by moving `ALPHA_SPACING_FACTOR` to match the suggestion, or
+by scaling the suggestion up to clear the guard. They measure different things —
+one is a property of the point cloud, the other a relation between alpha and the
+sampling — and a constant chosen to make the two agree would be a hidden
+decision of exactly the kind `mesh_score` refuses to make. The honest fixes are
+to make `suggest_alpha_um` take `subsample_um` and return a value it will also
+defend, or to have the button print both numbers and say which failure each
+guards against.
+
+**History**
+
+- 2026-09-02 — opened. Found while reproducing an operator's `09step_001` build
+  (`floor_k` 0, `window_xy` 101, `niblack_k` 2, `min_size` 25, alpha 3D solid →
+  poisson at the suggested `alpha3d_um` 9.7). The rebuild matched to within 2
+  vertices, which is what made the guard's objection visible: the build it was
+  objecting to was demonstrably fine.
+
+## P53 — Most of the wall carrying a shear number is not standing on measured wall, and `censored` does not catch it
+
+| | |
+|---|---|
+| **Status** | open — measured, not fixed. There is no check in the code that computes this |
+| **Severity** | **S1** — τ is reported per wall point with no indication of whether that point sits on evidence, and the two flags a caller would reach for are nearly orthogonal to it |
+| **Opened** | 2026-09-02 |
+| **Last verified** | 2026-09-02 (`V3b_..._04step_003`, `vessel_shear__shear.npz` of the recorded `poisson (oriented points)` run, against `cadherin_labels.npz` at `min_size` 12) |
+| **Resolved** | — |
+| **Where** | nowhere — this is a **missing** check. `shear.py` returns τ per wall point; `lumen_graph` flags `censored` and `section_clipped`; nothing asks whether a wall point is near measured cadherin |
+| **Affects** | every τ, every `caliber_um` and every geometry column, on every image. Quantified here on image 6 only |
+| **Evidence** | `docs/scratch/p32/health6.py`; numbers below are the tracked record |
+
+Found while acting on [P32](#p32), which established that the fitted surface can
+sit far from the wall without anything saying so. This is the same question asked
+of the **shear** artifact rather than of the mesh, on the one image the §8 shear
+work rests on.
+
+Distance from each of the 26,756 wall points carrying a τ to the nearest
+measured cadherin voxel:
+
+| | |
+|---|---|
+| median | **4.14 µm** |
+| within 3 µm ("supported"; the grid is 2 µm) | **39.0%** |
+| beyond 5 µm | 43.2% |
+| beyond 10 µm | 22.9% |
+
+**The existing flags are close to orthogonal to support**, which is the part that
+matters for a caller:
+
+| group | n | median distance | unsupported |
+|---|---|---|---|
+| kept today (not `censored`, not `section_clipped`) | 16,612 | 3.45 µm | **55.2%** |
+| `censored` | 9,266 | 6.09 µm | 70.1% |
+| `section_clipped` | 878 | 5.46 µm | 77.1% |
+
+Dropping both flags takes unsupported from 61% to 55%. They encode proximity to
+a field-of-view crop, which is a different question, and [P49](#p49) is the
+record of them already being conflated once.
+
+**Along the centerline it is not uniform, and that is the usable finding:**
+
+| edge | arc length | n | median distance | unsupported |
+|---|---|---|---|---|
+| 2 | **80–260 µm** | ~11,000 | **2.3–3.0 µm** | 38–50% |
+| 2 | 260–300 µm | 832 | 6.3–9.7 µm | 86–90% |
+| 1 | 0–100 µm (all of it) | 3,366 | 11.2–12.6 µm | 81–86% |
+| 0 | 20–40 µm | 258 | 7.2 µm | 78% |
+
+So image 6 is one sound ~180 µm stretch on edge 2 plus a branch fitted onto
+essentially nothing.
+
+**The τ range survives the filter**, which is the one result that would have been
+fatal and is not:
+
+| | n | τ/µQ p5–p95 | ratio |
+|---|---|---|---|
+| kept today | 16,612 | 6.14 – 30.89 | **5.0×** |
+| kept **and** supported | 7,450 | 6.59 – 33.09 | **5.0×** |
+
+The circumferential and axial variation §7.4 needs is therefore not an artifact
+of fabricated wall. (This is p5–p95 on the saved `poisson (oriented points)`
+artifact; it is **not** the same statistic as, and not a check on, §8's 75×
+figure, which came from a different run.)
+
+**Two caveats on the numbers.** Support is scored against the mask that built the
+mesh (`min_size` 12), and a stricter mask makes any surface look less supported
+than it is — the same bias `mesh_score.support` already carries. A permissive
+mask (window 100, `niblack_k` 1.5, `min_size` 50) would score better and has not
+been tried here. And "supported ≤ 3 µm" is a choice, ~1.5 grid cells; the 5 and
+10 µm columns are given so the cut can be moved.
+
+**Fix:** compute this in the core package and have both `batch_mesh` and the
+Vessel Mesh tab report it per station — nearest-measured-wall distance per wall
+point, summarised per centerline bin — and gate the geometry columns on it. It
+needs no ground truth and no parameter beyond the cut, which makes it the same
+class of free health check as `shear.force_balance`. Not built: the session it
+was found in ended with the scope decision below instead.
+
+**Related:** [P32](#p32), [P49](#p49), [P19](#p19)/[P28](#p28) (the mask the
+support is scored against), [I03](#i03).
 
 ---
 

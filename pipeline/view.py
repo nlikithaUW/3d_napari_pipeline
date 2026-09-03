@@ -161,6 +161,26 @@ def main() -> None:
     tabs.addTab(_wrap([roi.build(state, viewer)]), "ROI")
     tabs.addTab(_wrap(list(measure.build(state, viewer))), "Measure")
 
+    # Selecting the Vessel mesh tab fills its alpha3d_um from the circumradius
+    # histogram of the current cadherin mask, so the slider shows the number the
+    # build will use instead of a stale one from another image. It is a
+    # suggestion, not a lock: drag the slider and it stays where you put it
+    # until the next image loads. No-ops when there is no mask yet, when the
+    # method does not read alpha, or when the value has been set by hand.
+    def _on_tab(idx: int) -> None:
+        if tabs.tabText(idx) != "Vessel mesh":
+            return
+        fn = state.get("vessel_auto_alpha")
+        if fn is None:
+            return
+        try:
+            fn()
+        except Exception as exc:
+            print(f"  (auto alpha skipped: {type(exc).__name__}: {exc})",
+                  flush=True)
+
+    tabs.currentChanged.connect(_on_tab)
+
     viewer.window.add_dock_widget(tabs, area="right", name="Pipeline")
     napari.run()
 

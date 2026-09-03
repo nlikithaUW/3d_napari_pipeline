@@ -198,15 +198,23 @@ def main() -> None:
 
     # Build every tab once — this registers state["run_*"], state["load_*"] and
     # the per-image save-path widgets. Order matches the GUI.
-    loader.build(state, viewer, args.dir, args.params, args.lut)
-    display.build(state, viewer)
-    nuclei.build(state, viewer)
-    cadherin.build(state, viewer)
-    cell_mesh.build(state, viewer)
-    vessel_mesh.build(state, viewer)
-    clover.build(state, viewer)
-    adhesion_rf.build(state, viewer)
-    roi.build(state, viewer)
+    # **Keep what each `build()` returns.** In the GUI the returned widgets are
+    # docked and the window owns them; here nothing did, so Qt collected the
+    # labels the tabs' own callbacks still write to, and the resulting
+    # RuntimeError aborted the image-load handler before it set the per-image
+    # save paths — sending every artifact to the CWD (2026-09-02). The list is
+    # never read; holding the reference *is* the fix.
+    state["_tabs"] = [
+        loader.build(state, viewer, args.dir, args.params, args.lut),
+        display.build(state, viewer),
+        nuclei.build(state, viewer),
+        cadherin.build(state, viewer),
+        cell_mesh.build(state, viewer),
+        vessel_mesh.build(state, viewer),
+        clover.build(state, viewer),
+        adhesion_rf.build(state, viewer),
+        roi.build(state, viewer),
+    ]
     # NOTE: measure.build is intentionally NOT called — Measure isn't run in the
     # batch (it crashes headless), and skipping its build avoids creating the
     # matplotlib Qt canvas at all. Run Measure per image in the GUI afterward.

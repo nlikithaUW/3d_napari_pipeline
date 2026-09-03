@@ -1698,6 +1698,45 @@ value ([I09](ISSUES.md#i09)).
 
 ---
 
+# 8G. Scope narrowed to confirmed-good images — 2026-09-02
+
+**Decision by the user, taken at the end of the [P32](ISSUES.md#p32) /
+[P53](ISSUES.md#p53) session: analysis is restricted to images the user has
+confirmed are good. As of this date that list is one image —
+`V3_CorrectSettings_40xWater_04step_002`, the reference image — and it grows
+only when the user names another.**
+
+This is a scope decision, not a finding, and it is recorded here because
+everything in §8 was written assuming a six-image design.
+
+**What led to it.** Three images are now known to carry geometry that cannot be
+trusted, for one reason: the fitted surface is not where the wall is, and
+nothing in the pipeline says so.
+
+- `V3b_..._04step_001` and `V3b_..._04step_002` — the surface sits ~18 µm below
+  a far wall that is present in the data; the lumen then escapes through the z
+  faces and the graph invents junctions ([P32](ISSUES.md#p32)). Cause
+  identified, four candidate fixes refuted, one fix built and **measured not to
+  work**.
+- `V3b_..._04step_003` — the image §8's shear work rests on. Milder, and
+  therefore invisible: 61% of the wall points carrying a τ are more than 3 µm
+  from measured cadherin, one whole branch is fitted onto nothing, and
+  `censored`/`section_clipped` do not catch it ([P53](ISSUES.md#p53)). Its τ
+  *range* does survive the filter, so the variation is real; its *coverage* does
+  not.
+
+**What this costs, stated plainly.** §5.1's effective n for the crotch was
+already 3. The six-image design in Analysis notes is not available. Any result
+from here is a single-image exploratory result until the user confirms more
+images, and should be written up as one.
+
+**What it does not change.** The defects stay open and stay recorded — narrowing
+the scope is not the same as closing them, and [P53](ISSUES.md#p53)'s check is
+still the thing that would let an image be *confirmed* good rather than
+believed good.
+
+---
+
 # 9. Open questions for the bench
 
 Send as one message, not three:

@@ -46,7 +46,8 @@ from scipy.spatial import Delaunay
 
 from . import gpu, vessel_poisson
 from .cell_mesh import (_tet_circumradii, alpha_shape_faces,
-                        filter_faces_by_extent)
+                        filter_faces_by_extent, suggest_alpha_um,
+                        tet_circumradii)
 
 
 # --- point cloud -------------------------------------------------------------
@@ -96,6 +97,52 @@ def check_alpha_vs_spacing(alpha_um: float, subsample_um: float) -> list[str]:
             f"subsample_um={subsample_um:g}. Alpha has to exceed the point "
             f"spacing simply to connect neighbours (docs/ISSUES.md P20), and "
             f"this is the commonest route to 'N verts, 0 faces'."]
+
+
+def resolve_alpha3d_um(alpha3d_um, points_um, extras=None) -> tuple[float, list]:
+    """``alpha3d_um <= 0`` means **auto**: take it from the circumradii.
+
+    The default since 2026-09-02. `suggest_alpha_um` is a statistic of the
+    tetrahedron circumradii of the cloud that is actually about to be
+    triangulated, so it adapts to the mask and the subsampling instead of being
+    a constant that was right for one image. It lives **here**, in `build_mesh`'s
+    own path, rather than in either caller: the napari tab and `batch_mesh` must
+    resolve it identically or the interactive and headless meshes differ, which
+    is the drift CLAUDE.md's working agreement is about.
+
+    A positive value is passed through untouched, so every explicit invocation
+    and every recorded artifact still means what it meant.
+
+    Returns ``(alpha_um, notes)`` and, when given an out-dict, records the
+    resolved value under ``extras["alpha3d_um_resolved"]`` so
+    `vessel_recon.json` says what the build actually used rather than "auto".
+    """
+    a = float(alpha3d_um)
+    notes: list[str] = []
+    if a > 0:
+        if extras is not None:
+            extras["alpha3d_um_resolved"] = a
+            extras["alpha3d_um_auto"] = False
+        return a, notes
+    if len(points_um) < 4:
+        notes.append("WARN: fewer than 4 points — cannot suggest alpha3d_um; "
+                     "falling back to 15.0.")
+        a = 15.0
+    else:
+        R = tet_circumradii(np.asarray(points_um, float))
+        a = float(suggest_alpha_um(R))
+        if not np.isfinite(a) or a <= 0:
+            notes.append("WARN: the circumradius histogram gave no usable "
+                         "alpha3d_um; falling back to 15.0.")
+            a = 15.0
+        else:
+            notes.append(f"NOTE: alpha3d_um auto = {a:.2f} um, from the "
+                         f"circumradius histogram of the {len(points_um):,} "
+                         f"subsampled points actually being triangulated.")
+    if extras is not None:
+        extras["alpha3d_um_resolved"] = a
+        extras["alpha3d_um_auto"] = True
+    return a, notes
 
 
 def check_point_cloud(n_points: int, mask_shape, scale, bin_um: float):
@@ -156,6 +203,182 @@ def voxel_subsample(points_um, bin_um) -> np.ndarray:
     keys = np.floor(np.asarray(points_um) / float(bin_um)).astype(np.int64)
     _, idx = np.unique(keys, axis=0, return_index=True)
     return points_um[np.sort(idx)]
+
+
+# --- the missing far wall ----------------------------------------------------
+
+# Why this exists, in one measurement ([P32](../docs/ISSUES.md#p32)): on
+# `V3b_..._04step_001` only **8%** of the vessel's xy columns carry wall both
+# above *and* below the lumen at the shipped mask, and **20%** at the most
+# permissive mask that still segments cleanly. Four columns in five have a near
+# wall and no far wall. Nothing downstream can close a surface there, so the
+# fitted level set sinks until it leaves the stack — which is that entry's
+# z-face leak, and it is why a more permissive threshold does not help: a lower
+# `niblack_k` makes the wall it already has ~1.9x *thicker* without moving it,
+# and barely fills the columns that have none.
+#
+# The information is not in the image, so it has to come from a prior, and the
+# only honest one is the vessel's own measured floor a few µm away. That is what
+# this does: it interpolates the far wall across the columns that are missing
+# it, from the columns that have it.
+#
+# **It fabricates data and says so.** `added` comes back separately so a caller
+# can exclude it from anything that scores the surface against evidence
+# (`mesh_score.support`), and `info` carries the closure fraction before and
+# after, which is the acceptance number — if it does not move, the fill did
+# nothing and the parameters are wrong.
+
+def _column_extents(occ: np.ndarray):
+    """First and last occupied z per column → ``(has, top, bot)``."""
+    has = occ.any(axis=0)
+    top = occ.argmax(axis=0)
+    bot = occ.shape[0] - 1 - occ[::-1].argmax(axis=0)
+    return has, top, bot
+
+
+def _has_lumen_gap(occ: np.ndarray, top: np.ndarray, bot: np.ndarray,
+                   run: int, y_chunk: int = 128):
+    """Columns holding an empty run of at least `run` voxels **inside the wall**.
+
+    The run has to lie strictly between the column's first and last wall voxel.
+    Testing the whole column instead finds the empty space *above* the vessel,
+    which is far longer than any lumen and makes every column with a single
+    speckle read as closed — that was the first version of this function and it
+    reported 100% closure on a mask measured at 8%.
+
+    Exactly a run test, not "enough empty voxels in total": a column clipping
+    the side wall obliquely collects plenty of scattered empty voxels and is not
+    a column that crosses the lumen. Done with a uniform filter — one pass,
+    where a window that is entirely empty averages to 1 — and chunked over y so
+    the float32 temporary stays a slice rather than a copy of the volume.
+    """
+    if run < 1:
+        run = 1
+    nz, ny, nx = occ.shape
+    out = np.zeros((ny, nx), dtype=bool)
+    if run > nz:
+        return out
+    zz = np.arange(nz, dtype=np.int32)[:, None, None]
+    for y0 in range(0, ny, y_chunk):
+        y1 = min(y0 + y_chunk, ny)
+        inside = (zz > top[None, y0:y1]) & (zz < bot[None, y0:y1])
+        empty = ((~occ[:, y0:y1]) & inside).astype(np.float32)
+        m = ndi.uniform_filter1d(empty, size=int(run), axis=0, mode="constant",
+                                 cval=0.0)
+        out[y0:y1] = (m >= np.float32(1.0 - 1e-5)).any(axis=0)
+    return out
+
+
+def fill_missing_floor(field, scale, *, min_lumen_um: float = 8.0,
+                       reach_um: float = 25.0, thickness_um: float = 1.0):
+    """Interpolate the far (deep) vessel wall into the columns that lack one.
+
+    Returns ``(filled, added, info)`` — `filled` is `field` with the fabricated
+    wall painted in at the field's own foreground value, `added` is the boolean
+    volume of what was invented, and `info` is a dict of counts plus the
+    before/after closure fraction.
+
+    A column **donates** if it holds wall, then an empty run of at least
+    `min_lumen_um`, then wall again — i.e. it genuinely crosses the lumen, so
+    its last occupied voxel is a real measurement of where the floor is. A
+    column **receives** if it holds wall but no such gap, and lies within
+    `reach_um` of a donor. Beyond that distance the estimate is extrapolation
+    rather than interpolation and the column is left alone: an unfilled hole is
+    a visible failure, a fabricated floor 100 µm from the nearest evidence is
+    not.
+
+    The estimate is the nearest donor's floor depth. Nearest rather than a fit,
+    because a fit needs a model of the vessel's shape and that is the very thing
+    being reconstructed downstream — this only has to be right to within the
+    smoothing scale the Poisson solve applies afterwards.
+
+    `thickness_um` of wall is painted, because a single voxel of floor is thinner
+    than the real wall (measured at 1.4–2.4 µm) and the structure tensor needs
+    something to find a normal on.
+
+    Pure: arrays in, arrays and a dict out. No printing — callers report.
+    """
+    field = np.asarray(field)
+    occ = field > 0
+    vz = float(scale[0])
+    nz = occ.shape[0]
+    run = max(1, int(round(float(min_lumen_um) / vz)))
+    thick = max(1, int(round(float(thickness_um) / vz)))
+
+    has, top, bot = _column_extents(occ)
+    closed = _has_lumen_gap(occ, top, bot, run) & has
+    n_wall = int(has.sum())
+    info = {
+        "min_lumen_um": float(min_lumen_um),
+        "reach_um": float(reach_um),
+        "thickness_um": float(thickness_um),
+        "n_columns_with_wall": n_wall,
+        "n_columns_closed_before": int(closed.sum()),
+        "closed_fraction_before": (float(closed.sum()) / n_wall) if n_wall else 0.0,
+    }
+    if not closed.any() or n_wall == 0:
+        info["notes"] = ["WARN: no column crosses the lumen, so there is no "
+                         "measured floor to interpolate from. Nothing filled."]
+        info.update(n_columns_filled=0, n_voxels_added=0,
+                    n_columns_closed_after=info["n_columns_closed_before"],
+                    closed_fraction_after=info["closed_fraction_before"])
+        return field, np.zeros_like(occ), info
+
+    # Nearest donor, in voxels, on the xy grid. `distance_transform_edt` of the
+    # complement gives both the distance and the index of the nearest donor in
+    # one pass, so the estimate and the reach test cannot disagree.
+    dist, (iy, ix) = ndi.distance_transform_edt(
+        ~closed, return_distances=True, return_indices=True)
+    est = bot[iy, ix]
+    reach_vox = float(reach_um) / vz
+
+    target = has & ~closed & (dist <= reach_vox)
+    # Never paint at or above a column's own wall: the estimate has to leave a
+    # lumen, and a column whose own wall already runs deeper than the estimate
+    # is not missing a floor — it is something else (a side wall, or the
+    # junction) and is left alone.
+    target &= est > (top + run)
+    target &= est > bot
+    target &= est < nz
+
+    added = np.zeros_like(occ)
+    if target.any():
+        ys, xs = np.nonzero(target)
+        z0 = est[ys, xs].astype(np.int64)
+        for t in range(thick):
+            zz = np.minimum(z0 + t, nz - 1)
+            added[zz, ys, xs] = True
+        added &= ~occ
+
+    filled = field
+    if added.any():
+        fill_value = field[occ].max() if occ.any() else 1
+        filled = field.copy()
+        filled[added] = fill_value
+
+    _, top2, bot2 = _column_extents(filled > 0)
+    closed_after = _has_lumen_gap(filled > 0, top2, bot2, run) & has
+    info.update(
+        n_columns_filled=int(target.sum()),
+        n_voxels_added=int(added.sum()),
+        n_columns_closed_after=int(closed_after.sum()),
+        closed_fraction_after=(float(closed_after.sum()) / n_wall) if n_wall else 0.0,
+        n_columns_out_of_reach=int((has & ~closed & (dist > reach_vox)).sum()),
+    )
+    info["notes"] = []
+    if info["closed_fraction_after"] <= info["closed_fraction_before"] + 0.01:
+        info["notes"].append(
+            "WARN: the fill did not close the vessel — closure went "
+            f"{info['closed_fraction_before']*100:.1f}% -> "
+            f"{info['closed_fraction_after']*100:.1f}%. Either min_lumen_um is "
+            "larger than the lumen, or reach_um is too short to span the gaps.")
+    if info["n_columns_out_of_reach"]:
+        info["notes"].append(
+            f"NOTE: {info['n_columns_out_of_reach']:,} column(s) with wall were "
+            f"left unfilled because the nearest column that crosses the lumen is "
+            f"further than reach_um = {reach_um} µm. They are holes in the "
+            f"surface by design, not by oversight.")
+    return filled, added, info
 
 
 # --- alpha solid as a volume -------------------------------------------------
@@ -620,7 +843,10 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
             voxel_subsample(mask_to_points_um(field > 0, scale),
                             float(subsample_um)),
             field.shape, scale, float(subsample_um), extras)
-        solid = rasterize_alpha_solid(pts, float(alpha3d_um), field.shape,
+        a3d, a_notes = resolve_alpha3d_um(alpha3d_um, pts, extras)
+        if extras is not None and a_notes:
+            extras.setdefault("notes", []).extend(a_notes)
+        solid = rasterize_alpha_solid(pts, a3d, field.shape,
                                       scale, float(alpha_raster_um))
         if not solid.any():
             return ("empty", None, None, None)
@@ -648,7 +874,10 @@ def build_mesh(mask, scale, *, method, orientation, n_bins, r_smooth_bins,
         voxel_subsample(mask_to_points_um(field > 0, scale),
                         float(subsample_um)),
         field.shape, scale, float(subsample_um), extras)
-    faces = alpha_shape_faces(pts, float(alpha3d_um))
+    a3d, a_notes = resolve_alpha3d_um(alpha3d_um, pts, extras)
+    if extras is not None and a_notes:
+        extras.setdefault("notes", []).extend(a_notes)
+    faces = alpha_shape_faces(pts, a3d)
     faces = filter_faces_by_extent(pts, faces, float(min_component_um))
     vals = (np.linalg.norm(pts - pts.mean(0), axis=1)
             if len(pts) else np.zeros((0,)))

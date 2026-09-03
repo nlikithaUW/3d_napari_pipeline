@@ -109,6 +109,7 @@ from .vessel_mesh import (
     ORIENTATIONS,
     build_mesh,
     check_alpha_vs_spacing,
+    fill_missing_floor,
     live_params,
     mask_to_points_um,
     voxel_subsample,
@@ -129,7 +130,15 @@ DEFAULT_STEPS = ("mesh", "curvature", "graph")
 # never validated — and two of them (`close_um`, `r_smooth_bins`) were inert
 # under alpha 3D anyway. Pass --from-settings to re-run it deliberately.
 MESH_DEFAULTS = {
-    "method": METHOD_ALPHA3D,
+    # **METHOD_ALPHA_POISSON, matching the napari tab.** These disagreed until
+    # 2026-09-02: the tab defaulted to "alpha 3D solid -> poisson" and this to
+    # "alpha 3D (points)", so `batch_mesh` at defaults built a different surface
+    # from the one being tuned — the [P36] failure repeated at the mesh step,
+    # and the more damaging half of it, since the two methods differ in kind
+    # (a point-cloud alpha shell vs a solved level set) and only the Poisson
+    # family carries the grad-chi normals that `nuc_side` and the centerline
+    # graph require.
+    "method": METHOD_ALPHA_POISSON,
     "orientation": "both (OR)",
     "n_bins": 180,
     "r_smooth_bins": 3,
@@ -139,12 +148,18 @@ MESH_DEFAULTS = {
     # and 2.2M tets: far outside `voxel_subsample`'s stated 1e4-5e4 range, and
     # the regime where the circumradius distribution degenerates (P35).
     "subsample_um": 5.0,
-    # 15.0, not 10.0: every mesh on disk was built at 15.0, and `batch_mesh`
-    # runs at these defaults, so a mismatch is the [P26] hazard — the shipped
-    # default silently producing something other than the recorded result. It
-    # is also the smallest value satisfying the >=3x subsample_um rule checked
-    # in `mesh_notes` at the recorded subsample_um of 5.0.
-    "alpha3d_um": 15.0,
+    # **0 = auto**, since 2026-09-02: `vessel_mesh.resolve_alpha3d_um` takes it
+    # from the circumradius histogram of the cloud actually being triangulated,
+    # which is what the tab's "Suggest alpha" button has always shown and what
+    # the operator was setting by hand. A constant cannot adapt to a mask that
+    # has changed, and the mask has.
+    #
+    # This supersedes the previous 15.0 and **invalidates every mesh artifact
+    # built before it** — that was the whole point of the change, not a side
+    # effect. On the V3 set auto lands at 9.5-10.0, which trips
+    # `check_alpha_vs_spacing` ([P54]); the warning is expected and the meshes
+    # are good. Pin a positive value to reproduce a pre-2026-09-02 build.
+    "alpha3d_um": 0.0,
     "fill_lumen": True,
     "close_um": 1.0,
     "min_component_um": 50.0,
@@ -199,7 +214,19 @@ P28_K_LO_PROVENANCE = (
     "lumen and yields no surface; 2.5 is the lowest that reconstructs). "
     "See docs/ISSUES.md P28")
 FIELD_DEFAULTS = {"cadherin_field": FIELD_MASK, "score_window_xy": 50,
-                  "score_k_lo": P28_K_LO}
+                  "score_k_lo": P28_K_LO,
+                  # [P32]'s far-wall fill. **Off by default and that is the
+                  # decision**: it fabricates wall, so turning it on here would
+                  # put invented voxels into every headless run at defaults and
+                  # silently change every artifact on disk. Same doctrine as
+                  # `compute_shear` and `--steps score`. Per-image is expected —
+                  # the vessels differ in caliber — which is why the value is
+                  # recorded in `vessel_recon.json` rather than chosen once here
+                  # ([P26]).
+                  "fill_floor": False,
+                  "floor_min_lumen_um": 8.0,
+                  "floor_reach_um": 25.0,
+                  "floor_thickness_um": 1.5}
 CURV_DEFAULTS = {"radius_um": 5.0, "smooth_iter": 10}
 # The 3D centerline graph (`lumen_graph`). Every one of these is a **ratio or a
 # window, not an absolute length**, which is the point: the old centerline's
@@ -233,7 +260,15 @@ SCORE_DEFAULTS = {"radii_um": ",".join(f"{r:g}" for r in DEFAULT_RADII_UM),
 # max(auto_min_size_otsu(sizes), 12). P19 measured the auto value at 3 on the
 # reference image, so the constant is what is always in force — `auto-raw` runs
 # without the floor, which is the experiment P19 asks for and nobody has run.
-MIN_SIZE_FLOOR = 12
+# 25, not 12, since 2026-09-02 — the operator's working value, and it is a
+# **measurement**, not a preference: at the new mask (floor_k 0, window_xy 101,
+# niblack_k 2) `V3_..._09step_001` keeps 17,297 components at 12 and 3,794 at
+# 25, and the extra speckle changes the auto alpha from 9.77 to 6.82 um, which
+# changes the solid, which loses the vessel's junction entirely — the graph
+# reads 1 edge / 0 junctions instead of 3 edges / 1 junction. The Y is ground
+# truth from the experimenter. min_size, alpha and topology are coupled now
+# that alpha is auto, so this floor is load-bearing rather than cosmetic.
+MIN_SIZE_FLOOR = 25
 
 
 def _p(msg: str) -> None:
@@ -447,6 +482,10 @@ def resolve_params(args) -> dict:
 
     field = {}
     explicit_field = {"cadherin_field": args.cadherin_field,
+                      "fill_floor": (True if args.fill_floor else None),
+                      "floor_min_lumen_um": args.floor_min_lumen_um,
+                      "floor_reach_um": args.floor_reach_um,
+                      "floor_thickness_um": args.floor_thickness_um,
                       "score_window_xy": args.score_window_xy,
                       "score_k_lo": args.score_k_lo}
     for key, default in FIELD_DEFAULTS.items():
@@ -527,8 +566,16 @@ def parameter_warnings(params: dict) -> list[str]:
             "--cadherin-field is 'mask', so neither is read.")
     if method in (METHOD_ALPHA3D, METHOD_ALPHA_POISSON):
         # One implementation, in the core, shared with the napari tab.
-        notes.extend(check_alpha_vs_spacing(float(mesh["alpha3d_um"]),
-                                            float(mesh["subsample_um"])))
+        #
+        # **Skipped when alpha3d_um <= 0**, which means "auto": there is no
+        # value to check yet, and checking the sentinel made every run at the
+        # default print "alpha3d_um=0 is below 3x subsample_um=5", which is
+        # both false and exactly the kind of warning that trains people to
+        # ignore warnings. `run_one` re-runs the check on the value
+        # `resolve_alpha3d_um` actually chose, where it means something.
+        if float(mesh["alpha3d_um"]) > 0:
+            notes.extend(check_alpha_vs_spacing(float(mesh["alpha3d_um"]),
+                                                float(mesh["subsample_um"])))
     return notes
 
 
@@ -777,6 +824,41 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
             "field": FIELD_MASK,
             "note": "the size-filtered binary mask; no image pixels decoded"}
 
+    # ---- the missing far wall ([P32]) --------------------------------------
+    # Applied to `mesh_input`, not to `mask`: `mask` stays the pinned yardstick
+    # every recorded number was measured against, and `mesh_score` scores
+    # against it, so a fabricated floor cannot flatter its own coverage. The
+    # centerline graph, however, is built on the *lumen* the fill produces —
+    # which is the whole point, since P32 is a graph-topology defect.
+    if "mesh" in steps and need_mask and fld["fill_floor"]:
+        t = time.perf_counter()
+        mesh_input, floor_added, floor_info = fill_missing_floor(
+            mesh_input, scale,
+            min_lumen_um=float(fld["floor_min_lumen_um"]),
+            reach_um=float(fld["floor_reach_um"]),
+            thickness_um=float(fld["floor_thickness_um"]))
+        timings["floor_fill_s"] = time.perf_counter() - t
+        recon["fill_floor"] = dict(floor_info)
+        recon["fill_floor"]["applied_to"] = fld["cadherin_field"]
+        _p(f"far-wall fill: columns crossing the lumen "
+           f"{floor_info['closed_fraction_before']*100:.1f}% -> "
+           f"{floor_info['closed_fraction_after']*100:.1f}% "
+           f"({floor_info['n_columns_filled']:,} filled, "
+           f"{floor_info['n_voxels_added']:,} voxels invented)  "
+           f"[{timings['floor_fill_s']:.1f} s]")
+        for n in floor_info.get("notes", []):
+            notes.append(n)
+        notes.append(
+            f"NOTE: --fill-floor invented {floor_info['n_voxels_added']:,} wall "
+            f"voxels in {floor_info['n_columns_filled']:,} column(s) that had a "
+            f"near wall and no far wall ([P32]). The surface below is therefore "
+            f"partly fabricated; `mesh_score` still scores against the measured "
+            f"mask, so coverage there is honest.")
+        del floor_added
+        gc.collect()
+    elif need_mask:
+        recon["fill_floor"] = {"applied": False}
+
     # ---- mesh ---------------------------------------------------------------
     verts = faces = None
     # Per-vertex normals, when the method produces them (Poisson does). They are
@@ -792,6 +874,29 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                                                extras=extras,
                                                **params["mesh_all"])
         normals = extras.get("normals")
+        # **What alpha the build actually used.** `alpha3d_um` in the params
+        # block is the *request*, and 0 there means "auto" — so without this the
+        # provenance file cannot answer "what was this mesh built with", which
+        # is the one question it exists to answer. Recorded next to the request
+        # rather than replacing it, so both the instruction and the outcome
+        # survive.
+        if "alpha3d_um_resolved" in extras:
+            recon["alpha3d_um"] = {
+                "requested": float(params["mesh_all"]["alpha3d_um"]),
+                "resolved": float(extras["alpha3d_um_resolved"]),
+                "auto": bool(extras.get("alpha3d_um_auto", False)),
+                "note": ("0 requests auto: cell_mesh.suggest_alpha_um on the "
+                         "circumradii of the subsampled cloud actually "
+                         "triangulated"),
+            }
+            if extras.get("alpha3d_um_auto"):
+                # Now there is a number to check, so [P20]'s guard means
+                # something. On this dataset it fires ([P54]) and the meshes are
+                # good; the note is the record, not a veto.
+                for n in check_alpha_vs_spacing(
+                        float(extras["alpha3d_um_resolved"]),
+                        float(params["mesh_all"]["subsample_um"])):
+                    notes.append(n)
         timings["mesh_s"] = time.perf_counter() - t
         if extras.get("info"):
             recon["mesh_diagnostics"] = _jsonable(extras["info"])
@@ -1372,6 +1477,32 @@ def main() -> None:
     g.add_argument("--score-k-lo", type=float, default=None,
                    help="the z-score the field is hinged to zero below. "
                         "Measured, not chosen — see P28 step 1.")
+
+    g = ap.add_argument_group(
+        "the missing far wall (docs/ISSUES.md P32) — fabricates wall, off by "
+        "default")
+    g.add_argument("--fill-floor", action="store_true",
+                   help="interpolate the deep vessel wall into the xy columns "
+                        "that have a near wall and no far wall, from the "
+                        "columns that have both. P32 measures 8-20%% of columns "
+                        "closed on V3b_04step_001, which is why the fitted "
+                        "surface sinks out of the stack there. The invented "
+                        "voxels are counted in vessel_recon.json and excluded "
+                        "from the mask the scores are measured against.")
+    # No upper bound on any of the three, deliberately (CLAUDE.md).
+    g.add_argument("--floor-min-lumen-um", type=float, default=None,
+                   help="a column counts as crossing the lumen, and so as "
+                        "evidence of where the floor is, only if it holds an "
+                        "empty run at least this long between its first and "
+                        "last wall voxel (default 8.0).")
+    g.add_argument("--floor-reach-um", type=float, default=None,
+                   help="how far a fabricated floor may sit from the nearest "
+                        "column that actually measured one (default 25.0). "
+                        "Beyond this the column is left unfilled: a visible "
+                        "hole beats an invented wall with no evidence near it.")
+    g.add_argument("--floor-thickness-um", type=float, default=None,
+                   help="thickness of the fabricated wall (default 1.5, the "
+                        "measured far-wall thickness of 1.4-2.4 um).")
 
     g = ap.add_argument_group("surface curvature (comma-separated = a sweep)")
     g.add_argument("--curv-radius-um", default=None)

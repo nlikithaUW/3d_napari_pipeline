@@ -202,7 +202,9 @@ def build(state, viewer) -> list:
                                  "every voxel. Must stay well below alpha3d_um "
                                  "or the complex is built on points further "
                                  "apart than the radius meant to connect them."},
-        alpha3d_um={"widget_type": "FloatSlider", "min": 1.0, "max": 80.0,
+        # min 0.0, because 0 is the "auto" sentinel and the slider has to be
+        # able to express the default.
+        alpha3d_um={"widget_type": "FloatSlider", "min": 0.0, "max": 80.0,
                     "step": 0.5,
                     "tooltip": "alpha 3D: the alpha radius in µm. This is the "
                                "widest wall gap that gets bridged; the gaps in "
@@ -271,7 +273,10 @@ def build(state, viewer) -> list:
         r_smooth_bins: int = 3,
         alpha2d_um: float = 8.0,
         subsample_um: float = 5.0,
-        alpha3d_um: float = 15.0,
+        # 0 = **auto**, resolved by `vessel_mesh.resolve_alpha3d_um` from the
+        # circumradius histogram of the cloud actually being triangulated.
+        # Default since 2026-09-02. Set a positive value to pin it.
+        alpha3d_um: float = 0.0,
         fill_lumen: bool = True,
         close_um: float = 1.0,
         min_component_um: float = 50.0,
@@ -499,7 +504,13 @@ def build(state, viewer) -> list:
             if suggested > 0:
                 if suggested > controls.alpha3d_um.max:
                     controls.alpha3d_um.max = float(suggested) * 2.0
-                controls.alpha3d_um.value = suggested
+                # Filling the slider fires its `changed`, which is also how an
+                # operator drag is detected — so the fill is flagged as ours.
+                _alpha["filling"] = True
+                try:
+                    controls.alpha3d_um.value = suggested
+                finally:
+                    _alpha["filling"] = False
 
         print("Computing cadherin point circumradii ...", flush=True)
         w = _run()
@@ -507,6 +518,41 @@ def build(state, viewer) -> list:
         w.start()
 
     suggest_w.changed.connect(_suggest)
+
+    # ---- alpha3d_um is auto-filled from the histogram, and overridable ------
+    # The slider shows a *number*, not "auto": you can see what the build will
+    # use and drag it. Once dragged it stays put for that image — a suggestion
+    # that silently overwrote a hand-set value would be [P37] again, a loader
+    # quietly undoing a decision on every image load.
+    #
+    # `build_mesh` keeps its own `alpha3d_um <= 0` -> auto path, and that is not
+    # duplication: `batch_mesh` has no slider to fill, so the resolution has to
+    # exist in the core for the headless run. Both routes call
+    # `cell_mesh.suggest_alpha_um` on the same subsampled cloud and land on the
+    # same number.
+    _alpha = {"filling": False, "user_set": False}
+
+    def _note_alpha_edit(*_):
+        if not _alpha["filling"]:
+            _alpha["user_set"] = True
+
+    controls.alpha3d_um.changed.connect(_note_alpha_edit)
+
+    def _auto_alpha(*_):
+        """Fill alpha from the circumradius histogram, unless it was set."""
+        if _alpha["user_set"]:
+            return
+        if "alpha3d_um" not in LIVE_PARAMS.get(controls["method"].value, ()):
+            return
+        if _cadh_mask_array(state) is None:
+            return
+        _suggest()
+
+    state["vessel_auto_alpha"] = _auto_alpha
+    # A new image is a new suggestion: clear the override so the next mask
+    # gets its own value rather than inheriting the last image's.
+    state.setdefault("vessel_status_refresh", []).append(
+        lambda: _alpha.update(user_set=False))
 
     # ---- Save / load the built vessel mesh (verts + faces) ----
     mesh_path_w = FileEdit(
@@ -835,8 +881,20 @@ def build(state, viewer) -> list:
             ek = np.asarray(g.get("node_endpoint_kind", []))
             col = np.where(kind == "junction", "red",
                            np.where(ek == "crop", "deepskyblue", "yellow"))
+            # **The node id is drawn on the node.** The inlet control names
+            # openings by number, and without this there is no way to tell
+            # which number is which arm — the colours distinguish junction from
+            # crop from terminus, but not one crop from the other. Choosing the
+            # inlet is a fact about the rig that only the operator has, so the
+            # control is useless until the operator can see what it refers to.
             nl = viewer.add_points(nodes, name=GRAPH_NODE_LAYER, size=9.0,
-                                   face_color=list(col), border_width=0.0)
+                                   face_color=list(col), border_width=0.0,
+                                   features={"lab": [
+                                       f"{i}" for i in range(len(nodes))]},
+                                   text={"string": "{lab}", "size": 12,
+                                         "color": "white",
+                                         "anchor": "upper_left",
+                                         "translation": [0.0, -6.0, 0.0]})
             nl.opacity = 0.85
             nl.visible = visible
 
@@ -909,6 +967,17 @@ def build(state, viewer) -> list:
                   f"cross-section {med('area_um2'):.0f} µm², "
                   f"{med('major_um'):.0f} x {med('minor_um'):.0f} µm, "
                   f"aspect {med('aspect'):.2f}.", flush=True)
+            # The openings, by the same number drawn on the node in the viewer.
+            # Which one the flow enters through is a fact about the rig and
+            # cannot be inferred from the image, so the menu is printed rather
+            # than a choice being made quietly.
+            opens = [int(n) for n in _open_nodes(g)]
+            if opens:
+                print(f"  openings (set 'inlet node' in the wall-shear group; "
+                      f"the number is drawn on the node in the viewer):",
+                      flush=True)
+                for n in opens:
+                    print(f"    {_node_label(g, n)}", flush=True)
 
         def _err(exc):
             print(f"Centerline graph error: {exc}", flush=True)
@@ -923,6 +992,205 @@ def build(state, viewer) -> list:
         lambda *_: (state.get("vessel_graph")
                     and _show_graph(state["vessel_graph"])))
     graph_btn.changed.connect(lambda *_: _compute_graph())
+
+    # ---- The longitudinal cut: the vessel's silhouette in its own plane -----
+    # The complement of the cross-sections above, and it exists because the
+    # centerline cannot answer the question it is usually asked. The centerline
+    # is the *medial* curve, so r(s) has been divided out of it: a straight tube
+    # and a straight tube with a waist have the same `kappa_1_um`. A cut along
+    # the axis carries the bend and the caliber together, and — the point —
+    # separably, since the two wall curves give the axis as their midpoint and
+    # the half-width as their half-separation.
+    #
+    # **Display only, and deliberately so for now.** It draws the picture and
+    # fits nothing. `lumen_graph.axis_plane` / `longitudinal_slice` are pure and
+    # live in the core package, so when `batch_mesh` wants a profile off this
+    # plane it calls the same two functions rather than a second copy.
+    slice_step_w = FloatSlider(
+        value=lumen_graph.DEFAULT_SLICE_STEP_UM, min=0.25, max=4.0, step=0.25,
+        label="slice_step_um",
+        tooltip="How finely the cut plane is sampled, in µm. Independent of "
+                "the χ grid on purpose: χ is solved at ~0.65 µm and a plane "
+                "sampled that finely over the whole field is a slow layer for "
+                "no gain in a silhouette whose features are tens of µm. The "
+                "wall itself is the level curve of χ and is sub-voxel at any "
+                "setting, so this trades layer size against how closely that "
+                "curve is polygonised.")
+    slice_btn = PushButton(
+        text="Show longitudinal slice (PCA plane)",
+        tooltip="Fit the plane that best contains the centerline, cut χ with "
+                "it edge to edge, and draw the vessel's silhouette in it. "
+                "Needs the centerline graph, since the plane is fitted to it. "
+                "Nothing is measured or exported — this is the picture to look "
+                "at before any profile is fitted to it.")
+
+    SLICE_LAYER = "Vessel axial slice"
+    SLICE_EDGE_LAYER = "Vessel axial silhouette"
+    SLICE_FLAT_LAYER = "Vessel axial slice (flat)"
+
+    def _grid_faces(na: int, nb: int) -> np.ndarray:
+        """Two triangles per cell of an ``na x nb`` grid of vertices."""
+        idx = np.arange(na * nb).reshape(na, nb)
+        a = idx[:-1, :-1].ravel()
+        b = idx[:-1, 1:].ravel()
+        c = idx[1:, 1:].ravel()
+        d = idx[1:, :-1].ravel()
+        return np.vstack([np.stack([a, b, c], 1),
+                          np.stack([a, c, d], 1)]).astype(np.int64)
+
+    def _show_slice(*_):
+        g = state.get("vessel_graph")
+        lum = state.get("vessel_lumen_field")
+        if not g or not len(np.asarray(g.get("points_zyx_um", []))):
+            print("Longitudinal slice: compute the centerline graph first — "
+                  "the plane is fitted to it.", flush=True)
+            return
+        if not lum or lum.get("chi") is None:
+            print("Longitudinal slice: no solved lumen. Build the mesh with a "
+                  "Poisson-family method.", flush=True)
+            return
+        step = float(slice_step_w.value)
+
+        @thread_worker
+        def _run():
+            pl = lumen_graph.axis_plane(np.asarray(g["points_zyx_um"], float))
+            sl = lumen_graph.longitudinal_slice(
+                lum["chi"], lum["iso_level"], lum["h_um"], lum["origin_um"],
+                pl, step_um=step)
+            return pl, sl
+
+        def _done(result):
+            pl, sl = result
+            for name in (SLICE_LAYER, SLICE_EDGE_LAYER, SLICE_FLAT_LAYER):
+                if name in viewer.layers:
+                    viewer.layers.remove(name)
+            na, nb = sl["shape"]
+            rr, cc = np.meshgrid(np.arange(na), np.arange(nb), indexing="ij")
+            verts = lumen_graph.slice_to_3d(
+                np.column_stack([rr.ravel(), cc.ravel()]), sl)
+            faces = _grid_faces(na, nb)
+            # Where the plane left the volume there is no data, so that part of
+            # it is **not drawn** rather than painted in a background colour —
+            # the same rule the shear layer follows for un-measured wall. A
+            # rectangle the size of the field would otherwise read as a
+            # measurement of empty space.
+            inside = sl["inside_vol"].ravel()
+            faces = faces[inside[faces].all(axis=1)]
+            vals = np.asarray(sl["field"], np.float32).ravel()
+            # Contrast **centred on the iso-level, scaled by the lumen**, not
+            # by the field's own range. χ runs to large negative values far
+            # outside the vessel and the vessel is a narrow ribbon across a
+            # wide field, so any percentile of the whole plane is a statistic
+            # about background: it puts the entire lumen inside the top tenth
+            # of the ramp and the silhouette reads as a faint blob. Scaled by
+            # how deep χ gets *inside* the lumen, mid-grey is exactly the wall
+            # and the eye reads the level curve straight off the picture.
+            lev = float(sl["level"])
+            ins = vals[np.asarray(sl["mask"]).ravel() & np.isfinite(vals)]
+            d = float(np.percentile(ins - lev, 99)) if ins.size else 0.0
+            clim = (lev - d, lev + d) if d > 0 else None
+            if len(faces):
+                lyr = viewer.add_surface(
+                    (verts, faces, vals), name=SLICE_LAYER, colormap="gray",
+                    opacity=1.0, shading="none")
+                # Contrast **centred on the iso-level**, not on the field's
+                # own range. χ runs to large negative values far outside the
+                # vessel, so a 1-99 percentile window puts the whole lumen in
+                # the top tenth of the ramp and the silhouette reads as a faint
+                # blob. Centred, mid-grey *is* the wall and the eye reads the
+                # level curve directly off the picture.
+                fin = np.isfinite(vals) & inside
+                if fin.any() and clim is not None:
+                    try:
+                        lyr.contrast_limits = clim
+                    except Exception:
+                        pass
+
+            # The silhouette: χ's level curve on this plane, which is the same
+            # curve the displayed mesh is made of (marching cubes and marching
+            # squares interpolate the same field at the same level). Each closed
+            # loop stays its own path — joining them would draw a line across
+            # the gap between two arms.
+            #
+            # **The stretches riding the edge of the imaged volume are not
+            # drawn.** These vessels are wider than the field of view in this
+            # plane, so a level curve closes along the frame wherever the lumen
+            # runs off it; drawn in the same magenta it reads as a wall that is
+            # suspiciously straight, exactly where there is no wall. Dropping it
+            # leaves a visible gap, which is the honest picture — the same rule
+            # the shear layer follows for un-measured wall.
+            paths = []
+            for c, w in zip(sl["contours_rc"], sl["contour_is_wall"]):
+                idx = np.nonzero(w)[0]
+                if not len(idx):
+                    continue
+                for run in np.split(idx, np.nonzero(np.diff(idx) > 1)[0] + 1):
+                    if len(run) >= 2:
+                        paths.append(lumen_graph.slice_to_3d(c[run], sl))
+            if paths:
+                el = viewer.add_shapes(paths, shape_type="path",
+                                       name=SLICE_EDGE_LAYER,
+                                       edge_color="magenta", edge_width=1.0,
+                                       opacity=0.95)
+                el.visible = True
+
+            # The same cut, undistorted and flat, for reading the silhouette
+            # rather than for placing it. Shipped as a depth-1 volume rather
+            # than a 2D layer so it cannot disturb the viewer's dimensionality,
+            # and hidden by default because in the 3D view it sits at the
+            # origin rather than in the plane it came from.
+            fl = viewer.add_image(np.asarray(sl["field"])[None],
+                                  name=SLICE_FLAT_LAYER, colormap="gray",
+                                  scale=(step, step, step), visible=False,
+                                  contrast_limits=clim)
+            fl.metadata["longitudinal_slice"] = True
+
+            state["vessel_axis_plane"] = pl
+            state["vessel_slice_info"] = {
+                k: sl[k] for k in ("step_um", "e1", "e2", "normal",
+                                   "plane_origin_um", "a0_um", "b0_um",
+                                   "shape", "level")}
+            for n in pl["notes"] + sl["notes"]:
+                print(f"  {n}", flush=True)
+            cal = np.asarray(g.get("caliber_um", []), float)
+            cal = cal[np.isfinite(cal)]
+            med = float(np.median(cal)) if cal.size else float("nan")
+            rms = float(pl["rms_off_um"])
+            nrm = (f"({pl['normal'][0]:+.2f}, {pl['normal'][1]:+.2f}, "
+                   f"{pl['normal'][2]:+.2f}) in zyx")
+            vs = (f" against a median inscribed radius of {med:.1f} µm "
+                  f"({100.0 * rms / med:.0f}% of it)"
+                  if np.isfinite(med) and med > 0 else "")
+            print(f"Longitudinal slice: plane normal {nrm}; the centerline "
+                  f"sits {rms:.1f} µm rms out of it{vs}.", flush=True)
+            if np.isfinite(med) and rms > 0.5 * med:
+                print("  WARN: the centerline leaves this plane by more than "
+                      "half the inscribed radius, so the cut is taking chords "
+                      "rather than the mid-plane and every width read off it "
+                      "is a lower bound. A ribbon following the axis is the "
+                      "honest frame here, not a better plane.", flush=True)
+            fod = float(sl.get("frac_on_domain", np.nan))
+            if np.isfinite(fod) and fod > 0.01:
+                print(f"  {100.0 * fod:.0f}% of the silhouette is the edge of "
+                      f"the imaged volume rather than vessel wall, and is left "
+                      f"undrawn. The gaps in the magenta curve are where the "
+                      f"lumen leaves the field of view — widths measured "
+                      f"across them are lower bounds.", flush=True)
+            print("  The flat view is the layer to read the silhouette in — "
+                  "make 'Vessel axial slice (flat)' visible and switch the "
+                  "viewer to 2D. The magenta curve is χ's level set, i.e. the "
+                  "same surface the mesh is drawn from.", flush=True)
+
+        def _err(exc):
+            print(f"Longitudinal slice error: {exc}", flush=True)
+
+        print("Cutting the longitudinal slice ...", flush=True)
+        w = _run()
+        w.returned.connect(_done)
+        w.errored.connect(_err)
+        w.start()
+
+    slice_btn.changed.connect(_show_slice)
 
     # ---- Wall shear on the vessel surface -----------------------------------
     # The same read as `curvature` above: a per-vertex scalar on the mesh, drawn
@@ -1093,6 +1361,47 @@ def build(state, viewer) -> list:
             return ends
         return ends[kind[ends] == "crop"]
 
+    def _node_label(g, n: int) -> str:
+        """How one opening is named in the inlet dropdown and in the log.
+
+        A bare node number is unusable: the operator knows which end of the
+        chip the perfusion line is on, not which integer the skeletoniser gave
+        it. So each opening is named by everything visible about it — what kind
+        of end it is, how wide, and how long the arm behind it is — and the
+        same number is drawn on the node in the viewer. The two together are
+        what make the choice makeable.
+        """
+        kind = np.asarray(g.get("node_endpoint_kind", [])).astype(str)
+        cal = np.asarray(g.get("node_caliber_um", []), float)
+        edges = np.asarray(g.get("edges", np.zeros((0, 2))), int)
+        elen = np.asarray(g.get("edge_len_um", []), float)
+        arms = [elen[i] for i, (a, b) in enumerate(edges) if n in (a, b)
+                and i < len(elen)]
+        k = kind[n] if n < len(kind) else "?"
+        c = cal[n] if n < len(cal) else np.nan
+        bits = [f"node {n}", k]
+        if np.isfinite(c):
+            bits.append(f"{c:.0f} um wide")
+        if arms:
+            bits.append(f"{max(arms):.0f} um arm")
+        return " - ".join(bits)
+
+    # Assigning `.choices` fires `changed`, which reaches `_show_shear` and
+    # comes straight back in here — and on that re-entry the widget is sitting
+    # on whichever choice magicgui put first, which is not a decision anyone
+    # made. Without this guard the re-entrant call adopts that transient as the
+    # operator's selection: "default to the widest opening" never ran, and the
+    # position-memory below recorded the accident. On this image that silently
+    # made node 0 — a *terminus* — the inlet every time.
+    _inlet_sync = {"busy": False}
+
+    def _pin_inlet(g):
+        """Remember where the chosen inlet *is*, not just what it was numbered."""
+        nodes = np.asarray(g.get("nodes_zyx_um", []), float) if g else None
+        n = int(shear_inlet_w.value) if shear_inlet_w.value is not None else -1
+        if nodes is not None and 0 <= n < len(nodes):
+            state["shear_inlet_um"] = nodes[n].tolist()
+
     def _sync_inlet_choices(g):
         """Offer the openings as inlet choices; default the widest.
 
@@ -1100,18 +1409,51 @@ def build(state, viewer) -> list:
         control and not an inference. The default is the largest-caliber
         opening — the trunk of a Y usually is — and the choice is printed with
         the split every time, because the split depends on it.
+
+        **The choice the operator makes must survive a re-solve.** The node
+        numbering comes out of the skeletonisation, so re-tracing the graph can
+        renumber the openings and silently move the inlet back to the default.
+        The selection is therefore remembered by *position* as well as by
+        number, and a re-solve that moves it says so.
         """
+        if _inlet_sync["busy"]:
+            return
         opens = [int(n) for n in _open_nodes(g)]
         if not opens:
-            shear_inlet_w.choices = [-1]
+            shear_inlet_w.choices = [(" (no openings)", -1)]
             return
         cal = np.asarray(g.get("node_caliber_um", []), float)
         cur = int(shear_inlet_w.value) if shear_inlet_w.value is not None else -1
-        shear_inlet_w.choices = opens
-        if cur not in opens:
-            widest = max(opens, key=lambda n: (cal[n] if n < len(cal)
-                                               else -np.inf))
-            shear_inlet_w.value = widest
+        _inlet_sync["busy"] = True
+        try:
+            shear_inlet_w.choices = [(_node_label(g, n), n) for n in opens]
+            if cur in opens:
+                shear_inlet_w.value = cur
+                return
+            return _pick_inlet(g, opens, cal)
+        finally:
+            _inlet_sync["busy"] = False
+
+    def _pick_inlet(g, opens, cal):
+        """No previous choice survives — pick one, preferring where the last was."""
+        # The number is gone. Fall back to the opening nearest where the last
+        # one was, rather than to the widest — a re-solve should not quietly
+        # undo a scenario the operator set.
+        prev = state.get("shear_inlet_um")
+        if prev is not None:
+            nodes = np.asarray(g.get("nodes_zyx_um", []), float)
+            d = [float(np.linalg.norm(nodes[n] - np.asarray(prev, float)))
+                 for n in opens]
+            near = opens[int(np.argmin(d))]
+            if min(d) < 3.0 * float(np.nanmax(cal) if len(cal) else 20.0):
+                shear_inlet_w.value = near
+                print(f"Wall shear: the graph was renumbered; the inlet moved "
+                      f"to {_node_label(g, near)} ({min(d):.0f} um from where "
+                      f"it was set).", flush=True)
+                return
+        shear_inlet_w.value = max(opens, key=lambda n: (cal[n] if n < len(cal)
+                                                        else -np.inf))
+        _pin_inlet(g)
 
     def _flow_split():
         """Relative flow per edge, or None when it cannot be solved.
@@ -1307,7 +1649,18 @@ def build(state, viewer) -> list:
     shear_drop_clipped_w.changed.connect(lambda *_: _show_shear())
     shear_drop_censored_w.changed.connect(lambda *_: _show_shear())
     shear_scale_w.changed.connect(lambda *_: _show_shear())
-    shear_inlet_w.changed.connect(lambda *_: _show_shear())
+    def _remember_inlet(*_):
+        """Pin the operator's choice to a position, so a re-solve cannot lose it.
+
+        Skipped while `_sync_inlet_choices` is rebuilding the menu: the value
+        the widget holds mid-rebuild is magicgui's, not anyone's decision.
+        """
+        if _inlet_sync["busy"]:
+            return
+        _pin_inlet(state.get("vessel_graph"))
+        _show_shear()
+
+    shear_inlet_w.changed.connect(_remember_inlet)
     shear_terminus_open_w.changed.connect(lambda *_: _show_shear())
     shear_junction_ratio_w.changed.connect(lambda *_: _show_shear())
 
@@ -1552,6 +1905,10 @@ def build(state, viewer) -> list:
                 # calculation", so it belongs below the button, not among the
                 # knobs the button reads.
                 graph_color_w,
+                # The longitudinal cut. Below the button for the same reason:
+                # it draws a picture off the graph and feeds nothing.
+                _sep("— the cut along the axis (display only) —"),
+                slice_step_w, slice_btn,
                 path_curv_path_w, save_path_curv_w, load_path_curv_w]),
         _group("4. Wall shear — solve the flow in every section",
                [shear_btn, shear_status_w,

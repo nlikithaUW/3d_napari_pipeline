@@ -40,6 +40,16 @@ What this buys, in the order the program needs it:
    is what §8A.2 could not measure by any route from the projected footprint,
    and it is what the wall-shear estimate needs: τ depends on the cross-section,
    and width and height enter it with different exponents.
+6. **The cut *along* the axis** (`axis_plane` + `longitudinal_slice`) — the
+   complement of 5, and it exists because the centerline cannot answer the
+   question it is usually asked. The centerline is the *medial* curve, so r(s)
+   has been divided out of it: a straight tube and a straight tube with a waist
+   have the same `kappa_1_um`. A cut in the plane that best contains the
+   centerline carries the bend and the caliber together and, along the local
+   normal, separably — midpoint is the axis, half-separation is the half-width.
+   It also survives the junction, where a perpendicular section is meaningless,
+   which is the only view that distinguishes a lambda from an H. Validated
+   against a tube known in closed form: `docs/scratch/slice/plane_check.py`.
 
 **Pure functions, numpy in and numpy/dict out.** No Qt, no napari, no `state` —
 the same doctrine as `saved_check.py` and `mesh_score.py`, so the GUI tab and
@@ -55,6 +65,8 @@ from __future__ import annotations
 
 import numpy as np
 from scipy import ndimage as ndi
+
+from skimage import measure as _measure
 
 from . import shear as _shear
 
@@ -744,6 +756,278 @@ def cross_section(lumen: np.ndarray, origin_um: np.ndarray, h_um: float,
     out["touches_domain"] = bool((sel & ~inside_vol).any())
     return out
 
+
+# --------------------------------------------------------------------------- #
+# (5b) the complement: a cut *along* the axis
+# --------------------------------------------------------------------------- #
+#
+# `cross_section` cuts ⟂ to the centerline and measures r(s). This cuts the one
+# plane that best contains the centerline and shows the whole vessel at once.
+#
+# **Why this exists at all.** The centerline is the *medial* curve, so r(s) was
+# divided out to build it: a straight tube and a straight tube with a waist have
+# identical centerlines and identical `kappa_1_um`. Bending and caliber-change
+# are independent and κ carries only the first. A longitudinal cut carries both,
+# and carries them *separably* — the cut gives two wall curves, and along the
+# local normal their midpoint is the axis and their half-separation is the
+# half-width. That split is exact, taken before any derivative, and it is the
+# thing no local surface fit can do at any radius: curvature of the wall mixes a
+# bend and a waist together, because both bend the wall.
+#
+# Three things it has that the perpendicular section stack does not:
+#
+#  - **It survives the junction.** A cut ⟂ to the axis is meaningless at a Y —
+#    the skeleton wobbles, the station is `censored`, the duct model does not
+#    apply. The silhouette in this plane is perfectly well defined straight
+#    through the crotch, and that is the only view that can tell a λ from an H.
+#  - **No sampling disc.** `section_span` clips 44-56% of the sections on the
+#    two z-leak images ([§8C.3](../docs/DIRECTION.md)). This plane is cut to the
+#    edges of the volume and has no such boundary.
+#  - **It is one picture you can look at**, rather than a sequence of per-station
+#    scalars. That is deliberately the first deliverable: fitting a profile to a
+#    silhouette nobody has looked at is how [P42](../docs/ISSUES.md#p42) happened.
+#
+# **This is not the max projection that sank `centerline.py`.** That failed
+# because a projected footprint has to be made solid with `binary_fill_holes`,
+# the single root of seven defects (§8B). χ is already a solid indicator field;
+# there is nothing to fill. And the cut is taken out of χ by interpolation with
+# the wall at its level curve, for the same reason `cross_section` is
+# ([P46](../docs/ISSUES.md#p46)): marching squares on a binarised lumen can only
+# put a vertex on a pixel edge, and that bias does not go away with resolution.
+# The silhouette drawn here is therefore the *same curve* the displayed mesh is
+# made of, since marching cubes interpolates the same χ at the same level.
+#
+# Nothing here fits, smooths or decides. It returns the picture and the flags.
+
+# Display/measurement sampling step for the slice, in µm. Independent of the χ
+# grid on purpose: χ is solved at `h_um` (~0.65 µm here) and a plane sampled
+# that finely over a 400 µm field is 380k samples, which is a slow layer for no
+# gain in a silhouette whose features are tens of µm. 1.0 µm is ~1/50 of the
+# minor caliber and ~1/170 of the major.
+DEFAULT_SLICE_STEP_UM = 1.0
+
+
+def axis_plane(points_um, weights=None) -> dict:
+    """The plane that best fits the centerline, by PCA over its points.
+
+    Returns the plane origin (the centroid), an in-plane basis ``e1``/``e2``
+    ordered by extent, the ``normal``, the three eigenvalues, and — the number
+    that decides whether a plane was the right object at all —
+    ``rms_off_um``, the root-mean-square out-of-plane distance of the centerline
+    from it.
+
+    **Read `rms_off_um` before reading anything cut on this plane.** A plane is
+    the right frame only if the vessel is nearly planar; if the centerline
+    wanders out of it by an appreciable fraction of the caliber, the cut is
+    taking chords rather than the mid-plane, the width reads low wherever the
+    vessel dips out, and the honest next step is a ribbon that follows the axis
+    (a curved planar reformation) rather than a tighter plane. This function
+    reports the number and **does not choose** — same doctrine as the rest of
+    the module.
+
+    Every centerline point counts equally, which is an *arc-length* weighting
+    because `_resample` spaces them uniformly along the path. That is the right
+    weighting for a plane fit: it makes a long straight arm count for its length
+    rather than for its voxel count. ``weights`` overrides it if a caller wants
+    to, e.g., down-weight censored stations.
+    """
+    p = np.asarray(points_um, float)
+    out = {"origin_um": np.zeros(3), "e1": np.array([0.0, 1.0, 0.0]),
+           "e2": np.array([0.0, 0.0, 1.0]), "normal": np.array([1.0, 0.0, 0.0]),
+           "eigvals": np.zeros(3), "rms_off_um": np.nan,
+           "max_off_um": np.nan, "planarity": np.nan, "n_points": len(p),
+           "notes": []}
+    if p.ndim != 2 or p.shape[1] != 3 or len(p) < 3:
+        out["notes"].append(
+            "WARN: fewer than 3 centerline points — no plane fitted.")
+        return out
+
+    if weights is None:
+        w = np.ones(len(p))
+    else:
+        w = np.asarray(weights, float)
+        w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
+        if w.sum() <= 0:
+            w = np.ones(len(p))
+    w = w / w.sum()
+
+    c = (w[:, None] * p).sum(0)
+    q = p - c
+    cov = (q * w[:, None]).T @ q
+    ev, V = np.linalg.eigh(cov)          # ascending
+    # A perfectly planar centerline gives a third eigenvalue of -1e-17 rather
+    # than 0, and `planarity` then comes back negative, which reads as a bug.
+    ev = np.maximum(ev, 0.0)
+    order = np.argsort(ev)[::-1]
+    ev = ev[order]
+    V = V[:, order]
+    e1, e2, n = V[:, 0].copy(), V[:, 1].copy(), V[:, 2].copy()
+
+    # A deterministic sign, so pressing the button twice gives the same picture
+    # and a saved frame means the same thing on reload. `eigh` fixes the axes
+    # but not their direction.
+    for v in (e1, e2):
+        if v[int(np.argmax(np.abs(v)))] < 0:
+            v *= -1.0
+    n = np.cross(e1, e2)
+    n /= np.linalg.norm(n) + 1e-12
+    # These vessels lie roughly in xy, so a +z-ward normal is the natural
+    # convention and makes "above the plane" mean "shallower in the stack".
+    if n[0] < 0:
+        n = -n
+        e2 = -e2
+
+    off = q @ n
+    rms = float(np.sqrt(float((w * off ** 2).sum())))
+    out.update({"origin_um": c, "e1": e1, "e2": e2, "normal": n,
+                "eigvals": ev, "rms_off_um": rms,
+                "max_off_um": float(np.abs(off).max()),
+                "planarity": float(ev[2] / ev[0]) if ev[0] > 0 else np.nan,
+                "extent_e1_um": float(np.ptp(q @ e1)),
+                "extent_e2_um": float(np.ptp(q @ e2))})
+    out["notes"].append(
+        f"NOTE: centerline plane fitted to {len(p)} points; the centerline "
+        f"sits {rms:.1f} um rms and {out['max_off_um']:.1f} um at worst out of "
+        f"it. Compare that with the local caliber before reading widths off "
+        f"the cut: a plane is the right frame only while it is small.")
+    return out
+
+
+def _slice_contours(field: np.ndarray, level: float) -> list:
+    """Level curves of the sampled plane, **kept separate**, in (row, col).
+
+    `shear.section_contour` contours the same field at the same level and is the
+    same curve; it returns the vertices *concatenated* because the shear solve
+    integrates over the whole wall and does not care which closed loop a point
+    came from. Here each loop is a silhouette to be looked at and later fitted
+    per branch, and concatenating them would draw a line across the gap between
+    two arms — [P08](a)'s failure mode, in a different coordinate system.
+    """
+    f = np.asarray(field, float)
+    lo = float(min(np.nanmin(f), level)) - 1.0
+    f = np.where(np.isfinite(f), f, lo)
+    out = []
+    for c in _measure.find_contours(np.pad(f, 1, constant_values=lo),
+                                    float(level)):
+        c = c - 1.0                       # undo the pad
+        if len(c) >= 3:
+            out.append(c)
+    return out
+
+
+def longitudinal_slice(chi: np.ndarray, iso_level: float, h_um: float,
+                       origin_um, plane: dict, *,
+                       step_um: float = DEFAULT_SLICE_STEP_UM,
+                       margin_um: float = 0.0) -> dict:
+    """Sample χ on ``plane``, over a rectangle covering the whole volume.
+
+    The in-plane extent is the bounding box of the **eight corners of the χ
+    volume** projected onto the plane's basis, so the cut runs edge to edge and
+    nothing of the vessel is outside it by construction. Where the plane leaves
+    the volume there is no data, and that is returned as ``inside_vol`` rather
+    than filled — the caller draws or drops it, this does not.
+
+    Returns the sampled field, its ``mask`` (``field > iso_level``), the level
+    curves as a list of (row, col) polylines, the frame needed to put any of
+    them back in the image frame (`slice_to_3d`), and the silhouette area.
+
+    **``contour_is_wall`` is not optional reading.** The vessel is wider than
+    the field of view in this plane on most of these images, so a level curve
+    closes along the *edge of the data* wherever the lumen runs off it, and that
+    stretch is the boundary of the image rather than the boundary of the vessel.
+    Drawn or fitted the same as the rest, it reads as a wall that is straight,
+    exactly where the real wall is missing — the one place a silhouette is most
+    likely to be believed and least entitled to be. So each curve comes back
+    with a parallel boolean saying which of its vertices stand on measured wall
+    (more than one sample inside the volume), and ``frac_on_domain`` says how
+    much of the total curve does not. Same doctrine as the shear layer's
+    un-measured wall: the flag is returned, and **this does not filter**.
+    """
+    e1 = np.asarray(plane["e1"], float)
+    e2 = np.asarray(plane["e2"], float)
+    c = np.asarray(plane["origin_um"], float)
+    o = np.broadcast_to(np.asarray(origin_um, float), (3,))
+    step = float(step_um)
+    out = {"step_um": step, "e1": e1, "e2": e2,
+           "normal": np.asarray(plane["normal"], float),
+           "plane_origin_um": c, "level": float(iso_level), "notes": []}
+    if not np.isfinite(step) or step <= 0:
+        out["notes"].append("WARN: step_um must be positive — nothing cut.")
+        step = float(h_um)
+        out["step_um"] = step
+
+    shp = np.asarray(np.asarray(chi).shape) - 1
+    corners = o[None, :] + (np.array(np.meshgrid([0, 1], [0, 1], [0, 1],
+                                                 indexing="ij"))
+                            .reshape(3, -1).T * shp[None, :] * float(h_um))
+    ca = (corners - c[None, :]) @ e1
+    cb = (corners - c[None, :]) @ e2
+    a = np.arange(ca.min() - margin_um, ca.max() + margin_um + step, step)
+    b = np.arange(cb.min() - margin_um, cb.max() + margin_um + step, step)
+    A, B = np.meshgrid(a, b, indexing="ij")
+    pos = (c[None, None, :] + A[..., None] * e1[None, None, :]
+           + B[..., None] * e2[None, None, :])
+    idx = (pos - o[None, None, :]) / float(h_um)
+    inside = np.all((idx >= 0) & (idx <= shp[None, None, :]), axis=-1)
+
+    f = np.asarray(chi, float)
+    lo = float(np.nanmin(f)) - 1.0
+    field = ndi.map_coordinates(f, np.moveaxis(idx, -1, 0).reshape(3, -1),
+                                order=1, mode="constant",
+                                cval=lo).reshape(A.shape)
+    mask = field > float(iso_level)
+
+    contours = _slice_contours(field, float(iso_level))
+    # How far inside the sampled plane each contour vertex stands, in samples.
+    # A vertex on a real wall is surrounded by data; one riding the edge of the
+    # volume sits right on the inside/outside transition.
+    depth = ndi.distance_transform_edt(inside)
+    is_wall = []
+    for c in contours:
+        d = ndi.map_coordinates(depth, c.T, order=1, mode="constant", cval=0.0)
+        is_wall.append(d > 1.0)
+    n_tot = int(sum(len(c) for c in contours))
+    n_wall = int(sum(int(w.sum()) for w in is_wall))
+
+    out.update({"field": field.astype(np.float32), "mask": mask,
+                "inside_vol": inside,
+                "a0_um": float(a[0]), "b0_um": float(b[0]),
+                "shape": tuple(int(x) for x in A.shape),
+                "contours_rc": contours, "contour_is_wall": is_wall,
+                "frac_on_domain": (1.0 - n_wall / n_tot) if n_tot else np.nan,
+                "area_um2": float(mask.sum()) * step * step})
+    out["n_contours"] = len(out["contours_rc"])
+    out["touches_domain"] = bool((mask & ~inside).any())
+    out["notes"].append(
+        f"NOTE: slice is {A.shape[0]}x{A.shape[1]} at {step:g} um; the lumen "
+        f"silhouette is {out['area_um2']:.0f} um^2 in "
+        f"{out['n_contours']} closed curve(s). More than one curve is not "
+        f"automatically a defect - an arm that leaves the plane comes back as "
+        f"its own island - but it is the first thing to look at.")
+    if n_tot and out["frac_on_domain"] > 0.01:
+        out["notes"].append(
+            f"WARN: {100.0 * out['frac_on_domain']:.0f}% of the silhouette is "
+            f"the edge of the imaged volume, not vessel wall - the lumen runs "
+            f"off the plane there. Every width measured across those stretches "
+            f"is a lower bound, and the straight run they draw is the field of "
+            f"view. See `contour_is_wall`.")
+    return out
+
+
+def slice_to_3d(rc, info: dict) -> np.ndarray:
+    """Map (row, col) index coordinates on a slice to zyx µm.
+
+    The counterpart of `shear.contour_to_3d`, for `longitudinal_slice`'s frame.
+    """
+    rc = np.asarray(rc, float)
+    if rc.size == 0:
+        return np.zeros((0, 3))
+    rc = np.atleast_2d(rc)
+    a = info["a0_um"] + rc[:, 0] * info["step_um"]
+    b = info["b0_um"] + rc[:, 1] * info["step_um"]
+    return (np.asarray(info["plane_origin_um"], float)[None, :]
+            + a[:, None] * np.asarray(info["e1"], float)[None, :]
+            + b[:, None] * np.asarray(info["e2"], float)[None, :])
 
 # --------------------------------------------------------------------------- #
 # (6) the whole thing

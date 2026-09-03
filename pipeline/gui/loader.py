@@ -215,8 +215,28 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
             hist.clear()
         # The Vessel mesh tab's four status lines describe caches this handler
         # just emptied.
+        #
+        # **Guarded, and the reason is severe.** These callbacks only repaint
+        # text, but they run *before* the save-path block below, so an exception
+        # in one aborts `_done` and every tab keeps the previous image's path —
+        # or, on the first image, its bare relative default, which resolves to
+        # the current working directory. Every artifact of the run then lands in
+        # the CWD under one name, each image overwriting the last, with the only
+        # symptom a traceback that the batch scrolls past. Measured 2026-09-02
+        # on a 6-image `--steps cadherin` run: two images written to
+        # `./cadherin_labels.npz` before it was caught.
+        #
+        # The trigger was `batch.py` discarding what `build()` returns, which
+        # let Qt collect the labels these closures write to ("wrapped C/C++
+        # object of type QLabel has been deleted"). That is fixed there too, but
+        # the ordering hazard is the real defect: nothing cosmetic may stand
+        # between a load and the save paths that load implies.
         for fn in state.get("vessel_status_refresh", []):
-            fn()
+            try:
+                fn()
+            except Exception as exc:
+                print(f"  (status refresh failed, continuing: "
+                      f"{type(exc).__name__}: {exc})", flush=True)
 
         # Point every tab's save/load path field into a per-image folder next to
         # the image (e.g. images/WT/<stem>_saved/), so features for different

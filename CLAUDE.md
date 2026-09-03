@@ -214,7 +214,23 @@ where the fibroblasts are.
   cut **out of χ by interpolation, not out of the binarised lumen**
   (`section_from_field`, on by default since 2026-08-28): the surface and the
   section are then the same curve to sub-voxel precision, and P46 is the size of
-  what the binary cut was discarding. Pure functions, no Qt. **It chooses nothing**: `censored`, `section_clipped` and the z-face
+  what the binary cut was discarding.
+  Since 2026-09-02 it also cuts the **complement**: `axis_plane` fits the plane
+  that best contains the centerline and `longitudinal_slice` cuts χ with it,
+  edge to edge. That exists because **the centerline is the medial curve, so
+  r(s) was divided out of it** — a straight tube and a straight tube with a
+  waist have the same `kappa_1_um`, and no surface curvature at any scale sees a
+  taper either (§7.1). The longitudinal cut carries bend and caliber together
+  and separably (midpoint = axis, half-separation = half-width), and it survives
+  the junction, where a perpendicular section is meaningless — which is the only
+  view that tells a λ from an H. `contour_is_wall` is not optional reading: these
+  vessels are wider than the field of view in that plane, so ~45% of the
+  silhouette on image 1 is the edge of the *data*, and drawn as wall it reads as
+  a suspiciously straight one exactly where no wall was imaged. Validated
+  against a tube known in closed form (`docs/scratch/slice/plane_check.py`:
+  plane normal to 1e-4°, wall to 0.009 µm rms on an obliquely-cut grid).
+  **Display only so far — it fits and exports nothing.**
+  Pure functions, no Qt. **It chooses nothing**: `censored`, `section_clipped` and the z-face
   warning are flags for the caller, not filters it applies.
 - `shear.py` — **wall shear stress on a cross-section, from geometry alone**
   (`docs/DIRECTION.md` §4.3). A 2D Poisson solve per section — `µ∇²u = dp/ds`,
@@ -336,7 +352,19 @@ where the fibroblasts are.
 `vessel_mesh` is grouped **by pipeline** — four collapsibles (surface, surface
 curvature, centerline graph, wall shear), each with its own trigger, its own
 `.npz` and a status line saying what is cached and whether it was built on the
-mesh currently on screen. **Wall shear has its own button**, not a checkbox on
+mesh currently on screen. The centerline group carries one extra button below
+its own — **"Show longitudinal slice (PCA plane)"** — which draws
+`lumen_graph.longitudinal_slice` as three layers (the textured plane in 3D, the
+silhouette as paths, and a flat view for reading it in 2D). It is display-only
+and writes no `.npz`, so it is not a fifth group; the stretches of silhouette
+that ride the edge of the imaged volume are **not drawn**, the same rule the
+shear layer follows for un-measured wall.
+The wall-shear group's `inlet node` names each opening by kind, caliber and arm
+length, and `_show_graph` draws the node number on the node — a bare integer is
+not a choice anyone can make, and which opening the flow enters through is a
+fact about the rig that only the operator has. The choice is pinned to a
+**position** as well as a number, so re-tracing the graph cannot silently
+renumber it back to the default. **Wall shear has its own button**, not a checkbox on
 the graph's; it re-traces the graph to get it, because the sections are cut
 inside `lumen_graph`'s trace. `compute_shear` still defaults off in both paths
 and `batch_mesh --shear` still maps onto it — only the widget changed.

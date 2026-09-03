@@ -177,6 +177,16 @@ MESH_DEFAULTS = {
     # the identity (k = 1); a finer value hands Poisson a fractional
     # occupancy instead, which is a real choice and therefore a knob.
     "alpha_raster_um": vessel_poisson.DEFAULT_GRID_UM,
+    # Domain faces to cap with a Dirichlet boundary so the surface closes
+    # there instead of leaving the volume. **Empty is the default and that is
+    # the decision**: capping asserts wall that was never imaged, and turning
+    # it on by default would silently change every mesh already on disk and
+    # invalidate the artifacts built from them. The z faces are what it is for
+    # ([P03]'s under-detected deep wall lets the fitted lumen bleed through a
+    # wall that physically exists), but which faces are real openings is a fact
+    # about the rig, not about the image — the same class of operator input as
+    # the inlet, which this tool already records and never chooses.
+    "close_faces": (),
 }
 # --- the cadherin field (`docs/ISSUES.md` [P28]) ---------------------------
 # **Not a mesh parameter and not a method.** `build_mesh` gains no argument for
@@ -449,6 +459,7 @@ def resolve_params(args) -> dict:
         "poisson_core_um": args.poisson_core_um,
         "poisson_iso_pct": args.poisson_iso_pct,
         "alpha_raster_um": args.alpha_raster_um,
+        "close_faces": args.close_faces,
     }
     for key in ALL_PARAMS:
         mesh[key], source[f"mesh.{key}"] = _pick(
@@ -577,6 +588,22 @@ def parameter_warnings(params: dict) -> list[str]:
             notes.extend(check_alpha_vs_spacing(float(mesh["alpha3d_um"]),
                                                 float(mesh["subsample_um"])))
     return notes
+
+
+def _close_faces(text: str):
+    """argparse type for --close-faces: a comma-separated subset, or 'none'."""
+    t = str(text).strip().lower()
+    if t in ("", "none"):
+        return ()
+    got = tuple(x.strip() for x in t.split(",") if x.strip())
+    bad = [f for f in got if f not in vessel_poisson.FACE_NAMES]
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"unknown face(s) {bad}; expected a subset of "
+            f"{vessel_poisson.FACE_NAMES} or 'none'")
+    # Sorted + de-duplicated so the recorded value is canonical and two
+    # invocations that mean the same thing record the same string.
+    return tuple(sorted(set(got)))
 
 
 def format_params(params: dict) -> list[str]:
@@ -1557,6 +1584,21 @@ def main() -> None:
                    help="cut a perpendicular cross-section every this many um "
                         "of arc length. Between cuts the section columns are "
                         "NaN, never interpolated.")
+    g_faces = ap.add_argument_group("boundary")
+    g_faces.add_argument(
+        "--close-faces", type=_close_faces, default=None, metavar="FACES",
+        help="comma-separated domain faces to cap so the surface closes there "
+             "rather than leaving the volume: any of "
+             + ",".join(vessel_poisson.FACE_NAMES) + ", or 'none'. Default: "
+             "cap nothing, which is what every mesh on disk was built under. "
+             "'z_lo,z_hi' is the intended use — the fitted lumen bleeds "
+             "through the under-detected deep wall (docs/ISSUES.md P03), so "
+             "the z opening is a detection artefact rather than a place the "
+             "vessel leaves. NOTE this asserts wall that was never imaged: a "
+             "cross-section reaching a capped face is solved against asserted "
+             "wall, and Poisson-family methods only (the interpolating ones "
+             "have no field to cap).")
+
     g.add_argument("--shear", dest="compute_shear", action="store_true",
                    default=None,
                    help="solve for wall shear stress on every cross-section "

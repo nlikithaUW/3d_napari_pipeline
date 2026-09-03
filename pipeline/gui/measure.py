@@ -13,7 +13,7 @@ from napari.qt.threading import thread_worker
 from scipy.spatial import KDTree
 
 from ..fret import background_subtract
-from ..measure_core import graph_columns
+from ..measure_core import graph_columns, wall_columns
 from ..saved_check import (
     curvature_notes, force_notes, mesh_notes, native_notes,
     nuclei_notes, ratio_dropout_note, surface_verts_for_distance,
@@ -101,6 +101,10 @@ def build(state, viewer):
         raw_voxel = tuple(state.get("raw_voxel_zyx_um", scale))
         curvature = (state.get("vessel_mesh_cache") or {}).get("curvature")
         graph = state.get("vessel_graph")
+        # Captured here, before the worker, for the same reason the nuclei are:
+        # so it is closed over rather than re-read off `state` on another
+        # thread. None until the Vessel Mesh tab's wall-shear button has run.
+        wall = state.get("vessel_shear")
 
         lyr = viewer.layers["Adhesion instances"]
         adh_data = lyr.data
@@ -322,6 +326,12 @@ def build(state, viewer):
                                           counts)
             notes += gnotes
 
+            # Step 7d — per-adhesion wall shear off the ragged cloud. Shared
+            # with `measure_core` for the same reason as 7c.
+            wcols, wnotes = wall_columns(wall, adhesion_um, order, first,
+                                         counts)
+            notes += wnotes
+
             # Step 8 — assemble result
             return {
                 "label":          unique_ids,
@@ -349,6 +359,7 @@ def build(state, viewer):
                 "curv_k2":        curv_out["k2"],
                 "curv_gaussian":  curv_out["gaussian"],
                 **gcols,
+                **wcols,
                 # Not a metric column — `_export` selects by name.
                 "notes":          notes,
             }
@@ -534,6 +545,9 @@ def build(state, viewer):
                 "dist_crop_um", "censored", "s_um", "caliber_um",
                 "lumen_area_um2", "lumen_major_um", "lumen_minor_um",
                 "lumen_aspect",
+                "tau_rel_1_um3", "tau_hat_um", "dist_tau_um", "tau_censored",
+                "tau_sec_clipped", "sec_tau_rel_1_um3", "sec_tau_hat_mean_um",
+                "sec_force_balance", "sec_wall_ok_frac",
                 "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
                 "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
                 "volume_um3", "axis_major_um", "axis_minor_um",

@@ -46,7 +46,120 @@ def _bs_per_z(vol: np.ndarray) -> np.ndarray:
 GRAPH_COLUMNS = ("path_curv_1_um", "path_curv_xy_1_um", "dist_junction_um",
                  "dist_crop_um", "censored", "s_um", "caliber_um",
                  "lumen_area_um2", "lumen_major_um", "lumen_minor_um",
-                 "lumen_aspect")
+                 "lumen_aspect",
+                 # Section-level shear, from the nearest *measured* station.
+                 # Context for the per-wall-point columns below, not a
+                 # substitute for them: tau varies 6-9x around one section, so
+                 # the section mean is exactly the circumferential variation
+                 # DIRECTION section 7.4 needs thrown away. `sec_force_balance`
+                 # and `sec_wall_ok_frac` travel with them because they say
+                 # whether that station's solve is trustworthy at all.
+                 "sec_tau_rel_1_um3", "sec_tau_hat_mean_um",
+                 "sec_force_balance", "sec_wall_ok_frac")
+
+# Per-adhesion wall shear, read from the ragged `vessel_shear.npz` — one row
+# per wall point, not per centerline point. CLAUDE.md fixes this as the source:
+# "it is also what a per-adhesion join will read, so the surface you look at
+# and
+# the number an adhesion gets are the same array."
+#
+# `tau_rel_1_um3` = tau / (mu*Q) and is the column an unbranched vessel can be
+# read from with no flow rate at all. The three that follow it are not
+# decoration:
+#   * `dist_tau_um`     — how far the nearest measured wall point actually was.
+#     Sections are cut every few um, so most of the wall carries no
+#     measurement;
+#     a value from 30 um away is not about this adhesion.
+#   * `tau_censored`    — the premise fails (field-of-view crop), not the
+#     solve.
+#   * `tau_sec_clipped` — the section was clipped: not a measurement at all.
+# They mean different things and are kept as separate columns for the reason
+# [P49] gives for the display layer's separate controls: one flag for all of
+# them hid a third of the wall.
+WALL_COLUMNS = ("tau_rel_1_um3", "tau_hat_um", "dist_tau_um",
+                "tau_censored", "tau_sec_clipped")
+
+
+def wall_columns(wall, adhesion_um, order, first, counts):
+    """Per-adhesion wall shear from the ragged wall-point cloud.
+
+    Each adhesion voxel takes its nearest wall point; voxels whose nearest wall
+    point is further than ``wall["max_dist_um"]`` contribute **nothing**, and
+    an
+    adhesion with no voxel inside that radius gets NaN rather than a number
+    borrowed from the far side of the vessel. That is the same rule
+    `shear.vertex_field` / `covered_faces` apply when drawing the surface —
+    nearest measured point, never interpolated, un-measured wall not drawn — so
+    the number an adhesion gets and the surface the operator looks at agree by
+    construction.
+
+    Returns ``(columns, notes)``.
+    """
+    n_ad = len(first)
+    out = {k: np.full(n_ad, np.nan, dtype=np.float32) for k in WALL_COLUMNS}
+    if wall is None:
+        return out, ["NOTE: no wall-shear cloud — tau_* columns are blank. "
+                     "Build the vessel graph with shear on "
+                     "(`batch_mesh --shear`, or the Vessel Mesh tab's "
+                     "'Vessel wall shear' button)."]
+    pts = np.asarray(wall.get("points_zyx_um", np.zeros((0, 3))), float)
+    if not len(pts):
+        return out, ["WARN: the wall-shear cloud is empty — tau_* columns are "
+                     "blank. No cross-section produced a solvable wall."]
+
+    max_d = float(wall.get("max_dist_um", np.inf))
+    d, j = KDTree(pts).query(adhesion_um)
+    near = d <= max_d
+    s_near = near[order]
+    s_d = d[order]
+
+    def _reduce(vals, how="mean"):
+        """Reduce a per-voxel array to per-adhesion, over in-range voxels only.
+
+        `np.add.reduceat` has no way to skip elements, so out-of-range voxels
+        are zeroed and the divisor is the in-range count. An adhesion with no
+        in-range voxel divides by zero and is left NaN, which is the intended
+        answer: no wall measurement reaches it.
+        """
+        v = np.asarray(vals, float)[order]
+        v = np.where(s_near, v, 0.0)
+        tot = np.add.reduceat(v, first)
+        n_in = np.add.reduceat(s_near.astype(np.float64), first)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            if how == "max":
+                # A flag is set for the adhesion if any in-range voxel has it.
+                return np.where(n_in > 0,
+                                np.maximum.reduceat(v, first), np.nan)
+            return np.where(n_in > 0, tot / n_in, np.nan)
+
+    for col, key in (("tau_rel_1_um3", "tau_rel_1_um3"),
+                     ("tau_hat_um", "tau_hat_um")):
+        if key in wall:
+            out[col] = _reduce(np.asarray(wall[key], float)[j]).astype(
+                np.float32)
+    # Distance is the *minimum* over the adhesion's voxels and is reported for
+    # every adhesion, in range or not — it is how the caller judges the rest.
+    out["dist_tau_um"] = np.minimum.reduceat(s_d, first).astype(np.float32)
+    for col, key in (("tau_censored", "censored"),
+                     ("tau_sec_clipped", "section_clipped")):
+        if key in wall:
+            out[col] = _reduce(
+                np.asarray(wall[key], float)[j], "max").astype(np.float32)
+
+    n_hit = int(np.isfinite(out["tau_rel_1_um3"]).sum())
+    notes = [f"NOTE: wall shear reached {n_hit}/{n_ad} adhesions "
+             f"({100.0 * n_hit / max(n_ad, 1):.0f}%) within {max_d:g} um of a "
+             f"measured wall point; the rest are blank, not zero."]
+    if n_hit:
+        cens = np.nansum(out["tau_censored"] > 0)
+        if cens:
+            notes.append(
+                f"NOTE: {int(cens)} of those {n_hit} sit on a censored "
+                f"station — tau/muQ is normalised by conservation of Q, which "
+                f"fails within a crop. Filter on `tau_censored`, do not "
+                f"assume "
+                f"it was filtered.")
+    return out, notes
 
 
 def graph_columns(graph, adhesion_um, order, first, counts):
@@ -116,7 +229,17 @@ def graph_columns(graph, adhesion_um, order, first, counts):
         for col, key in (("lumen_area_um2", "area_um2"),
                          ("lumen_major_um", "major_um"),
                          ("lumen_minor_um", "minor_um"),
-                         ("lumen_aspect", "aspect")):
+                         ("lumen_aspect", "aspect"),
+                         # All-NaN unless the graph was built with
+                         # compute_shear=True. Left as NaN rather than absent
+                         # so the CSV header does not depend on the solve —
+                         # the same contract `_SHEAR_FLOATS` states upstream.
+                         ("sec_tau_rel_1_um3", "tau_rel_1_um3"),
+                         ("sec_tau_hat_mean_um", "tau_hat_mean_um"),
+                         ("sec_force_balance", "force_balance"),
+                         ("sec_wall_ok_frac", "wall_ok_frac")):
+            if key not in graph:
+                continue
             v = np.asarray(graph[key])[snn][order].astype(np.float64)
             out[col] = (np.add.reduceat(v, first) / counts).astype(np.float32)
     return out, notes
@@ -125,7 +248,7 @@ def graph_columns(graph, adhesion_um, order, first, counts):
 def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale,
                          clover_native, ruby_native, raw_voxel, curvature,
                          graph, nuc_ids=None, nuc_is_fib=None,
-                         vessel_faces=None):
+                         vessel_faces=None, wall=None):
     """Return the per-adhesion measurement dict (or None if no adhesions).
 
     ``force_vol`` may be None when FRET is not configured; the force columns are
@@ -296,6 +419,9 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
     gcols, gnotes = graph_columns(graph, adhesion_um, order, first, counts)
     notes += gnotes
 
+    wcols, wnotes = wall_columns(wall, adhesion_um, order, first, counts)
+    notes += wnotes
+
     return {
         "label": unique_ids,
         "volume_um3": props["area"],
@@ -327,6 +453,7 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         # ordered 3D path. Reusing the name would repeat [P04]'s `nuc_id`
         # trap — the same header meaning a different thing across a boundary.
         **gcols,
+        **wcols,
         # Not a metric column — callers print it, `metric_cols` filters it out.
         "notes": notes,
     }

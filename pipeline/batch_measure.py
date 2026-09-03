@@ -56,6 +56,9 @@ COLS = ["label", "ratio_clover_ruby", "dist_mesh_um",
         "path_curv_1_um", "path_curv_xy_1_um", "dist_junction_um",
         "dist_crop_um", "censored", "s_um", "caliber_um", "lumen_area_um2",
         "lumen_major_um", "lumen_minor_um", "lumen_aspect",
+        "tau_rel_1_um3", "tau_hat_um", "dist_tau_um", "tau_censored",
+        "tau_sec_clipped", "sec_tau_rel_1_um3", "sec_tau_hat_mean_um",
+        "sec_force_balance", "sec_wall_ok_frac",
         "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
         "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
         "volume_um3", "axis_major_um", "axis_minor_um", "eccentricity", "nuc_id",
@@ -222,6 +225,14 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     if (saved / "vessel_graph.npz").exists():
         pc = np.load(saved / "vessel_graph.npz")
         graph = {k: pc[k] for k in pc.files}
+    # The ragged wall-shear cloud — one row per wall point, not per centerline
+    # point, which is why it is a separate file. Absent unless the graph was
+    # built with shear on; `wall_columns` then leaves the tau_* columns blank
+    # and says so, rather than the header changing between runs.
+    wall = None
+    if (saved / "vessel_shear.npz").exists():
+        wz = np.load(saved / "vessel_shear.npz")
+        wall = {k: wz[k] for k in wz.files}
     fib = {}
     if (saved / "fibroblast_count.npz").exists():
         fc = np.load(saved / "fibroblast_count.npz")
@@ -241,7 +252,7 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
                                   scale, clover_native, ruby_native, raw_voxel,
                                   curvature, graph, nuc_ids=nuc_ids,
                                   nuc_is_fib=nuc_is_fib,
-                                  vessel_faces=vessel_faces)
+                                  vessel_faces=vessel_faces, wall=wall)
     if result is None:
         print("    no adhesions; nothing written.", flush=True)
         return "empty", []

@@ -57,6 +57,13 @@ The five steps, and the one non-obvious thing about each:
    exactly where the pipeline is already weakest. For the same reason the field
    is **not padded** before marching cubes — that pad *is* a Dirichlet cap.
 
+   ``close_faces`` makes that cap available **per face, and only when asked**.
+   Its use is the z faces: [P03]'s deep wall is under-detected, so the fitted
+   lumen bleeds out through a wall that physically exists, and the resulting
+   opening is an artefact of detection rather than a place the vessel leaves.
+   Capping asserts wall that was never imaged, which is why it is opt-in,
+   recorded in ``info["close_faces"]``, and never the default.
+
    Two numerics that have to be right. Central differences give a discrete
    Laplacian whose eigenvalue vanishes at the Nyquist mode as well as at DC, so
    an unconstrained checkerboard rides along on χ; the staggered pair (forward
@@ -140,6 +147,20 @@ _WALL_MASS_PCT = 10.0
 
 _EMPTY = (np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64),
           np.zeros((0,)), np.zeros((0, 3)))
+
+
+# The outermost grid-cell slab of each domain face. Named the same way
+# `lumen_graph`'s `face_openings` names them, so an operator reading "the lumen
+# leaves mainly through the z faces" can pass exactly that string back in.
+_FACE_SLICES = {
+    "z_lo": (0, slice(None), slice(None)),
+    "z_hi": (-1, slice(None), slice(None)),
+    "y_lo": (slice(None), 0, slice(None)),
+    "y_hi": (slice(None), -1, slice(None)),
+    "x_lo": (slice(None), slice(None), 0),
+    "x_hi": (slice(None), slice(None), -1),
+}
+FACE_NAMES = tuple(_FACE_SLICES)
 
 
 def _weighted_percentile(values: np.ndarray, weights: np.ndarray,
@@ -574,6 +595,7 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
                 iso_pct: float = DEFAULT_ISO_PCT,
                 min_component_um: float = 50.0,
                 core_um: float | None = DEFAULT_CORE_UM,
+                close_faces: tuple[str, ...] = (),
                 extras: dict | None = None):
     """The vessel surface as a level set of the fitted χ.
 
@@ -735,8 +757,51 @@ def reconstruct(mask, scale, *, grid_um: float = DEFAULT_GRID_UM,
     occupied = occ > 0
     level = _weighted_percentile(chi[occupied], occ[occupied], float(iso_pct))
     info["iso_level"] = level
-    # After the sign check, so `chi > iso_level` is the lumen side in the
-    # caller's hands too and not a coin flip.
+
+    # ---- optional Dirichlet cap on named domain faces ----------------------
+    # The pad this module's docstring calls "a Dirichlet cap" and declines to
+    # apply by default, made available per face and **off unless asked**.
+    #
+    # It is applied HERE — after the sign check and after `level`, before
+    # `_ex()` and before marching cubes — for the reason the whole design
+    # rests on: the surface, the centerline and every cross-section are level
+    # sets of this one array. Capping the mesh afterwards would close the
+    # surface while `lumen_graph` went on believing the vessel leaks out of
+    # that face.
+    #
+    # `level` is computed on the UNcapped field, so adding cap cells cannot
+    # move the iso-level and a capped run stays comparable to an uncapped one.
+    #
+    # **This asserts wall that was never imaged.** On the z faces that is the
+    # intended reading — [P03]'s deep wall is under-detected, so the fitted
+    # lumen bleeds through a wall that is physically there — but it is an
+    # assumption and not a measurement, and any shear computed on a section
+    # that reaches a capped face is solved against asserted wall. The faces
+    # are recorded in `info` so a consumer can tell.
+    faces_closed = tuple(str(f) for f in (close_faces or ()))
+    if faces_closed:
+        bad = [f for f in faces_closed if f not in _FACE_SLICES]
+        if bad:
+            raise ValueError(
+                f"close_faces: unknown face(s) {bad}; expected a subset of "
+                f"{tuple(_FACE_SLICES)}")
+        # The most-exterior value in the field, so the cap reads as
+        # unambiguously outside and the iso-crossing lands within one grid cell
+        # of the face. Deterministic, which `batch_mesh`'s byte-identical
+        # rebuild depends on.
+        cap_value = float(chi.min())
+        for f in faces_closed:
+            chi[_FACE_SLICES[f]] = cap_value
+        info["notes"].append(
+            f"NOTE: Dirichlet cap applied on {', '.join(sorted(faces_closed))}"
+            f" — χ forced to {cap_value:.4g} on the outermost grid cell of "
+            f"each, so the surface closes there. That is asserted wall, not "
+            f"measured wall: the vessel is treated as not leaving the volume "
+            f"through those faces.")
+    info["close_faces"] = list(faces_closed)
+
+    # After the sign check and after any cap, so `chi > iso_level` is the lumen
+    # side in the caller's hands too and not a coin flip.
     _ex(chi=chi, iso_level=float(level))
     info["chi_range"] = (float(chi.min()), float(chi.max()))
     if not (chi.min() < level < chi.max()):

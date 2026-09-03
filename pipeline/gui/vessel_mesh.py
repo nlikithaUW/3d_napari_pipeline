@@ -44,6 +44,21 @@ from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
 from .. import lumen_graph
 from .. import shear
 from ..saved_check import curvature_notes
+# The face names the cap widget offers — from the core, not a second list here,
+# so the GUI cannot offer a face `vessel_poisson` does not know.
+from ..vessel_poisson import FACE_NAMES
+
+# One tooltip for all six cap tick boxes — they differ only in which face they
+# name, and six near-identical copies in the widget spec would drift.
+_CAP_TIP = (
+    "Cap this domain face so the surface CLOSES there instead of the vessel "
+    "leaving the volume through it. z_lo/z_hi is the intended use: the deep "
+    "wall is under-detected (docs/ISSUES.md P03), so the fitted lumen bleeds "
+    "out through a wall that is really there. Ticking a face ASSERTS wall "
+    "that "
+    "was never imaged — a cross-section reaching a capped face is solved "
+    "against asserted wall — so look at the surface after changing it. All "
+    "unticked is the default and what every mesh on disk was built under.")
 # The method constants and the build itself live in the core module so the
 # headless `pipeline.batch_mesh` runner builds the *same* mesh from the same
 # parameters. Re-exported here (the ComboBox choices below read them, and other
@@ -265,6 +280,12 @@ def build(state, viewer) -> list:
         fill_lumen={"tooltip": "Per-slice methods: fill the interior of each "
                                "slice's wall before meshing, so the result is "
                                "a solid cross-section rather than a ring."},
+        cap_z_lo={"tooltip": _CAP_TIP},
+        cap_z_hi={"tooltip": _CAP_TIP},
+        cap_y_lo={"tooltip": _CAP_TIP},
+        cap_y_hi={"tooltip": _CAP_TIP},
+        cap_x_lo={"tooltip": _CAP_TIP},
+        cap_x_hi={"tooltip": _CAP_TIP},
     )
     def controls(
         method: str = METHOD_ALPHA_POISSON,
@@ -285,6 +306,20 @@ def build(state, viewer) -> list:
         poisson_core_um: float = 0.0,
         poisson_iso_pct: float = 50.0,
         alpha_raster_um: float = 2.0,
+        # One tick box per domain face rather than a multi-select list: a
+        # list widget shows its selection as a highlight, which reads as
+        # "whatever was clicked last" and does not survive a glance. A check
+        # box is either ticked or it is not.
+        #
+        # All False by default, and that is the decision: capping changes every
+        # mesh and `batch.py` runs at these defaults, so switching one on here
+        # would silently invalidate the artifacts on disk.
+        cap_z_lo: bool = False,
+        cap_z_hi: bool = False,
+        cap_y_lo: bool = False,
+        cap_y_hi: bool = False,
+        cap_x_lo: bool = False,
+        cap_x_hi: bool = False,
     ):
         _run_build()
 
@@ -295,12 +330,25 @@ def build(state, viewer) -> list:
     _BUILD_KNOBS = ("orientation", "n_bins", "r_smooth_bins", "alpha2d_um",
                     "subsample_um", "alpha3d_um", "fill_lumen", "close_um",
                     "min_component_um", "poisson_grid_um", "poisson_smooth_um",
-                    "poisson_core_um", "poisson_iso_pct", "alpha_raster_um")
+                    "poisson_core_um", "poisson_iso_pct", "alpha_raster_um",
+                    *(f"cap_{f}" for f in FACE_NAMES))
+
+    # The six tick boxes are one core parameter, `close_faces`, so they live or
+    # die together with it in `LIVE_PARAMS`. Without this mapping every one of
+    # them would be hidden for every method, since no method lists "cap_z_lo".
+    _KNOB_TO_PARAM = {f"cap_{f}": "close_faces" for f in FACE_NAMES}
+
+    # magicgui prettifies a button widget's caption — "cap_z_lo" renders as
+    # "cap z lo" — and there is no kwarg that stops it. Set the Qt text so each
+    # box reads exactly the token `--close-faces` accepts, and an operator can
+    # copy what they see on screen straight into the headless run.
+    for _f in FACE_NAMES:
+        controls[f"cap_{_f}"].native.setText(f"cap {_f}")
 
     def _sync_method_visibility(*_):
         live = LIVE_PARAMS.get(controls["method"].value, _BUILD_KNOBS)
         for name in _BUILD_KNOBS:
-            controls[name].visible = name in live
+            controls[name].visible = _KNOB_TO_PARAM.get(name, name) in live
         # "Suggest alpha_um" only means anything where alpha3d_um is live.
         suggest_w.visible = "alpha3d_um" in live
 
@@ -330,6 +378,11 @@ def build(state, viewer) -> list:
         poisson_smooth_um = float(controls["poisson_smooth_um"].value)
         poisson_core_um = float(controls["poisson_core_um"].value)
         poisson_iso_pct = float(controls["poisson_iso_pct"].value)
+        # Sorted to match `batch_mesh._close_faces`, so the GUI and the
+        # headless runner record the same canonical value for the same choice
+        # and a `--from-settings` round trip is stable.
+        close_faces = tuple(sorted(
+            f for f in FACE_NAMES if bool(controls[f"cap_{f}"].value)))
         alpha_raster_um = float(controls["alpha_raster_um"].value)
         state.setdefault("run_settings", {})["vessel_mesh"] = {
             "method": method, "orientation": orientation, "alpha3d_um": alpha3d_um,
@@ -341,6 +394,7 @@ def build(state, viewer) -> list:
             "poisson_smooth_um": poisson_smooth_um,
             "poisson_core_um": poisson_core_um,
             "poisson_iso_pct": poisson_iso_pct,
+            "close_faces": close_faces,
             "alpha_raster_um": alpha_raster_um}
 
         # The same alpha-vs-spacing rule `batch_mesh` applies. It lived only
@@ -364,6 +418,7 @@ def build(state, viewer) -> list:
                 poisson_smooth_um=poisson_smooth_um,
                 poisson_core_um=poisson_core_um,
                 poisson_iso_pct=poisson_iso_pct,
+                close_faces=close_faces,
                 alpha_raster_um=alpha_raster_um, extras=extras)
             return out, extras
 

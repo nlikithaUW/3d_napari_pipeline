@@ -52,6 +52,31 @@ METHODS = [METHOD_NIBLACK, METHOD_SAUVOLA, METHOD_BERNSEN]
 MIN_SIZE_FLOOR = 25
 
 
+# --- what `cadherin_labels.npz` holds --------------------------------------- #
+# Two keys: `labels` and `sizes`. That is the whole live half — `filter_by_size`
+# in `batch_mesh` is what consumes them, and `min_size` moves the auto alpha and
+# with it the topology (P51), so the labeling itself is load-bearing.
+#
+# The per-component PCA `centroids` / `normals` / `label_ids` are **not** saved
+# any more (P55). Their only consumers are the band filter and the Cell mesh
+# tab's "Refine with cadherin", both of which need a per-cell DAPI mesh that no
+# headless step builds — there is no cell-mesh entry in `batch.py::_RUN_STEPS`.
+# They stay lazy in `state` for the interactive button, and are recomputed by
+# `_ensure_centroids` on demand, which is exactly what happens after a fresh
+# threshold anyway. Nothing was reading them back from disk.
+
+
+def _lazy_in(d, key):
+    """A field that is no longer saved: absent, size-0, or (in files written
+    before P55) a pickled `None` all mean the same thing — not computed."""
+    if key not in d.files:
+        return None
+    a = d[key]
+    if a.dtype == object or a.ndim == 0 or a.size == 0:
+        return None
+    return a
+
+
 def build(state, viewer) -> Container:
     hist = Histogram("Cadherin component sizes",
                      "log10(size in voxels)", "deeppink")
@@ -381,13 +406,14 @@ def build(state, viewer) -> Container:
                   "label' first.", flush=True)
             return
         path = str(cadh_path_w.value)
+        # Two keys only — see the module header. The three PCA fields used to be
+        # written here as `np.asarray(None)`, which is a 0-d *object* array:
+        # numpy pickles it on save and then refuses to unpickle it on load, so
+        # every file saved without them was unreadable (P55).
         np.savez_compressed(
             path,
             labels=np.asarray(cs["labels"]).astype(np.int32),
             sizes=np.asarray(cs["sizes"]),
-            centroids=np.asarray(cs["centroids"]),
-            normals=np.asarray(cs["normals"]),
-            label_ids=np.asarray(cs["label_ids"]),
         )
         print(f"Saved VE-Cadherin components -> {path} "
               f"({np.asarray(cs['sizes']).size} components).", flush=True)
@@ -397,9 +423,14 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            d = np.load(path)
-            return (d["labels"].astype(np.int32), d["sizes"], d["centroids"],
-                    d["normals"], d["label_ids"])
+            # allow_pickle: files written before P55 stored the three
+            # unmaterialised PCA fields as pickled `None`, and there are such
+            # files on disk. They are this pipeline's own artifacts, and
+            # `_lazy_in` throws away anything that is not a plain array.
+            with np.load(path, allow_pickle=True) as d:
+                return (d["labels"].astype(np.int32), d["sizes"],
+                        _lazy_in(d, "centroids"), _lazy_in(d, "normals"),
+                        _lazy_in(d, "label_ids"))
 
         def _done(result):
             labels, sizes, centroids, normals, lids = result

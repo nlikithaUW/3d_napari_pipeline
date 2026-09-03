@@ -124,6 +124,7 @@ true of the code and data on that date and may not be true now.
 | [I10](#i10) | The junction flow split **is** recoverable — R̂ = ∫ds/Q̂ from the sections already solved | idea | **implemented** 2026-08-28 — supersedes part of [P49](#p49); validated against the analytic network |
 | [P52](#p52) | Tabs clipped anything past the window bottom; the Vessel mesh knobs rendered with no names | S3 | **fixed** 2026-08-28 — all tabs scroll; 48 controls labelled and tooltipped |
 | [P51](#p51) | `poisson_smooth_um` was three scales in one knob; the detection one silently severed a tapering vessel | **S2** | **fixed** 2026-09-02 — 46% of `04step_003` was under the detection floor at the default; knob split, old behaviour is the default and rebuilds byte-identical |
+| [P55](#p55) | Every headless-saved `cadherin_labels.npz` is unloadable — the lazy fields were pickled `None` | S3 | **fixed** 2026-09-02 — `np.asarray(None)` is a 0-d object array; the three fields had no reader and are no longer written, files already on disk load unchanged |
 | [P53](#p53) | 61% of the wall points carrying a shear number are not standing on measured wall, and the existing flags do not catch it | **S1** | open — **measured 2026-09-02 on image 6**; one 180 µm stretch is sound, one whole branch is not; the τ *range* survives the filter |
 | [P54](#p54) | "Suggest alpha" and the `alpha3d_um` guard contradict each other on every V3 image — the button's value always trips the warning | S3 | open — **measured 2026-09-02**; suggest gives 9.5–10.0 at `subsample_um` 5.0, the guard demands ≥ 15.0. Both meshes are good; it is the advice that is broken |
 | [H01](#h01) | Repository has no LICENSE | — | open |
@@ -7804,3 +7805,64 @@ sub-voxel wall position mattered).
   scales, split the same day. The refusal message now reports the largest
   inscribed radius it actually measured against the radius it required, so the
   next occurrence says whether *any* value could have passed.
+
+## P55 — every headless-saved `cadherin_labels.npz` is unloadable: the lazy fields were pickled `None`
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-09-02 |
+| **Severity** | S3 — the mask is intact on disk and every other reader was already fine; only the Cadherin tab's "Load VE-Cadherin mask" faulted |
+| **Opened** | 2026-09-02 |
+| **Last verified** | 2026-09-02 (against `V3_CorrectSettings_40xWater_04step_002_saved`) |
+| **Where** | `pipeline/gui/cadherin.py::_save_cadh` / `_load_cadh` |
+| **Affects** | re-loading a saved cadherin mask into the GUI; no exported number |
+
+Loading a saved mask raised, inside the `thread_worker`:
+
+    ValueError: Object arrays cannot be loaded when allow_pickle=False
+
+`centroids`, `normals` and `label_ids` are lazy — `_ensure_centroids` computes
+them on first use and nothing on the main path ever asks, so on a headless run
+(and on any interactive run that skips the band filter and "Refine with
+cadherin") they are still `None` at save time. `_save_cadh` wrote
+`np.asarray(None)`, which is a **0-d object array**. `np.savez_compressed`
+accepts that silently; `np.load` refuses it, because numpy will not unpickle by
+default. So the write always succeeded and the read always failed, and the
+failure surfaced only at the next session.
+
+Confirmed on the file above: `labels` int32 (324, 1024, 1024) and `sizes` int64
+(4,593,582) are real arrays; all three lazy fields are `dtype=object, shape=()`.
+
+**Fix — the three fields are not saved at all.** The first cut wrote empty
+arrays of the right dtype in place of `None`, which fixes the crash. Asking who
+actually reads them back showed the answer is **nobody**, so the file now holds
+two keys, `labels` and `sizes`:
+
+- `centroids` / `normals` / `label_ids` have exactly two consumers — the tab's
+  band filter and the Cell mesh tab's "Refine with cadherin" — and **both need a
+  per-cell DAPI mesh that no headless step builds**: there is no cell-mesh entry
+  in `batch.py::_RUN_STEPS` (`dapi, fibroblasts, cadherin, mesh, curvature,
+  graph, clover, rf, postprocess`), and `band_um` defaults to 0. They stay lazy
+  in `state` for the interactive button and `_ensure_centroids` recomputes them
+  on demand, which is what already happens after a fresh threshold. Saving them
+  was write-only.
+- The **labeling itself is not dead** and is untouched: `batch_mesh` calls
+  `filter_by_size(labels, sizes, min_size)`, and `min_size` moves the auto alpha
+  and with it the topology ([P51](#p51)), so `labels` + `sizes` are load-bearing.
+
+`_lazy_in` reads absent / size-0 / object back as "not computed", so it covers
+both the deleted keys and the pre-P55 files, which the loader opens with
+`allow_pickle=True` because they cannot be read any other way; anything that is
+not a plain array is discarded. Verified in both directions: a new two-key file
+reads under the strict `allow_pickle=False`, and `04step_002`'s existing file
+still yields its int32 (324, 1024, 1024) labels and 4,593,582 sizes.
+
+**Related:** [P36](#p36) (the other defect that lived entirely in what the
+headless path saved), [P26](#p26).
+
+**History**
+- 2026-09-02 — reported by the user as a traceback while loading `04step_002`;
+  diagnosed and fixed the same day. Existing `_saved` folders load without being
+  rebuilt. The user then asked whether the fields were dead at all, which is
+  what turned a crash fix into deleting the keys — the write had no reader on
+  either path.

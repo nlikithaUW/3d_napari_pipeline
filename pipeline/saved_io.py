@@ -401,27 +401,47 @@ def load_curvature(src) -> dict:
         return {k: d[k] for k in CURV_KEYS if k in d.files}
 
 
-def save_graph(dest, graph) -> None:
-    """Arrays only; the notes and nested info dicts are provenance and go to
-    ``vessel_recon.json``, which is where provenance already lives.
+#: The graph's Python scalars, with the dtype each is stored as. They are
+#: promoted explicitly because the array filter below would otherwise drop
+#: them — which is what it silently did until [P57](docs/ISSUES.md#p57).
+#: Pinned dtypes, not bare ``int``/``float``: ``np.savez`` stores a Python int
+#: as the platform ``int_``, so leaving them bare would make the stored dtype
+#: depend on which machine wrote the file.
+GRAPH_SCALARS = {"n_junctions": np.int64, "n_endpoints": np.int64,
+                 "n_crop_endpoints": np.int64, "n_terminus_endpoints": np.int64,
+                 "total_length_um": np.float64, "lumen_volume_um3": np.float64}
 
-    NOTE: this drops six Python scalars that `lumen_graph` puts in the dict —
-    ``n_junctions``, ``n_endpoints``, ``n_crop_endpoints``,
-    ``n_terminus_endpoints``, ``total_length_um`` and ``lumen_volume_um3``. See
-    [P57](docs/ISSUES.md#p57); the fix is deliberately not in this commit, so
-    that "the reorg changed nothing" stays a measurement.
+
+def save_graph(dest, graph) -> None:
+    """Arrays only, plus the scalars in `GRAPH_SCALARS`; the notes and nested
+    info dicts are provenance and go to ``vessel_recon.json``, which is where
+    provenance already lives.
+
+    The six scalars used to be dropped on every save ([P57](docs/ISSUES.md#p57))
+    because the array filter does not match a Python ``int``. The GUI refilled
+    them with 0 on load and the headless reader did not, so one file yielded two
+    different dicts on the two paths — and `saved_check.graph_notes` records
+    what that cost: "a ``graph.get("n_junctions", 0)`` default of 0 silently
+    reported 'no junction' on a branched vessel loaded from disk."
+    `save_shear` had solved the identical problem correctly one function away.
+
+    A scalar the caller does not supply is simply not written, rather than
+    written as a zero: this must not invent a count either.
     """
-    np.savez_compressed(dest, **{k: v for k, v in graph.items()
-                                 if isinstance(v, np.ndarray)})
+    arrays = {k: v for k, v in graph.items() if isinstance(v, np.ndarray)}
+    scalars = {k: dt(graph[k]) for k, dt in GRAPH_SCALARS.items()
+               if k in graph and not isinstance(graph[k], np.ndarray)}
+    np.savez_compressed(dest, **arrays, **scalars)
 
 
 def load_graph(src) -> dict:
     """``allow_pickle=False`` deliberately, as a safety property.
 
-    Fabricates no defaults. A caller that wants a count must derive it from the
-    node arrays — `saved_check.graph_notes` does, and says why: a
-    ``graph.get("n_junctions", 0)`` default of 0 silently reported "no junction"
-    on a branched vessel loaded from disk.
+    Fabricates no defaults, including for the `GRAPH_SCALARS` — every file
+    written before P57 lacks them, and a 0 standing in for "not recorded" is
+    exactly the silently-wrong count that issue is about. `graph_notes` keeps
+    counting from the node arrays for that reason, which is what keeps those
+    older folders correct.
     """
     with np.load(src, allow_pickle=False) as d:
         return {k: d[k] for k in d.files}

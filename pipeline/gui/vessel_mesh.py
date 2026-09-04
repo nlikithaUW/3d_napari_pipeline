@@ -1859,9 +1859,6 @@ def build(state, viewer) -> list:
                       f"mesh with a Poisson method and click 'Compute 3D "
                       f"centerline graph'.", flush=True)
                 return
-            for k in ("n_junctions", "n_endpoints", "n_crop_endpoints",
-                      "n_terminus_endpoints", "total_length_um"):
-                g.setdefault(k, 0)
             state["vessel_graph"] = g
             _show_graph(g, visible=visible)
             print(f"Loaded centerline graph <- {path}: "

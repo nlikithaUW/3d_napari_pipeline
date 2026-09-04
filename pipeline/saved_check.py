@@ -92,10 +92,13 @@ def graph_notes(graph) -> list[str]:
         return ["WARN: no vessel centerline graph — path_curv_xy, "
                 "dist_branch_um and every caliber column will be blank."]
     out = []
-    # Counted from the node arrays, not read from a scalar. The saved
-    # `vessel_graph.npz` holds arrays only — the scalars live in
-    # vessel_recon.json — so a `graph.get("n_junctions", 0)` default of 0
-    # silently reported "no junction" on a branched vessel loaded from disk.
+    # Counted from the node arrays first, and only then read from a scalar.
+    # `vessel_graph.npz` used to hold arrays ONLY — the six scalars were
+    # dropped on every save (P57) — so a `graph.get("n_junctions", 0)` default
+    # of 0 silently reported "no junction" on a branched vessel loaded from
+    # disk. P57 now writes them, but every file produced before it does not
+    # have them, so recounting stays the primary path rather than becoming
+    # dead code: it is what keeps those older folders correct.
     kind = np.asarray(graph.get("node_kind", []))
     ek = np.asarray(graph.get("node_endpoint_kind", []))
     n_junc = (int((kind == "junction").sum()) if kind.size

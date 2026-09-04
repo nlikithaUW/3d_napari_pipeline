@@ -31,6 +31,7 @@ from .gui import (
     roi,
     vessel_mesh,
 )
+from .gui.state import new_state
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROJECT_DIR = ROOT / "3d_images_folder"
@@ -124,28 +125,7 @@ def main() -> None:
             pass
 
     viewer.window._qt_window.destroyed.connect(_free_gpu)
-    state: dict = {
-        "dapi_raw": None, "cadh_raw": None, "clover_raw": None,
-        "force_vol": None, "adhesion_rf": None, "adhesion_proba": None,
-        "scale": (1.0, 1.0, 1.0),
-        "dapi_mask_layer": None, "cadh_mask_layer": None,
-        "clover_mask_layer": None,
-        "dapi_state": {"labels": None, "sizes": None, "nuclei": None,
-                       "nuclei_sizes": None, "nuclei_ids": None,
-                       "nuclei_is_fib": None, "nuclei_min_size_vox": None},
-        "cadh_state": {
-            "labels": None, "sizes": None,
-            "centroids": None, "normals": None, "label_ids": None,
-            "keep_mask": None,
-        },
-        "clover_state": {"labels": None, "sizes": None, "method": None},
-        "nuc_cache": {"labels_id": None, "centroids": None, "normals": None, "lids": None},
-        "mesh_cache": {"offset_centroids": None, "outward": None,
-                       "inward_offset_um": 0.0, "kdtree": None},
-        "vessel_mesh_cache": {"verts": None, "faces": None},
-        "raw_layers": [],
-        "hists": [],
-    }
+    state = new_state()
 
     tabs = QTabWidget()
     tabs.addTab(_wrap([loader.build(state, viewer, args.project_dir,

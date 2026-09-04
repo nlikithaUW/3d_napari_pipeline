@@ -18,12 +18,6 @@ def _xy_um(voxel_zyx_um: tuple[float, float, float]) -> float:
     return 0.5 * (y + x)
 
 
-def aniso_sigma(sigma_xy: float, voxel_zyx_um) -> tuple[float, float, float]:
-    z_um = voxel_zyx_um[0]
-    sigma_z = sigma_xy * _xy_um(voxel_zyx_um) / z_um
-    return (sigma_z, sigma_xy, sigma_xy)
-
-
 def aniso_size(size_xy: int, voxel_zyx_um) -> tuple[int, int, int]:
     z_um = voxel_zyx_um[0]
     size_z = max(1, int(round(size_xy * _xy_um(voxel_zyx_um) / z_um)))

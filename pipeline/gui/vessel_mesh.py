@@ -1200,11 +1200,6 @@ def build(state, viewer) -> list:
                                   contrast_limits=clim)
             fl.metadata["longitudinal_slice"] = True
 
-            state["vessel_axis_plane"] = pl
-            state["vessel_slice_info"] = {
-                k: sl[k] for k in ("step_um", "e1", "e2", "normal",
-                                   "plane_origin_um", "a0_um", "b0_um",
-                                   "shape", "level")}
             for n in pl["notes"] + sl["notes"]:
                 print(f"  {n}", flush=True)
             cal = np.asarray(g.get("caliber_um", []), float)

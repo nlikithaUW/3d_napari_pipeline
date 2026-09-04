@@ -428,60 +428,6 @@ def compute_features_at_indices(
 
 
 # ---------------------------------------------------------------------------
-# Gate indices
-# ---------------------------------------------------------------------------
-
-def _gate_indices(
-    shape: tuple,
-    dapi_labels,
-    mesh_cache: dict,
-    d_dapi_um: float,
-    gate_dapi: bool,
-    gate_mesh: bool,
-    d_mesh_um: float,
-    voxel_um=(1.0, 1.0, 1.0),
-) -> np.ndarray:
-    """Return (N, 3) int32 array of voxel positions to predict at.
-
-    If no gate is active, returns all voxel positions (full volume).
-    """
-    if not gate_dapi and not gate_mesh:
-        return None  # sentinel: predict everywhere; indices generated per chunk
-
-    mask = np.ones(shape, dtype=bool)
-
-    if gate_dapi and dapi_labels is not None:
-        sampling = tuple(float(v) for v in voxel_um) if hasattr(voxel_um, "__len__") \
-                   else (float(voxel_um),) * 3
-        dist_um = _sndi.distance_transform_edt(dapi_labels == 0, sampling=sampling)
-        mask &= dist_um <= float(d_dapi_um)
-    elif gate_dapi:
-        print("DAPI gate requested but no DAPI labels available — skipping.", flush=True)
-
-    if gate_mesh:
-        mc = mesh_cache or {}
-        if mc.get("offset_centroids") is not None and len(mc["offset_centroids"]):
-            from .cell_mesh import signed_distance_to_mesh_vertices
-            scale = np.asarray(voxel_um, dtype=np.float64) if hasattr(voxel_um, "__len__") \
-                    else np.full(3, float(voxel_um))
-            idx = np.argwhere(mask)
-            if len(idx):
-                query_um = idx.astype(np.float64) * scale[None, :]
-                sd = signed_distance_to_mesh_vertices(
-                    query_um, mc["offset_centroids"], mc["outward"],
-                    tree=mc.get("kdtree"),
-                )
-                keep = (sd > -float(d_mesh_um)) & (sd <= float(d_mesh_um))
-                drop = idx[~keep]
-                if len(drop):
-                    mask[drop[:, 0], drop[:, 1], drop[:, 2]] = False
-        else:
-            print("Mesh gate requested but no cell mesh built — skipping.", flush=True)
-
-    return np.argwhere(mask).astype(np.int32)
-
-
-# ---------------------------------------------------------------------------
 # AdhesionRF class
 # ---------------------------------------------------------------------------
 

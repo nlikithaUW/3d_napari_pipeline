@@ -43,7 +43,10 @@ faulthandler.enable()
 
 from .fret import compute_fret_volume, load_force_lut, resample_fret_outputs
 from .io import fret_configured, load_params, load_stack, to_isotropic
-from .measure_core import compute_measurements
+from .measure_core import (
+    CSV_COLUMNS, NUCLEUS_MAP_SPLIT, NUCLEUS_MAP_UNSPLIT,
+    compute_measurements, export_meta,
+)
 from .rf import instance_labels_3d
 from .saved_check import describe_saved
 
@@ -51,18 +54,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PARAMS = ROOT / "3d_images_folder" / "params.json"
 DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
 
-COLS = ["label", "ratio_clover_ruby", "dist_mesh_um",
-        "centroid_z_um", "centroid_y_um", "centroid_x_um",
-        "path_curv_1_um", "path_curv_xy_1_um", "dist_junction_um",
-        "dist_crop_um", "censored", "s_um", "caliber_um", "lumen_area_um2",
-        "lumen_major_um", "lumen_minor_um", "lumen_aspect",
-        "tau_rel_1_um3", "tau_hat_um", "dist_tau_um", "tau_censored",
-        "tau_sec_clipped", "sec_tau_rel_1_um3", "sec_tau_hat_mean_um",
-        "sec_force_balance", "sec_wall_ok_frac",
-        "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
-        "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
-        "volume_um3", "axis_major_um", "axis_minor_um", "eccentricity", "nuc_id",
-        "nuc_is_fibroblast"]
 
 # The post-process settings the batch / batch_postprocess applied (documented in
 # the settings JSON so a headless-measured export is still backtrackable).
@@ -202,13 +193,13 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
         ns = np.load(nuc_split)
         dapi_labels = ns["labels"]
         nuc_ids, nuc_is_fib = ns["ids"], ns["is_fib"]
-        nucleus_map = "nuclei_split.npz"
+        nucleus_map = NUCLEUS_MAP_SPLIT
         _p(f"nuclei: {np.asarray(nuc_ids).size} split nuclei, "
            f"{int(np.asarray(nuc_is_fib).sum())} VnTs+ "
            f"({nucleus_map})")
     else:
         dapi_labels = np.load(saved / "dapi_labels.npz")["labels"]
-        nucleus_map = "dapi_labels.npz (unsplit fallback)"
+        nucleus_map = NUCLEUS_MAP_UNSPLIT
         _p(f"WARN: no nuclei_split.npz — falling back to the UNSPLIT DAPI "
            f"components ({int(dapi_labels.max())} of them) for nuc_id and "
            f"dist_nuc_um, and nuc_is_fibroblast will be blank. These are DAPI "
@@ -263,7 +254,7 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     # Build columns in the GUI export order. Write with the stdlib csv module —
     # NOT pandas: pandas pulls in pyarrow, whose native DLL access-violates in
     # this env (crashes the process with no catchable exception).
-    metric_cols = [c for c in COLS if c in result]
+    metric_cols = [c for c in CSV_COLUMNS if c in result]
     cols = {c: np.asarray(result[c]).ravel() for c in metric_cols}
     n = len(next(iter(cols.values()))) if cols else 0
     header = ["image"] + metric_cols + ["n_fibroblasts", "n_nuclei_total"]
@@ -287,16 +278,11 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
             row.extend([n_fib, n_tot])
             w.writerow(row)
 
-    meta = {"image": tif.name, "exported": ts, "csv": csv_path.name,
-            "n_adhesions": int(n), "scale_um_zyx": list(scale),
-            "roi_active": False, "headless_measure": True,
-            "fibroblast_count": fib or None,
-            # Which nucleus segmentation nuc_id / dist_nuc_um refer to. The two
-            # are NOT comparable: the unsplit map's ids index DAPI components,
-            # the split map's index nuclei (P04).
-            "nucleus_map": nucleus_map,
-            "notes": notes,
-            "settings": {"adhesion_postprocess": STD_POSTPROCESS}}
+    meta = export_meta(
+        image=tif.name, exported=ts, csv_name=csv_path.name, n_adhesions=n,
+        scale_um_zyx=scale, roi_active=False, fibroblast_count=fib or None,
+        nucleus_map=nucleus_map, notes=notes,
+        settings={"adhesion_postprocess": STD_POSTPROCESS}, headless=True)
     with open(saved / f"{tif.stem}_adhesion_measures_{ts}_settings.json", "w") as fh:
         json.dump(meta, fh, indent=2, default=str)
     print(f"    -> {n} adhesions; {csv_path.name} + settings JSON written.",

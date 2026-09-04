@@ -146,7 +146,6 @@ def build(state, viewer) -> Container:
         return cs["centroids"], cs["normals"], cs["keep_mask"]
 
     state["cadh_vertices"] = _cadh_vertices
-    state["cadh_ensure_centroids"] = _ensure_centroids
 
     def _compute_mask(min_size: int, band_um: float):
         cs = state["cadh_state"]
@@ -391,7 +390,6 @@ def build(state, viewer) -> Container:
 
     seed_floor_w = PushButton(text="Suggest floor_k")
     seed_floor_w.changed.connect(lambda *_: _seed_floor())
-    state["seed_cadh_floor"] = _seed_floor
 
     # ---- Save / load the cadherin components (mask + labels for re-tuning) ----
     cadh_path_w = FileEdit(value="cadherin_labels.npz", label="cadh_path",

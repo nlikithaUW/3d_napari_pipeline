@@ -11,6 +11,7 @@ from napari.qt.threading import thread_worker
 from .. import gpu
 from ..fret import compute_fret_volume, load_force_lut, resample_fret_outputs
 from ..io import fret_configured, load_params, load_stack, to_isotropic
+from .state import RUN_STEPS
 from .widgets import percentile_limits, pyramid_views, with_after
 
 
@@ -247,7 +248,6 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
             save_dir.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
             print(f"  (could not create save folder {save_dir}: {exc})", flush=True)
-        state["save_dir"] = save_dir
         state["image_name"] = tif_path.name
         for w, fn in state.get("save_path_widgets", []):
             try:
@@ -294,12 +294,38 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
         _load_image(state, viewer, tif_path, params_path, lut_path,
                     int(pyramid_w.value))
 
-    # "Load all saved" — after loading an image, trigger every tab's loader
-    # (registered in state) so a session can be restored in one click. Each
-    # loader uses its own path field's current value and reports/handles a
-    # missing file itself, so features that were never saved are just skipped.
-    load_all_w = PushButton(text="Load all saved features")
+    # "Load all saved" and "Run all" are the same machine: walk an ordered
+    # (label, state key) list, calling each registered callable and letting its
+    # `after` hand-off start the next. Serial, so peak RAM is one step's worth
+    # rather than all of them, and a step that fails is reported and skipped
+    # instead of stalling the chain.
+    def _chain(what: str, steps: list, empty_msg: str, done_msg: str, **kwargs):
+        if not state.get("raw_layers"):
+            print(f"{what}: load an image first, then click again.", flush=True)
+            return
+        queue = [(label, key) for label, key in steps if state.get(key)]
+        if not queue:
+            print(f"{what}: {empty_msg}", flush=True)
+            return
 
+        def _next(i):
+            if i >= len(queue):
+                print(f"{what}: {done_msg}", flush=True)
+                return
+            label, key = queue[i]
+            fn = state.get(key)
+            print(f"{what}: {i + 1}/{len(queue)} — {label} ...", flush=True)
+            try:
+                fn(after=lambda: _next(i + 1), **kwargs)
+            except Exception as exc:
+                print(f"{what}: {label} failed: {exc}", flush=True)
+                _next(i + 1)
+
+        _next(0)
+
+    # ---- "Load all saved": every tab's loader, so a session restores in one
+    # click. Each loader uses its own path field's current value and reports a
+    # missing file itself, so features that were never saved are just skipped.
     # (label, state key) in dependency-friendly order.
     _LOADERS = [
         ("DAPI labels", "load_dapi_labels"),
@@ -314,83 +340,24 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
         ("Clover/Ruby ratio", "load_ratio"),
         ("Fibroblast count", "load_fibroblast_count"),
     ]
+    load_all_w = PushButton(text="Load all saved features")
+    load_all_w.changed.connect(lambda *_: _chain(
+        "Load all", _LOADERS,
+        "no saved-feature loaders available.",
+        "finished. Loaded layers are hidden — toggle visibility in the layer "
+        "list as needed.",
+        # `visible=False` keeps the heavy layers off the GPU until you toggle
+        # them on; a burst of large 3D layers can overwhelm the viewer.
+        visible=False))
 
-    def _load_all(*_):
-        if not state.get("raw_layers"):
-            print("Load all: load an image first, then click again.", flush=True)
-            return
-        queue = [(label, key) for label, key in _LOADERS if state.get(key)]
-        if not queue:
-            print("Load all: no saved-feature loaders available.", flush=True)
-            return
-
-        # Load serially — each loader calls `after` when it finishes, which
-        # starts the next. This caps peak RAM at one load at a time instead of
-        # all at once, and `visible=False` keeps the heavy layers off the GPU
-        # until you toggle them on (a burst of large 3D layers can overwhelm the
-        # viewer). Missing files are reported by each loader and skipped.
-        def _next(i):
-            if i >= len(queue):
-                print("Load all: finished. Loaded layers are hidden — toggle "
-                      "visibility in the layer list as needed.", flush=True)
-                return
-            label, key = queue[i]
-            fn = state.get(key)
-            print(f"Load all: {i + 1}/{len(queue)} — {label} ...", flush=True)
-            try:
-                fn(after=lambda: _next(i + 1), visible=False)
-            except Exception as exc:
-                print(f"Load all: {label} failed: {exc}", flush=True)
-                _next(i + 1)
-
-        _next(0)
-
-    load_all_w.changed.connect(_load_all)
-
-    # "Run all" — run the whole analysis in order, each tab's compute + save,
-    # waiting for each threaded step to finish before starting the next (same
-    # serial `after`-callback chain as "Load all"). Each tab registers a
-    # `run_*` step in state. Preconditions/failures in a step are reported and
-    # the chain continues, so a missing model or channel won't stall it.
+    # ---- "Run all": the whole analysis in order. The step table is
+    # `gui/state.RUN_STEPS`, shared with the headless `pipeline.batch` runner so
+    # a step cannot be added to one and forgotten in the other.
     run_all_w = PushButton(text="Run all (full pipeline)")
-    _RUN_STEPS = [
-        ("DAPI + components", "run_dapi"),
-        ("Fibroblast count", "run_fibroblasts"),
-        ("VE-Cadherin threshold", "run_cadherin"),
-        ("Vessel mesh", "run_vessel_mesh"),
-        ("Surface curvature", "run_vessel_curvature"),
-        ("3D centerline graph", "run_vessel_path_curvature"),
-        ("Clover threshold", "run_clover"),
-        ("RF predict", "run_rf_predict"),
-        ("RF post-process (split-merged)", "run_rf_postprocess"),
-        ("Measure + export CSV", "run_measure"),
-    ]
-
-    def _run_all(*_):
-        if not state.get("raw_layers"):
-            print("Run all: load an image first, then click again.", flush=True)
-            return
-        queue = [(label, key) for label, key in _RUN_STEPS if state.get(key)]
-        if not queue:
-            print("Run all: no run steps available.", flush=True)
-            return
-
-        def _next(i):
-            if i >= len(queue):
-                print("Run all: finished — full pipeline complete.", flush=True)
-                return
-            label, key = queue[i]
-            fn = state.get(key)
-            print(f"Run all: {i + 1}/{len(queue)} — {label} ...", flush=True)
-            try:
-                fn(after=lambda: _next(i + 1))
-            except Exception as exc:
-                print(f"Run all: {label} failed: {exc}", flush=True)
-                _next(i + 1)
-
-        _next(0)
-
-    run_all_w.changed.connect(_run_all)
+    run_all_w.changed.connect(lambda *_: _chain(
+        "Run all", [(label, key) for _n, label, key in RUN_STEPS],
+        "no run steps available.",
+        "finished — full pipeline complete."))
 
     project_dir_w.changed.connect(_scan)
     refresh_w.changed.connect(_scan)

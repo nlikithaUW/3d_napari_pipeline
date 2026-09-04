@@ -25,31 +25,14 @@ from magicgui.widgets import (
 from napari.qt.threading import thread_worker
 
 from ..denoise import build_mask
-from ..fret import background_subtract
+from ..measure_core import bs_per_z
 from ..rf import AdhesionRF, instance_labels_3d
 from .widgets import (
     after_on_error,
     call_all,
-    debounce,
     pyramid_views,
     with_after,
 )
-
-
-def _bs_per_z(vol: np.ndarray) -> np.ndarray:
-    """Per-Z-plane background subtraction, via the frozen ``fret`` routine.
-
-    Each plane's modal intensity is its own background (the mode shifts with
-    depth as the illumination attenuates), so this must be applied plane by
-    plane rather than once over the volume.
-    """
-    out = np.empty(vol.shape, dtype=np.float32)
-    for z in range(vol.shape[0]):
-        # background_subtract returns float64; write straight into the float32
-        # buffer so only one plane's worth of float64 exists at a time (np.stack
-        # of every plane would peak at 2x the volume in float64).
-        out[z] = background_subtract(vol[z])
-    return out
 
 
 def build(state, viewer) -> Container:
@@ -631,8 +614,8 @@ def build(state, viewer) -> Container:
             # ratios is driven by its smallest denominators), and the background
             # subtraction stops dim (deep) adhesions from drifting toward a fixed
             # offset ratio. Matches the Measure tab and measure_core.
-            clover_bs = _bs_per_z(clover_native)
-            ruby_bs = _bs_per_z(ruby_native)
+            clover_bs = bs_per_z(clover_native)
+            ruby_bs = bs_per_z(ruby_native)
             in_adh = labels > 0
             lv = labels[in_adh]
             n_lab = int(labels.max())

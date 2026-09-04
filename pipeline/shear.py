@@ -58,7 +58,6 @@ bits and that would break `batch_mesh`'s byte-identical rebuild.
 from __future__ import annotations
 
 import numpy as np
-from scipy import ndimage as ndi
 from scipy import sparse
 from scipy.sparse import linalg as spla
 from scipy.spatial import cKDTree
@@ -484,19 +483,6 @@ def tau_wall_pa(tau_hat_um, q_hat_um4, q_um3_per_s: float,
     q_hat = np.asarray(q_hat_um4, float)
     with np.errstate(divide="ignore", invalid="ignore"):
         return float(mu_pa_s) * float(q_um3_per_s) * tau_hat_um / q_hat
-
-
-def tau_wall_pa_from_pressure(hydraulic_diam_um, dp_ds_pa_per_um: float
-                              ) -> np.ndarray:
-    """§4.2's pressure-driven form: ``τ_w = (Δp/L)·D_h/4``.
-
-    A force balance on the control volume, so it is exact for a uniform duct and
-    **independent of Q and of viscosity entirely**. It is a per-section average
-    around the perimeter and carries no circumferential distribution; use
-    `tau_wall_pa` when θ matters. This is the form to reach for when the rig is
-    a gravity head rather than a syringe pump.
-    """
-    return np.asarray(hydraulic_diam_um, float) * float(dp_ds_pa_per_um) / 4.0
 
 
 # --------------------------------------------------------------------------- #

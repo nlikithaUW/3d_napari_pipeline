@@ -20,8 +20,6 @@ cadherin_rf_batch script) consumes instead of a thresholded VE-cad channel.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 from magicgui.widgets import Container, FileEdit, PushButton, SpinBox
 from napari.qt.threading import thread_worker

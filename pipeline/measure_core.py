@@ -27,8 +27,12 @@ from .saved_check import (
 )
 
 
-def _bs_per_z(vol: np.ndarray) -> np.ndarray:
+def bs_per_z(vol: np.ndarray) -> np.ndarray:
     """Per-Z-plane background subtraction, via the frozen ``fret`` routine.
+
+    Shared with the Measure and Adhesion-RF tabs, which each had a
+    byte-identical private copy: the ratio the three produce is the tension
+    proxy, so they must not be able to drift.
 
     Each plane's modal intensity is its own background (the mode shifts with
     depth as the illumination attenuates), so this must be applied plane by
@@ -312,8 +316,8 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         iso_idx = np.clip(np.rint(np.arange(Zn) * zf).astype(np.int64),
                           0, labels.shape[0] - 1)
         labels_n = labels[iso_idx]
-        clover_bs = _bs_per_z(clover_native)
-        ruby_bs = _bs_per_z(ruby_native)
+        clover_bs = bs_per_z(clover_native)
+        ruby_bs = bs_per_z(ruby_native)
         inside = labels_n > 0
         lv = labels_n[inside]
         nmax = int(labels.max())
@@ -457,3 +461,63 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         # Not a metric column — callers print it, `metric_cols` filters it out.
         "notes": notes,
     }
+
+
+# --------------------------------------------------------------------------- #
+# The export contract
+# --------------------------------------------------------------------------- #
+# Shared by the Measure tab's CSV export and `batch_measure`, which used to hold
+# two copies of both the column order and the settings-JSON schema. The two
+# writers are still separate on purpose — the GUI writes through pandas, the
+# headless path through the stdlib `csv` module, because pandas pulls in pyarrow
+# whose native DLL access-violates in the Windows env. What must not differ is
+# *which* columns are written, in *what* order, and what the companion JSON
+# records; that is what lives here.
+
+CSV_COLUMNS = [
+    "label", "ratio_clover_ruby", "dist_mesh_um",
+    "centroid_z_um", "centroid_y_um", "centroid_x_um",
+    "path_curv_1_um", "path_curv_xy_1_um", "dist_junction_um",
+    "dist_crop_um", "censored", "s_um", "caliber_um", "lumen_area_um2",
+    "lumen_major_um", "lumen_minor_um", "lumen_aspect",
+    "tau_rel_1_um3", "tau_hat_um", "dist_tau_um", "tau_censored",
+    "tau_sec_clipped", "sec_tau_rel_1_um3", "sec_tau_hat_mean_um",
+    "sec_force_balance", "sec_wall_ok_frac",
+    "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
+    "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
+    "volume_um3", "axis_major_um", "axis_minor_um", "eccentricity", "nuc_id",
+    "nuc_is_fibroblast",
+]
+
+# The two strings `nucleus_map` may take. They are NOT comparable: the unsplit
+# map's ids index DAPI connected components, the split map's index nuclei (P04).
+NUCLEUS_MAP_SPLIT = "nuclei_split.npz"
+NUCLEUS_MAP_UNSPLIT = "dapi_labels.npz (unsplit fallback)"
+
+
+def export_meta(*, image, exported, csv_name, n_adhesions, scale_um_zyx,
+                roi_active, fibroblast_count, nucleus_map, notes, settings,
+                headless=False) -> dict:
+    """The companion `*_settings.json` beside an exported CSV.
+
+    One schema for both export paths, so an export can be backtracked the same
+    way whichever produced it. `headless` adds the flag the batch path records
+    and is otherwise absent, exactly as before.
+    """
+    meta = {
+        "image": image,
+        "exported": exported,
+        "csv": csv_name,
+        "n_adhesions": int(n_adhesions),
+        "scale_um_zyx": list(scale_um_zyx),
+        "roi_active": bool(roi_active),
+    }
+    if headless:
+        meta["headless_measure"] = True
+    meta.update({
+        "fibroblast_count": fibroblast_count,
+        "nucleus_map": nucleus_map,
+        "notes": list(notes),
+        "settings": settings,
+    })
+    return meta

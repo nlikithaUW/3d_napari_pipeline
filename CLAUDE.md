@@ -313,7 +313,13 @@ where the fibroblasts are.
   just against this repo's own recorded numbers — see `docs/ISSUES.md` I03.
 - `measure_core.py` — headless per-adhesion measurement. `graph_columns` is
   **shared with the GUI worker** rather than copied — P11 records that P04 and
-  P12 each had to be written twice, and that is where it stopped. **Never prints**; it
+  P12 each had to be written twice. It now also owns the **export contract**
+  both paths write against: `CSV_COLUMNS` (the column order), `export_meta`
+  (the companion settings JSON) and `bs_per_z` (the per-plane background
+  subtraction under `ratio_clover_ruby`, which existed as three byte-identical
+  copies). The two *writers* stay separate on purpose — the GUI goes through
+  pandas, the headless path through the stdlib `csv` module, because pandas
+  pulls in pyarrow whose native DLL access-violates in the Windows env. **Never prints**; it
   returns its degradation warnings in `result["notes"]` for the caller to print.
 - `saved_check.py` — the consistency checks over `_saved` intermediates, as pure
   functions (numpy in, `list[str]` out; no Qt, no napari, no `state`). Both the
@@ -348,7 +354,12 @@ where the fibroblasts are.
 
 **GUI (`pipeline/gui/`, one module per tab):** `loader`, `display`, `nuclei`,
 `cadherin`, `cadherin_rf`, `cell_mesh`, `vessel_mesh`, `clover`, `adhesion_rf`,
-`roi`, `measure`, plus `widgets.py` (shared helpers) and `logpanel.py`.
+`roi`, `measure`, plus `widgets.py` (shared helpers), `logpanel.py`, and
+`state.py` — **the session dict and the pipeline step table, shared with
+`batch.py`**. Both used to carry their own copy: the initial `state` dict was
+written out three times and the run-step list twice, so a step added to the
+GUI's "Run all" was silently skipped headless. `RUN_STEPS` is the one
+ordering; `BATCH_STEPS` is it minus Measure, which crashes headless.
 `vessel_mesh` is grouped **by pipeline** — four collapsibles (surface, surface
 curvature, centerline graph, wall shear), each with its own trigger, its own
 `.npz` and a status line saying what is cached and whether it was built on the

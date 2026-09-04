@@ -41,91 +41,17 @@ from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import QApplication
 
 from .gui import (
-    adhesion_rf, cadherin, cell_mesh, clover, display, loader, measure,
-    nuclei, roi, vessel_mesh,
+    adhesion_rf, cadherin, cell_mesh, clover, display, loader, nuclei, roi,
+    vessel_mesh,
+)
+from .gui.state import (
+    BATCH_STEPS, STEP_NAMES, new_state, reset_image_state, resolve_steps,
 )
 from .rf import AdhesionRF
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PARAMS = ROOT / "3d_images_folder" / "params.json"
 DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
-
-# Same order the GUI "Run all" uses, EXCEPT the final Measure + export step,
-# which is intentionally left out: it crashes headless (a GL/Qt draw in the
-# measure tab). The batch produces every intermediate (proba, instances, mesh,
-# curvature, DAPI, cadherin, fibroblast count) in each <stem>_saved folder;
-# run Measure + export yourself per image in the GUI (Load all saved → Measure
-# → export), which works fine there.
-# (short name, label, state key). The short name is what `--steps` takes; it is
-# stable and is what appears in scripts and in `docs/ISSUES.md`, so renaming the
-# human label does not break a recorded invocation.
-_RUN_STEPS = [
-    ("dapi", "DAPI + components", "run_dapi"),
-    ("fibroblasts", "Fibroblast count", "run_fibroblasts"),
-    ("cadherin", "VE-Cadherin threshold", "run_cadherin"),
-    ("mesh", "Vessel mesh", "run_vessel_mesh"),
-    ("curvature", "Surface curvature", "run_vessel_curvature"),
-    ("graph", "3D centerline graph", "run_vessel_path_curvature"),
-    ("clover", "Clover threshold", "run_clover"),
-    ("rf", "RF predict", "run_rf_predict"),
-    ("postprocess", "RF post-process (split-merged)", "run_rf_postprocess"),
-]
-STEP_NAMES = [s[0] for s in _RUN_STEPS]
-
-
-def resolve_steps(spec: str) -> list[str]:
-    """Parse a `--steps` spec into short names, in pipeline order.
-
-    Accepts "all", a comma-separated list, or a "first:last" range. Order is
-    always the pipeline's own, never the order given — a later step consuming
-    an earlier one's output cannot be run first by typo.
-
-    **Every step still reads the tab defaults**, so re-running one is only
-    reproducible if the defaults have not moved since (`docs/ISSUES.md` P26).
-    """
-    spec = (spec or "all").strip()
-    if spec in ("", "all"):
-        return list(STEP_NAMES)
-    if ":" in spec:
-        lo, _, hi = spec.partition(":")
-        lo, hi = lo.strip() or STEP_NAMES[0], hi.strip() or STEP_NAMES[-1]
-        for n in (lo, hi):
-            if n not in STEP_NAMES:
-                raise ValueError(f"unknown step {n!r}; expected one of "
-                                 f"{', '.join(STEP_NAMES)}")
-        i, j = STEP_NAMES.index(lo), STEP_NAMES.index(hi)
-        if i > j:
-            raise ValueError(f"empty range {spec!r}: {lo} comes after {hi}")
-        return STEP_NAMES[i:j + 1]
-    want = {s.strip() for s in spec.split(",") if s.strip()}
-    bad = want - set(STEP_NAMES)
-    if bad:
-        raise ValueError(f"unknown step(s) {', '.join(sorted(bad))}; expected "
-                         f"one of {', '.join(STEP_NAMES)}")
-    return [n for n in STEP_NAMES if n in want]
-
-
-def _fresh_state() -> dict:
-    return {
-        "dapi_raw": None, "cadh_raw": None, "clover_raw": None,
-        "force_vol": None, "adhesion_rf": None, "adhesion_proba": None,
-        "scale": (1.0, 1.0, 1.0),
-        "dapi_mask_layer": None, "cadh_mask_layer": None,
-        "clover_mask_layer": None,
-        "dapi_state": {"labels": None, "sizes": None, "nuclei": None,
-                       "nuclei_sizes": None, "nuclei_ids": None,
-                       "nuclei_is_fib": None, "nuclei_min_size_vox": None},
-        "cadh_state": {"labels": None, "sizes": None, "centroids": None,
-                       "normals": None, "label_ids": None, "keep_mask": None},
-        "clover_state": {"labels": None, "sizes": None, "method": None},
-        "nuc_cache": {"labels_id": None, "centroids": None, "normals": None,
-                      "lids": None},
-        "mesh_cache": {"offset_centroids": None, "outward": None,
-                       "inward_offset_um": 0.0, "kdtree": None},
-        "vessel_mesh_cache": {"verts": None, "faces": None},
-        "raw_layers": [], "hists": [],
-        "headless": True,   # measure skips display-only plotting in batch mode
-    }
 
 
 def _free_gpu():
@@ -194,7 +120,7 @@ def main() -> None:
     # Hidden viewer keeps a GL context (so surface/labels layers work) without
     # popping a window; no logpanel install so prints go to this terminal.
     viewer = napari.Viewer(ndisplay=3, show=False)
-    state = _fresh_state()
+    state = new_state(headless=True)
 
     # Build every tab once — this registers state["run_*"], state["load_*"] and
     # the per-image save-path widgets. Order matches the GUI.
@@ -278,27 +204,7 @@ def main() -> None:
                 viewer.layers.remove(layer)
         except Exception:
             pass
-        for k in ("dapi_raw", "cadh_raw", "clover_raw", "ruby_raw",
-                  "clover_raw_native", "ruby_raw_native", "force_vol",
-                  "adhesion_proba", "clover_ruby_ratio", "vessel_graph",
-                  # Belt and braces with `_fail` above: nothing derived from
-                  # one image may survive into the next (P38).
-                  "vessel_lumen_field", "vessel_mesh_cache",
-                  "measure_result", "dapi_mask_layer", "cadh_mask_layer",
-                  "clover_mask_layer", "fibroblast_count"):
-            state[k] = None
-        state["dapi_state"] = {"labels": None, "sizes": None, "nuclei": None,
-                               "nuclei_sizes": None, "nuclei_ids": None,
-                               "nuclei_is_fib": None,
-                               "nuclei_min_size_vox": None}
-        state["cadh_state"] = {"labels": None, "sizes": None, "centroids": None,
-                               "normals": None, "label_ids": None,
-                               "keep_mask": None}
-        state["clover_state"] = {"labels": None, "sizes": None, "method": None}
-        state["vessel_mesh_cache"] = {"verts": None, "faces": None}
-        state["mesh_cache"] = {"offset_centroids": None, "outward": None,
-                               "inward_offset_um": 0.0, "kdtree": None}
-        state["raw_layers"] = []
+        reset_image_state(state)
         gc.collect()
         _free_gpu()
 
@@ -354,7 +260,7 @@ def main() -> None:
             if not state.get("raw_layers"):
                 _advance(i, "load failed; skipped")
                 return
-            steps = [(label, state[key]) for name, label, key in _RUN_STEPS
+            steps = [(label, state[key]) for name, label, key in BATCH_STEPS
                      if name in wanted_steps and state.get(key)]
 
             def _next(j: int):

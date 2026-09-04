@@ -12,8 +12,10 @@ from matplotlib.figure import Figure
 from napari.qt.threading import thread_worker
 from scipy.spatial import KDTree
 
-from ..fret import background_subtract
-from ..measure_core import graph_columns, wall_columns
+from ..measure_core import (
+    CSV_COLUMNS, NUCLEUS_MAP_SPLIT, NUCLEUS_MAP_UNSPLIT,
+    bs_per_z, export_meta, graph_columns, wall_columns,
+)
 from ..saved_check import (
     curvature_notes, force_notes, mesh_notes, native_notes,
     nuclei_notes, ratio_dropout_note, surface_verts_for_distance,
@@ -22,22 +24,6 @@ from ..saved_check import (
 from .widgets import call_all, with_after
 
 N_WORKERS = max(1, (os.cpu_count() or 8) - 4)
-
-
-def _bs_per_z(vol: np.ndarray) -> np.ndarray:
-    """Per-Z-plane background subtraction, via the frozen ``fret`` routine.
-
-    Each plane's modal intensity is its own background (the mode shifts with
-    depth as the illumination attenuates), so this must be applied plane by
-    plane rather than once over the volume.
-    """
-    out = np.empty(vol.shape, dtype=np.float32)
-    for z in range(vol.shape[0]):
-        # background_subtract returns float64; write straight into the float32
-        # buffer so only one plane's worth of float64 exists at a time (np.stack
-        # of every plane would peak at 2x the volume in float64).
-        out[z] = background_subtract(vol[z])
-    return out
 
 
 def build(state, viewer):
@@ -198,8 +184,8 @@ def build(state, viewer):
                 iso_idx = np.clip(np.rint(np.arange(Zn) * zf).astype(np.int64),
                                   0, labels.shape[0] - 1)
                 labels_n = labels[iso_idx]                    # (Zn, Y, X)
-                clover_bs = _bs_per_z(clover_native)
-                ruby_bs = _bs_per_z(ruby_native)
+                clover_bs = bs_per_z(clover_native)
+                ruby_bs = bs_per_z(ruby_native)
                 inside = labels_n > 0
                 lv = labels_n[inside]
                 nmax = int(labels.max())
@@ -537,25 +523,12 @@ def build(state, viewer):
         _base = Path(str(export_path_w.value))
         _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = str(_base.with_name(f"{_base.stem}_{_ts}{_base.suffix or '.csv'}"))
-        # Requested columns first (clover/ruby ratio, distance to vessel mesh),
-        # then the rest of the per-adhesion metrics.
-        cols = ["label", "ratio_clover_ruby", "dist_mesh_um",
-                "centroid_z_um", "centroid_y_um", "centroid_x_um",
-                "path_curv_1_um", "path_curv_xy_1_um", "dist_junction_um",
-                "dist_crop_um", "censored", "s_um", "caliber_um",
-                "lumen_area_um2", "lumen_major_um", "lumen_minor_um",
-                "lumen_aspect",
-                "tau_rel_1_um3", "tau_hat_um", "dist_tau_um", "tau_censored",
-                "tau_sec_clipped", "sec_tau_rel_1_um3", "sec_tau_hat_mean_um",
-                "sec_force_balance", "sec_wall_ok_frac",
-                "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
-                "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
-                "volume_um3", "axis_major_um", "axis_minor_um",
-                "eccentricity", "nuc_id", "nuc_is_fibroblast"]
+        # Column order is `measure_core.CSV_COLUMNS` — shared with
+        # `batch_measure` so the two exports cannot drift.
         try:
             import pandas as pd
             df = pd.DataFrame({c: np.asarray(result[c])
-                               for c in cols if c in result})
+                               for c in CSV_COLUMNS if c in result})
             # Source image filename as the first column, so concatenated CSVs
             # from multiple images stay identifiable.
             df.insert(0, "image", state.get("image_name") or "")
@@ -572,25 +545,22 @@ def build(state, viewer):
             # into state["run_settings"]; dump them next to the CSV (same
             # timestamped stem) so any export can be fully backtracked.
             import json
-            meta = {
-                "image": state.get("image_name"),
-                "exported": _ts,
-                "csv": Path(path).name,
-                "n_adhesions": int(len(df)),
-                "scale_um_zyx": list(state.get("scale", ())),
-                "roi_active": bool(state.get("roi_polygons_yx_um")
-                                   or state.get("roi_yx_um")),
-                "fibroblast_count": state.get("fibroblast_count"),
-                # Which nucleus segmentation nuc_id / dist_nuc_um refer to. The
-                # two are NOT comparable — the unsplit map's ids index DAPI
-                # connected components, the split map's index nuclei (P04).
-                "nucleus_map": (
-                    "nuclei_split.npz"
+            meta = export_meta(
+                image=state.get("image_name"),
+                exported=_ts,
+                csv_name=Path(path).name,
+                n_adhesions=len(df),
+                scale_um_zyx=state.get("scale", ()),
+                roi_active=bool(state.get("roi_polygons_yx_um")
+                                or state.get("roi_yx_um")),
+                fibroblast_count=state.get("fibroblast_count"),
+                nucleus_map=(
+                    NUCLEUS_MAP_SPLIT
                     if (state.get("dapi_state") or {}).get("nuclei") is not None
-                    else "dapi_labels.npz (unsplit fallback)"),
-                "notes": list(result.get("notes", [])),
-                "settings": state.get("run_settings") or {},
-            }
+                    else NUCLEUS_MAP_UNSPLIT),
+                notes=result.get("notes", []),
+                settings=state.get("run_settings") or {},
+            )
             spath = str(_base.with_name(f"{_base.stem}_{_ts}_settings.json"))
             with open(spath, "w") as fh:
                 json.dump(meta, fh, indent=2, default=str)

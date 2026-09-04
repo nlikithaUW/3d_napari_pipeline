@@ -127,6 +127,7 @@ true of the code and data on that date and may not be true now.
 | [P55](#p55) | Every headless-saved `cadherin_labels.npz` is unloadable — the lazy fields were pickled `None` | S3 | **fixed** 2026-09-02 — `np.asarray(None)` is a 0-d object array; the three fields had no reader and are no longer written, files already on disk load unchanged |
 | [P53](#p53) | 61% of the wall points carrying a shear number are not standing on measured wall, and the existing flags do not catch it | **S1** | open — **measured 2026-09-02 on image 6**; one 180 µm stretch is sound, one whole branch is not; the τ *range* survives the filter |
 | [P54](#p54) | "Suggest alpha" and the `alpha3d_um` guard contradict each other on every V3 image — the button's value always trips the warning | S3 | open — **measured 2026-09-02**; suggest gives 9.5–10.0 at `subsample_um` 5.0, the guard demands ≥ 15.0. Both meshes are good; it is the advice that is broken |
+| [P56](#p56) | z upsampling modulates background noise 45% with a 5.2 µm period — visible as lines in xz/yz | S4 | **closed — immaterial** 2026-09-03 — all of it is sub-`min_size` speckle (2.65× raw → 1.10 at `min_size` 25); the wall never had it, and the z-elongated adhesions are the PSF (2.80 µm axial vs 1.30 µm lateral, in the raw TIFF) |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -7866,3 +7867,92 @@ headless path saved), [P26](#p26).
   rebuilt. The user then asked whether the fields were dead at all, which is
   what turned a crash fix into deleting the keys — the write had no reader on
   either path.
+
+## P56 — the z-interpolation banding is real, visible, and confined to background speckle
+
+| | |
+|---|---|
+| **Status** | **closed — immaterial** 2026-09-03 |
+| **Severity** | S4 — a conspicuous display artifact with no effect on any mask, mesh or exported number |
+| **Opened** | 2026-09-03 |
+| **Last verified** | 2026-09-03 (`V3_CorrectSettings_40xWater_04step_003`) |
+| **Where** | `pipeline/io.py::resample_volume` / `to_isotropic` |
+| **Affects** | nothing measured. Opened so the artifact is not rediscovered and blamed on the mesh |
+
+Viewed edge-on (xz/yz), the VE-Cadherin channel shows regular horizontal lines
+through pure background. They are an artifact of `to_isotropic`, and they are
+**not** a defect worth fixing.
+
+**Cause.** `resample_volume` upsamples z with `gpu.zoom(..., order=1)` at
+`zf = 0.4/0.325 = 16/13`. Linear interpolation scales independent noise by
+`sqrt(w² + (1−w)²)`: **1.0** where an output plane lands on an input plane,
+**0.707** halfway between. So background noise amplitude is modulated with a
+period of 16 output planes = 13 input planes = **5.2 µm**. Measured on a
+background tile: per-plane std 12.6–18.3 (**45%**), correlation with the closed
+form **0.998**, and reproduced identically on synthetic Gaussian noise pushed
+through the same `ndi.zoom` (43%) — so it is the interpolator, not the data.
+`09step` (`zf = 0.9/0.325 = 36/13`) modulates 44% with a 36-plane period.
+
+Downstream, the Niblack z-score inherits it: the window is wide enough that the
+local std averages over many periods, but the numerator's noise does not, so in
+background the false-positive rate is 5.33% on phase-0 planes against 1.36% at
+half-phase (**7.2×** at the default `niblack_k = 2`; 36× at `k = 3`).
+
+**Why it does not matter.** The saved `cadherin_labels.npz` is *unfiltered* —
+median component size 1 voxel, 4.4M components — and `filter_by_size` runs
+downstream at mesh time. Phase modulation of the per-plane foreground fraction,
+detrended by a 33-plane running median:
+
+| mask | voxels | phase max/min |
+|---|---|---|
+| `min_size = 1` (raw, nothing reads this) | 8,615,021 | **2.65** — clean `sqrt(w²+(1−w)²)` curve |
+| `min_size = 5` | 2,942,799 | 1.22 |
+| `min_size = 25` (the default) | 2,623,580 | **1.10** — no phase shape, scatter only |
+
+Splitting the raw mask by component says the same thing: the largest component
+(the wall) is **1.24** with no coherent shape, everything else is **2.94** with
+the textbook curve. **All of the banding is in the sub-25-voxel speckle, and
+`min_size` — already load-bearing for topology — removes it before any geometry
+sees it.** The wall never had it.
+
+**It is also not the cause of the z-elongated adhesions.**
+`adhesion_instances.npz` carries no phase signature (detrended per-plane ratio
+scatters 0.67–1.60 with no dependence on phase), and axial elongation is present
+in the **raw TIFF before any resampling**: bright clover features measure
+**2.80 µm axial FWHM against 1.30 µm lateral (2.15×)**. Segmented adhesions come
+out at median bbox z 4.55 µm vs xy 3.58 µm (1.27×) — *less* than the raw PSF, so
+fully accounted for. The adhesions point down through z because the microscope
+does; a perfect resampler would look the same. Note z is optically
+**oversampled** (0.4 µm steps against a 2.80 µm axial FWHM), which is why the
+signal interpolates cleanly and only the white per-plane noise misbehaves.
+
+**Fixes considered and declined.** All of them change every voxel of every
+resampled channel, invalidating every saved mask, mesh, graph and shear artifact
+the way [P46](#p46)'s wall change did, in exchange for nothing measured:
+
+- *z prefilter (σ ≈ 0.3 µm) and/or `order=3`.* Measured to cut the modulation
+  from 39% to 13%/4%, at +3.1% axial FWHM. Fixes only the thing that does not
+  matter, and spends real resolution on the channel where 2.80 µm is already
+  the limit. Any *interpolating* kernel keeps some modulation by definition —
+  it reproduces samples exactly and averages between them — so cubic/quintic
+  reduce but cannot remove it (39% → 14.9% → 9.3%).
+- *`grid_mode=True`.* `scipy.ndimage.zoom` defaults to `grid_mode=False`, which
+  pins the first and last output sample to the first and last input sample:
+  `src = i·(Zin−1)/(Zout−1)`. For 246 → 303 the realised factor is 1.2327, not
+  the requested 1.2308 — a **0.15% z scale error**, ~0.15 µm over the 98 µm
+  stack. Real, well under one voxel and far under the axial PSF. Recorded here
+  rather than fixed.
+- *round instead of truncate.* `to_isotropic` casts back with
+  `.astype(uint16)`, which truncates, so interpolated planes lose ~0.5 counts
+  while phase-0 planes lose none — a second artifact on the same period, against
+  ~480 counts of background with a noise std of 18.
+
+### History
+
+- 2026-09-03 — opened by the user, who spotted the lines in the xz/yz views of
+  the cadherin channel and suspected z interpolation. Confirmed, and initially
+  reported as significant against the **raw** labels array (2.65×). That was the
+  wrong array: nothing reads it un-size-filtered. Re-measured against what
+  `build_mesh` consumes and closed as immaterial the same day. The user's
+  question — "does the banding matter though, if it only affects the noise level
+  in background?" — is what forced the second measurement.

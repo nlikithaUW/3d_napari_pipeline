@@ -139,8 +139,7 @@ def _standard_instances(saved: Path, rewrite: bool = False):
     del binary
     n_new = int(labels.max())
     if rewrite:
-        np.savez_compressed(sio.path(saved, sio.ADHESION_INSTANCES),
-                            instances=labels.astype(np.int32))
+        sio.save_instances(sio.path(saved, sio.ADHESION_INSTANCES), labels)
         _p(f"standardized instances: {n_new} adhesions (npz rewritten, "
            f"--rewrite-instances)")
     else:

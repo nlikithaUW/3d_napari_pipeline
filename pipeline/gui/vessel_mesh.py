@@ -628,15 +628,7 @@ def build(state, viewer) -> list:
             print("No vessel mesh to save — build it first.", flush=True)
             return
         path = str(mesh_path_w.value)
-        arrays = {"verts": np.asarray(verts), "faces": np.asarray(faces)}
-        # An extra key only, the same additive pattern `z_um` uses in
-        # the retired path-curvature npz: an older reader that names verts/faces is
-        # unaffected, and a Poisson mesh keeps the normals it cannot re-derive
-        # (it is open at the volume edges, so `vertex_outward_normals` has no
-        # enclosed volume to read the global sign from).
-        if cache.get("normals") is not None:
-            arrays["normals"] = np.asarray(cache["normals"])
-        np.savez(path, **arrays)
+        sio.save_mesh(path, verts, faces, cache.get("normals"))
         print(f"Saved vessel mesh -> {path} "
               f"({len(verts)} verts, {len(faces)} faces).", flush=True)
 
@@ -1740,10 +1732,7 @@ def build(state, viewer) -> list:
                   flush=True)
             return
         path = str(shear_path_w.value)
-        np.savez_compressed(
-            path, **{k: v for k, v in wall.items()
-                     if isinstance(v, np.ndarray)},
-            max_dist_um=np.float64(wall["max_dist_um"]))
+        sio.save_shear(path, wall)
         print(f"Saved wall shear -> {path}.", flush=True)
 
     def _load_shear(*_, after=None, visible=True):
@@ -1796,8 +1785,7 @@ def build(state, viewer) -> list:
                   flush=True)
             return
         path = str(curv_path_w.value)
-        np.savez_compressed(path, **{k: np.asarray(curv[k])
-                                     for k in sio.CURV_KEYS})
+        sio.save_curvature(path, curv)
         print(f"Saved surface curvature -> {path}.", flush=True)
 
     def _load_curv(*_, after=None, visible=True):
@@ -1853,10 +1841,7 @@ def build(state, viewer) -> list:
                   "graph' first.", flush=True)
             return
         path = str(path_curv_path_w.value)
-        # Arrays only. The notes and the nested info dicts are provenance and
-        # belong in vessel_recon.json, which is where provenance already lives.
-        np.savez_compressed(path, **{k: v for k, v in g.items()
-                                     if isinstance(v, np.ndarray)})
+        sio.save_graph(path, g)
         print(f"Saved centerline graph -> {path}: "
               f"{len(g['points_zyx_um'])} points, "
               f"{len(g['edge_len_um'])} edge(s).", flush=True)

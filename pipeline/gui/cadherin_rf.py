@@ -159,7 +159,7 @@ def build(state, viewer) -> Container:
         if proba is None:
             print("No junction proba to save. Run predict first.", flush=True)
             return
-        np.save(str(proba_path_w.value), proba)
+        sio.save_junction_proba(str(proba_path_w.value), proba)
         print(f"Junction proba saved to {proba_path_w.value}", flush=True)
 
     def _load_proba(*_):

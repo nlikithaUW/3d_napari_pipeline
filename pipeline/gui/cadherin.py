@@ -410,11 +410,7 @@ def build(state, viewer) -> Container:
         # written here as `np.asarray(None)`, which is a 0-d *object* array:
         # numpy pickles it on save and then refuses to unpickle it on load, so
         # every file saved without them was unreadable (P55).
-        np.savez_compressed(
-            path,
-            labels=np.asarray(cs["labels"]).astype(np.int32),
-            sizes=np.asarray(cs["sizes"]),
-        )
+        sio.save_cadherin_labels(path, cs["labels"], cs["sizes"])
         print(f"Saved VE-Cadherin components -> {path} "
               f"({np.asarray(cs['sizes']).size} components).", flush=True)
 

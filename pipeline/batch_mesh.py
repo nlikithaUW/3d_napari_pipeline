@@ -1113,10 +1113,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
         _group(single_tag)["scores"] = scores
 
     if "mesh" in steps:
-        arrays = {"verts": np.asarray(verts), "faces": np.asarray(faces)}
-        if normals is not None:
-            arrays["normals"] = np.asarray(normals)
-        np.savez(mesh_out, **arrays)
+        sio.save_mesh(mesh_out, verts, faces, normals)
         _group(single_tag)["outputs"][mesh_out.name] = {
             "n_verts": int(len(verts)),
             # Both figures, always. P26's own correction turned on this
@@ -1130,8 +1127,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
 
     for radius, smooth, curv, tg in curv_runs:
         cp = sio.path(saved, sio.VESSEL_CURVATURE, tg)
-        np.savez_compressed(cp, **{k: np.asarray(curv[k])
-                                   for k in ("mean", "k1", "k2", "gaussian")})
+        sio.save_curvature(cp, curv)
         k1 = np.asarray(curv["k1"])
         k2 = np.asarray(curv["k2"])
         g = _group(tg)
@@ -1154,9 +1150,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     wall = graph_extras.get("wall")
     if wall is not None and len(wall["points_zyx_um"]):
         sp = sio.path(saved, sio.VESSEL_SHEAR, single_tag)
-        np.savez_compressed(sp, **{k: v for k, v in wall.items()
-                                   if isinstance(v, np.ndarray)},
-                            max_dist_um=np.float64(wall["max_dist_um"]))
+        sio.save_shear(sp, wall)
         cov = np.nan
         if verts is not None and len(verts):
             f = shear.vertex_field(verts, wall["points_zyx_um"],
@@ -1246,10 +1240,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
 
     if cl is not None:
         pp = sio.path(saved, sio.VESSEL_GRAPH, single_tag)
-        # Only the arrays; the notes and the nested info dicts go into
-        # vessel_recon.json, which is where provenance already lives.
-        np.savez_compressed(pp, **{k: v for k, v in cl.items()
-                                   if isinstance(v, np.ndarray)})
+        sio.save_graph(pp, cl)
         _group(single_tag)["outputs"][pp.name] = {
             "n_points": int(len(cl["points_zyx_um"])),
             "n_edges": int(len(cl["edge_len_um"])),

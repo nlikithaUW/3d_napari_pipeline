@@ -106,8 +106,7 @@ def build(state, viewer) -> Container:
                   "components' first.", flush=True)
             return
         path = str(labels_path_w.value)
-        np.savez_compressed(path, labels=np.asarray(labels).astype(np.int32),
-                            sizes=np.asarray(sizes))
+        sio.save_dapi_labels(path, labels, sizes)
         print(f"Saved DAPI components -> {path} "
               f"({np.asarray(sizes).size} components).", flush=True)
 
@@ -334,15 +333,10 @@ def build(state, viewer) -> Container:
             return
         path = str(nuc_path_w.value)
         fc = state.get("fibroblast_count") or {}
-        np.savez_compressed(
-            path,
-            labels=np.asarray(nuc),
-            sizes=np.asarray(ds.get("nuclei_sizes")),
-            ids=np.asarray(ds.get("nuclei_ids")),
-            is_fib=np.asarray(ds.get("nuclei_is_fib")),
-            min_size_vox=int(ds.get("nuclei_min_size_vox", 0)),
-            threshold=float(fc.get("threshold", 0.0)),
-        )
+        sio.save_nuclei_split(
+            path, nuc, ds.get("nuclei_sizes"), ds.get("nuclei_ids"),
+            ds.get("nuclei_is_fib"), ds.get("nuclei_min_size_vox", 0),
+            fc.get("threshold", 0.0))
         ids = np.asarray(ds.get("nuclei_ids"))
         is_fib = np.asarray(ds.get("nuclei_is_fib"))
         print(f"Saved split nuclei -> {path} ({ids.size} nuclei, "
@@ -417,10 +411,9 @@ def build(state, viewer) -> Container:
                   "first.", flush=True)
             return
         path = str(fib_path_w.value)
-        np.savez(path, total=int(fc.get("total", 0)),
-                 fibroblast=int(fc.get("fibroblast", 0)),
-                 other=int(fc.get("other", 0)),
-                 threshold=float(fc.get("threshold", 0.0)))
+        sio.save_fibroblast_count(
+            path, fc.get("total", 0), fc.get("fibroblast", 0),
+            fc.get("other", 0), fc.get("threshold", 0.0))
         print(f"Saved fibroblast count -> {path} "
               f"({fc.get('fibroblast', 0)}/{fc.get('total', 0)}).", flush=True)
 

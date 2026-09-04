@@ -71,8 +71,8 @@ def main() -> None:
             labels = instance_labels_3d(binary, args.min_size, True,
                                         args.split_min)
             n = int(labels.max())
-            np.savez_compressed(sio.path(saved, sio.ADHESION_INSTANCES),
-                                instances=labels.astype(np.int32))
+            sio.save_instances(sio.path(saved, sio.ADHESION_INSTANCES),
+                               labels)
             print(f"    -> {n} adhesions; "
                   f"{sio.filename(sio.ADHESION_INSTANCES)} updated.",
                   flush=True)

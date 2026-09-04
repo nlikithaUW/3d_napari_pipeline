@@ -307,7 +307,7 @@ def build(state, viewer) -> Container:
             print("No probability map to save. Run RF predict first.", flush=True)
             return
         path = str(proba_path_w.value)
-        np.save(path, proba)
+        sio.save_proba(path, proba)
         print(f"Saved probability map -> {path} "
               f"({proba.nbytes / 1e6:.1f} MB)", flush=True)
 
@@ -505,7 +505,7 @@ def build(state, viewer) -> Container:
         vol = np.asarray(d[0] if getattr(lyr, "multiscale", False) else d)
         vol = vol.astype(np.int32)
         path = str(inst_path_w.value)
-        np.savez_compressed(path, instances=vol)
+        sio.save_instances(path, vol)
         print(f"Saved instances -> {path} ({int(vol.max())} adhesions).",
               flush=True)
 
@@ -694,7 +694,7 @@ def build(state, viewer) -> Container:
         vol = np.asarray(d[0] if getattr(lyr, "multiscale", False) else d)
         vol = vol.astype(np.float32, copy=False)
         path = str(ratio_path_w.value)
-        np.save(path, vol)
+        sio.save_ratio(path, vol)
         print(f"Saved ratio layer -> {path} ({vol.nbytes / 1e6:.1f} MB)",
               flush=True)
 

@@ -130,6 +130,13 @@ true of the code and data on that date and may not be true now.
 | [P54](#p54) | "Suggest alpha" and the `alpha3d_um` guard contradict each other on every V3 image — the button's value always trips the warning | S3 | open — **measured 2026-09-02**; suggest gives 9.5–10.0 at `subsample_um` 5.0, the guard demands ≥ 15.0. Both meshes are good; it is the advice that is broken |
 | [P57](#p57) | `vessel_graph.npz` silently dropped six scalars on every save, and the two paths disagreed about the file | S3 | **fixed** 2026-09-03 — the array filter does not match a Python `int`; the GUI refilled them with 0 and the headless reader did not. A report, not a measurement |
 | [P56](#p56) | z upsampling modulates background noise 45% with a 5.2 µm period — visible as lines in xz/yz | S4 | **closed — immaterial** 2026-09-03 — all of it is sub-`min_size` speckle (2.65× raw → 1.10 at `min_size` 25); the wall never had it, and the z-elongated adhesions are the PSF (2.80 µm axial vs 1.30 µm lateral, in the raw TIFF) |
+| [P58](#p58) | The adhesion major axis is PSF-dominated, so every vessel-frame orientation angle is the microscope | **S1** | open — **three results withdrawn** 2026-09-03; median \|e1_z\| = 0.967. The permutation nulls could not see it; a constant-ẑ control can, and **beats the measurement**. Only xy-plane statistics survive |
+| [P59](#p59) | The per-adhesion axis layer drew arrows pointing at the camera | S3 | **fixed** 2026-09-03 — arithmetic was correct; a 4 µm arrow showed 1.0 µm in plane. Draws the xy component by default |
+| [P60](#p60) | A short reconstruction stub is the lowest-resistance path and takes most of the flow | **S2** | open — **86.7% of the flow to a 17.2 µm stub** on image 6, rescaling every τ by ~7.5×; a property of R̂ = ∫ds/Q̂, not of one image. No guard |
+| [P61](#p61) | An untagged mesh rebuild silently invalidates analyses already computed against the previous one | S3 | open — cost a false diagnosis of correct code 2026-09-03; the GUI's `vessel_build_id` mechanism has no equivalent outside it |
+| [P62](#p62) | "Load all saved" tracebacked on a never-saved artifact; the fibroblast-count step had been dead | S3 | **fixed** 2026-09-04 — the guard existed in 1 loader of 12; `fibroblast_count_notes` was never imported |
+| [I12](#i12) | Moment deconvolution — subtract the PSF's second moment before taking the axis | idea | open — **the only route that fixes [P58](#p58)**; blocked on a PSF measurement this dataset does not have |
+| [I13](#i13) | The one orientation test [P58](#p58) leaves standing — adhesion **xy** axis against the κ1 direction on flat-facing wall | idea | open — **step 1 (feasibility) run 2026-09-04**: 250–400 adhesions/image survive at a permissive anisotropy gate, ~0 at a strict one. Carries the six-image "adhesions sit on slightly flatter wall" measurement (AUC 0.40–0.59, one image inverts, depth confound live) |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
 
@@ -8130,3 +8137,509 @@ promoted to look consistent.
   [P57](#p57), the CWD registration). Readers before writers because a reader
   change is verifiable immediately against six real folders while a writer
   change is only verifiable by producing new files.
+
+---
+
+## P58 — the adhesion major axis is PSF-dominated, so every vessel-frame orientation angle is the microscope
+
+| | |
+|---|---|
+| **Status** | open — **root cause understood, no fix available in this dataset**; every affected quantity is now flagged in code and carries its own control |
+| **Severity** | **S1** — three separate orientation results were produced and all three are withdrawn |
+| **Opened** | 2026-09-03 |
+| **Last verified** | 2026-09-03 (`V3_..._04step_003`, uncapped mesh `vessel_mesh__ds.npz`, 1,467 gated adhesions) |
+| **Where** | `pipeline/adhesion_orient.py` (`LAB_FRAME_CONTAMINATED`, `lab_axis_control`); `docs/scratch/orientation/{orient,correlate,stratify,inplane,inwall}.py` |
+
+**The measurement.** Each adhesion's shape axis `e1` is the major eigenvector of
+its inertia tensor. That part is sound and is independently verified: for the
+largest adhesions the spread along `e1` genuinely exceeds the spread along the
+other two eigenvectors, and `core_check.py` reproduces the whole pipeline of it
+against the scratch npz to `0.00e+00`.
+
+**The defect is where that axis points.** The PSF is elongated in z (P56's
+History measured 2.80 µm axial against 1.30 µm lateral in the raw TIFF), so
+every adhesion is recorded stretched along z before anything is computed:
+
+| | |
+|---|---|
+| median angle of `e1` to the stack z axis | **14.5°** |
+| median \|e1_z\| | **0.967** |
+| adhesions whose largest bounding-box extent is in z | **77%** |
+
+97% of the typical measured axis *is* the z direction. This is not a lean to be
+corrected for; it is most of the quantity.
+
+**What that invalidates, and the three withdrawn results.**
+
+**(a) `into_deg` — how far the axis points out of the wall.** ρ = −0.845
+against `e1_z_deg`, plus ρ = +0.396 against `|n_z|` (how z-facing the local wall
+is). It mostly reports *where on the vessel you are standing*. `orient.py`
+reported it above its permutation null (0.607 vs 0.575) and that excess is not
+interpretable.
+
+**(b) The wall-shear correlation — withdrawn.** `correlate.py` reported
+ρ(`tau_wall_tau_hat_um`, `into_deg`) = **+0.267**, outside its null, as the one
+geometric covariate that tracked orientation. It does not survive. τ is
+ρ = **+0.703** against `|n_z|` — shear is highest on the z-facing top and bottom
+walls, which is also where `into_deg` is automatically large — so both ends of
+the correlation hang off the same third quantity. Stratifying by `|n_z|`
+(`stratify.py`, three binnings) collapses it to an n-weighted **+0.023 / +0.039 /
++0.085**, unstable in sign between bins and disagreeing between the two τ
+variants. **The permutation null could not catch this**: it shuffles which wall
+frame an axis meets, but every frame keeps its own relationship to z, so the
+shuffled version inherits the confound and reports it as the baseline.
+
+**(c) The in-wall angle — withdrawn, and this one is a trap.** Projecting into
+the wall's tangent plane *looks* like the escape, because it discards the
+contaminated normal component. It is the opposite. The projection subtracts the
+normal component, and for a z-leaning axis that removes nearly the whole vector;
+the residual points where the **wall tilts**, not where the adhesion points. On
+a tube the wall tilts circumferentially, so the statistic reads
+"circumferential" on data containing no adhesions at all.
+`adhesion_orient.lab_axis_control` measures exactly that by substituting a
+constant ẑ for every axis:
+
+| gate | real `e1` | constant ẑ (no adhesion information) |
+|---|---|---|
+| `inwall_mag` ≥ 0.3 | R = 0.187, pref 73.4° | **R = 0.428, pref 79.3°** |
+| `inwall_mag` ≥ 0.5 | R = 0.170, pref 76.0° | **R = 0.461, pref 81.2°** |
+| neighbour agreement, 0–5 µm | +0.253 | **+0.938** |
+
+The artifact is larger than the effect, at the same preferred angle. Restricting
+to adhesions whose axis is *not* z-leaning does not rescue it: at
+`e1_z_deg ≥ 45/60/75°` the control returns R = 0.365/0.363/0.316 against a
+measured 0.077/0.094/0.103, and the measured value is **inside** the permutation
+null at every gate. `inwall.py`'s covariate table (in-wall angle against arc
+length, caliber, aspect, curvature, τ) is retracted with it; nothing in it
+exceeded \|ρ\| = 0.18 in any case.
+
+**Two arithmetic errors found on the way**, both fixed in the promoted core:
+
+- `orient.py::axial_resultant` doubled `wrap_deg`, which `resolve` builds from
+  **absolute** projections and so spans only [0, 90]. Doubling a quarter turn
+  instead of a half turn inflates the resultant and makes its preferred angle
+  meaningless — a uniform [0, 90] input returns R = 0.636 where the correct
+  answer is 0.001. Every `R_inwall` / `pref_inwall_deg` in `orient__*.json` is
+  affected. The core takes a signed `inwall_deg` in [0, 180).
+- `bin_glyphs`'s `axial_cos` was first read against the isotropic constant
+  (2/π in a plane). That constant assumes both directions are uniform; the
+  vessel runs one general way across a field of view, so **any** global lean in
+  the axes beats it. Against it the patches read "along the vessel" at every bin
+  size; against `shuffled_axial_cos` — the same patch axes paired with the wrong
+  patches' vessel directions — three of the four bin sizes that produce patches
+  read *not aligned*, the fourth being a marginal 0.837 against an upper bound
+  of 0.829.
+
+**What survives.** One thing, and it survives because the contamination cannot
+reach it: **measurements taken in the fixed xy plane**. The blur runs along z
+and imposes no preferred compass direction sideways, and the constant-ẑ control
+*cannot even be run* against an xy statistic — a constant z axis has no xy
+component. Neighbouring adhesions agree on their xy direction at **+0.342** for
+pairs 0–5 µm apart against a null of [−0.035, +0.111], falling ~8× by the
+80–160 µm band where it is only just outside a widened null (and inside it at
+the strictest gate), and the effect **grows** as the z component is excluded
+harder (+0.264 → +0.342 → +0.423 at thresholds 0.20 / 0.35 / 0.50). An artifact
+would shrink. Their patch directions are *not* the vessel's.
+
+**Mitigation in code, since there is no fix.** `LAB_FRAME_CONTAMINATED` names
+the seven affected quantities; the napari tab marks them with a warning glyph in
+its colour-by menus rather than hiding them (hiding them would hide the
+confound); the tab prints the constant-ẑ control next to the in-wall number
+every time; and `plane = "xy"` is the default everywhere it is offered.
+
+**The fix needs data this dataset does not have.** See [I12](#i12) — moment
+deconvolution, which requires the PSF to be measured for this objective.
+
+**History**
+- 2026-09-03 — opened. Found by asking why a reported τ correlation and a
+  reported in-wall preference disagreed with a per-adhesion test that had said
+  the opposite. Neither was caught by the permutation nulls already in place,
+  which is the part worth remembering: **a shuffle that preserves each frame's
+  relation to the lab axis cannot see a lab-axis confound.** The control that
+  does see it substitutes a constant axis and asks what the geometry alone
+  returns.
+
+---
+
+## P59 — the per-adhesion axis layer drew arrows pointing at the camera
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-09-03 |
+| **Severity** | S3 — a display defect; the underlying arithmetic was correct |
+| **Opened** | 2026-09-03 (reported from the viewer: "the glyphs don't seem to align visually with the adhesions") |
+| **Last verified** | 2026-09-03 |
+| **Resolved** | 2026-09-03 |
+| **Where** | `pipeline/gui/adhesion_orient.py` (`AXIS_DRAW`, `min_xy`) |
+
+The layer drew each adhesion's full 3D axis. With median \|e1_z\| = 0.967
+([P58](#p58)), that axis points almost straight at the camera in the standard
+top-down view: a 4 µm arrow shows a median of **1.0 µm** in the viewing plane,
+and **57%** show under a third of their length. A vector pointing at the viewer
+renders as a short vector pointing somewhere arbitrary, not as a long one
+pointing at them — so what was on screen was each adhesion's small, noisy
+sideways residual, drawn at full brightness beside an object whose visible
+elongation is a projection of something else entirely.
+
+Group 3's binned glyphs never showed this, because `bin_glyphs` in `xy` mode
+already flattens the axes into the viewing plane. Only the per-adhesion layer
+drew unprojected.
+
+**Fix.** A `draw` control whose **default is the xy component**, renormalised so
+the arrow has a visible length, which is both what can be seen and what
+[P58](#p58) leaves measurable — and the same quantity the glyphs average. A
+`min_xy` slider drops adhesions whose xy component is too small to be a
+direction rather than drawing noise at full length (698 of 1,467 at the 0.20
+default — a large fraction, and an honest one). The full 3D axis is still
+selectable, marked with the warning glyph, and choosing it now prints the median
+\|e1_xy\| and says the arrows will not line up.
+
+**History**
+- 2026-09-03 — opened and fixed. Worth recording as a defect rather than as a
+  display preference: the arithmetic was verified correct *first* — the axis
+  really is the direction of greatest spread — and the display was still
+  showing the operator something false. Correct numbers drawn in a projection
+  that hides the dominant component is its own failure mode.
+
+---
+
+## P60 — a short reconstruction stub becomes the lowest-resistance path, and takes most of the flow
+
+| | |
+|---|---|
+| **Status** | open — no guard; `batch_mesh` records the scenario without saying one branch of it is degenerate |
+| **Severity** | S2 — every τ on the image is rescaled, by ~7.5× on the one measured case |
+| **Opened** | 2026-09-03 |
+| **Last verified** | 2026-09-03 (`V3b_..._04step_003`, image 6 of the density–shear run) |
+| **Where** | `pipeline/shear.py::edge_resistance`, `flow_split`; `pipeline/batch_mesh.py` (scenario recording) |
+
+[I10](#i10) recovers the junction flow split from R̂ = ∫ds/Q̂ over the sections
+already solved, which removed one unknown per edge. R̂ integrates **along** an
+edge, so a *short* edge has a small resistance whatever its caliber — and a
+reconstruction stub is short by construction.
+
+Measured on image 6, whose third opening is a `terminus` (the centerline stops
+inside the volume) on a **17.2 µm stub of 6.6 µm caliber**. Treated as an open
+outlet it takes **86.7%** of the flow, because its R̂ = 1.6e-4 against the main
+edges' 1.0e-3 and 8.5e-4. Treated as closed, image 6 is a clean series path and
+that edge carries 0.000. The choice rescales every τ on the image by ~7.5×.
+
+**Which is right is not in doubt here** — `docs/DIRECTION.md` §5.1 says no image
+in this dataset is expected to contain a real vessel terminus, so the stub is a
+reconstruction artifact and the analysis closed it
+(`docs/scratch/density_shear/common.py::TERMINI_OPEN = False`). The defect is
+that **nothing warns**: `batch_mesh` records every scenario and chooses none,
+which is correct behaviour, but a scenario in which a sub-caliber stub carries
+most of the flow is degenerate on its face and should say so.
+
+The generality is the reason this is an entry and not a note on image 6: R̂
+falling with edge length is a property of the formulation, so any short edge —
+a crop stub, a spur that survived pruning, a fragment at a junction — does the
+same thing on any image.
+
+**Suggested guard** (not implemented): flag a scenario in which an edge whose
+length is below some multiple of its own caliber receives more than a set
+fraction of the flow. Both numbers are choices and belong in the recorded
+scenario, not hard-coded — the flag is the deliverable, not a filter.
+
+**History**
+- 2026-09-03 — opened from the density–shear run's own follow-up list, which
+  named it as the first item.
+
+---
+
+## P61 — an untagged mesh rebuild silently invalidates every analysis already computed against the previous one
+
+| | |
+|---|---|
+| **Status** | open — provenance *is* recorded, but nothing compares it |
+| **Severity** | S3 — no wrong number was published; it cost a debugging cycle and could have cost a wrong conclusion |
+| **Opened** | 2026-09-03 |
+| **Last verified** | 2026-09-03 (`V3_..._04step_003`) |
+| **Where** | `pipeline/saved_io.py` (tagged siblings), `pipeline/batch_mesh.py` (`vessel_recon.json`) |
+
+On 2026-09-03 the orientation scripts ran at 12:23 against `vessel_mesh.npz`. At
+14:12 a `--close-faces z_lo` rebuild overwrote that file. The surface those
+results describe survives only as the `__ds`-tagged sibling; the two differ by
+up to **16.9 µm** in distance-to-wall, and every mesh-derived number in
+`docs/scratch/orientation/` therefore refers to a superseded surface.
+
+Nothing detected it. `docs/scratch/orientation/core_check.py` failed on five
+checks and read as a defect in newly promoted code until the file times were
+compared — the promoted module was correct all along and the reference had
+moved.
+
+**What already works and what is missing.** `vessel_recon.json` records what
+produced each mesh, so the provenance is not lost — but it is only ever read by
+a human. The GUI has the mechanism: `vessel_build_id` is stamped into the graph
+and the shear cloud and compared on every status refresh
+([P38](#p38)'s fix), which is why the tab can say "built on a PREVIOUS mesh,
+re-solve". Nothing equivalent exists for an analysis output written outside the
+GUI, and scratch analyses are exactly where a stale mesh does the most damage
+because they are read once and quoted afterwards.
+
+**Suggested fix** (not implemented): have analysis outputs record the mesh
+identity they were computed against — the simplest sufficient token is the
+vertex count plus the `written` timestamp from `vessel_recon.json` — and have
+`describe_saved` report when a `_saved` folder's mesh is newer than an analysis
+sitting beside it.
+
+**Workaround in place.** `core_check.py` pins `SCRATCH_MESH_TAG = "ds"` and
+**asserts that the current untagged mesh differs**, so the provenance mismatch
+is a passing check with a message rather than a footnote someone has to
+remember.
+
+**History**
+- 2026-09-03 — opened, after it cost a false diagnosis of newly written code.
+
+---
+
+## I12 — moment deconvolution: subtract the PSF's second moment before taking the axis
+
+| | |
+|---|---|
+| **Status** | idea — open. Blocked on a measurement nobody has made for this dataset |
+| **Opened** | 2026-09-03 |
+| **Where** | would live in `pipeline/adhesion_orient.py::adhesion_axes` |
+
+[P58](#p58) is not a statistical problem and no better estimator fixes it: the
+measured axis is not the true axis, because the PSF stretches every adhesion
+along z before any arithmetic happens.
+
+The relation is additive in the right coordinates. An imaged object is the true
+object convolved with the PSF, and **convolution adds second moments**, so
+
+```
+C_measured  ≈  C_true  +  C_psf
+```
+
+where `C` is the 3×3 covariance `adhesion_axes` already builds. Subtracting a
+calibrated `C_psf` before `np.linalg.eigh` would return an axis that is not
+z-dominated — and would fix `into_deg`, the in-wall angle and the wall-frame
+statistics all at once, because they share the one root cause.
+
+**What it needs.** `C_psf` measured for this objective and these settings,
+conventionally by imaging beads far below the resolution limit so that what is
+recorded *is* the PSF. [P56](#p56)'s History already has a first estimate from
+this data (2.80 µm axial against 1.30 µm lateral, in the raw TIFF), which is
+enough to say the correction is large but not enough to apply it — that number
+came from the adhesions themselves, so using it here would be circular.
+
+**Cautions, both of which have to be stated before anyone runs it.**
+
+- **The subtraction can go negative.** Where an adhesion is genuinely thinner
+  than the PSF along some direction, `C_true` comes out with a negative
+  eigenvalue — which is information (the object is unresolved on that axis), not
+  something to clip silently. The honest handling is to refuse an axis for those
+  adhesions, the same rule the rest of this module follows for un-measured
+  quantities.
+- **The PSF is not constant.** It grows and distorts with depth in a thick
+  sample, which is the same optical problem already recorded as [P03](#p03) and
+  [P06](#p06). A single `C_psf` for the whole stack is an approximation whose
+  error is worst exactly where the depth confound already is.
+
+Related: [P58](#p58) (the defect this would fix), [P56](#p56) (the axial/lateral
+estimate), [P03](#p03) / [P06](#p06) (depth dependence of the same optics).
+
+---
+
+## P62 — "Load all saved" turned a never-saved artifact into a traceback, and its fibroblast step had been dead for weeks
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-09-04 |
+| **Severity** | S3 — (a) cosmetic but misleading; (b) a step of "Load all" that silently did nothing |
+| **Opened** | 2026-09-04 (reported from the viewer: a `FileNotFoundError` traceback during "Load all" on `04step_002`) |
+| **Last verified** | 2026-09-04 |
+| **Resolved** | 2026-09-04 |
+| **Where** | `pipeline/gui/widgets.py::skip_if_missing`; the twelve `_load_*` closures in `nuclei.py`, `cadherin.py`, `cadherin_rf.py`, `adhesion_rf.py`, `vessel_mesh.py`; the comment at `loader.py::_LOADERS` |
+
+**(a) The guard existed in one loader of twelve.** `loader.py`'s "Load all
+saved" comment states the contract — *"each loader … reports a missing file
+itself, so features that were never saved are just skipped"* — and only
+`nuclei.py::_load_nuc` honoured it, with an inline `Path(path).exists()` check
+and a comment saying exactly why. The other eleven did not.
+
+For the five that read inside a `thread_worker` that is not merely untidy. A
+worker built without a `connect=` dict — as all five are, since they connect
+their handlers on the returned object — gets superqt's own `reraise` slot
+attached to `errored` (`superqt/utils/_qthreading.py:612`), so a missing file
+arrives as a full IPython-style traceback **and** a napari error popup. The
+tab's `_err` still ran and `with_after` still advanced the chain, so nothing was
+actually broken; it just did not read that way. The report was
+`clover_ruby_ratio.npy` — an artifact that only exists if you press two buttons
+that nobody had pressed for that image.
+
+**(b) `_load_fib` had raised `NameError` since `fibroblast_count_notes` was
+introduced.** `pipeline/gui/nuclei.py` calls it and never imported it; its own
+`except Exception` caught the `NameError` and printed it as a load error, so the
+"Fibroblast count" step of "Load all" had been failing on **every** image and
+every session, and `state["fibroblast_count"]` was never populated from disk.
+`measure.py` and `vessel_mesh.py` import their `saved_check` helpers; this tab
+was the one that did not. Found only because (a)'s fix made the surrounding line
+run far enough to reach it.
+
+**Fix.** One shared `widgets.skip_if_missing(path, after, label, what, hint)` —
+prints one line, calls `after`, returns True — at the top of all twelve loaders,
+with the inline copy deleted from `_load_nuc` rather than left beside it. Only a
+genuinely absent file short-circuits: a truncated, unreadable or mismatched one
+still goes down each loader's existing error path, because *missing* and
+*broken* must not print the same. Plus the missing import.
+
+Verified: all twelve skip cleanly and hand off on a folder with no artifacts
+(12/12 `after` fired, no traceback), the reported `04step_002` case prints one
+line, and `fibroblast_count.npz` now loads (27 VnTs+ of 276 nuclei).
+
+**History**
+- 2026-09-04 — opened and fixed. Same shape as [P12](#p12) and [I11](#i11): not
+  a duplicated function but **a fix applied to one path and not its eleven
+  siblings**, which is why the guard is now shared rather than pasted. (b) is
+  the more serious half and is the one that would never have been reported —
+  a step that fails inside its own `except` and prints one line among eleven
+  looks exactly like a step that had nothing to do.
+
+---
+
+## I13 — the one orientation test [P58](#p58) leaves standing: adhesion xy axis against the κ1 direction, on flat-facing wall
+
+| | |
+|---|---|
+| **Status** | idea — open. **Step 1 (feasibility) run 2026-09-04 and it passes at a permissive gate only**; steps 2–3 not started |
+| **Opened** | 2026-09-04 |
+| **Where** | step 1 is `docs/scratch/orientation/flat_patch_feasibility.py` (reads only, writes nothing). Steps 2–3 would join it, on `pipeline/adhesion_orient.py`'s existing primitives. Needs principal **directions**, which `pipeline/cell_mesh.py::mesh_curvature` does not currently return |
+
+### Why we were looking: adhesions sit on slightly flatter wall
+
+Measured 2026-09-04, all six images, curvature rebuilt at `radius_um` 50 /
+`smooth_iter` 50 and re-measured (`batch_mesh --steps curvature` +
+`batch_measure --redo-json`). AUC of each adhesion's `curv_*` against **every**
+wall vertex's, 0.5 = an adhesion sits where a random wall point does:
+
+| image | n | H | κ1 | κ2 | K |
+|---|---|---|---|---|---|
+| V3 04step_002 | 2147 | 0.558 | 0.445 | 0.571 | 0.563 |
+| V3 04step_003 | 2212 | 0.574 | 0.475 | 0.559 | 0.551 |
+| V3 09step_001 | 3053 | 0.537 | 0.428 | 0.549 | 0.562 |
+| V3b 04step_001 | 2019 | 0.594 | 0.480 | 0.594 | 0.515 |
+| V3b 04step_002 | 4049 | **0.398** | 0.469 | **0.413** | 0.467 |
+| V3b 04step_003 | 1872 | 0.480 | 0.476 | 0.476 | 0.554 |
+
+At `radius_um` 5 / `smooth_iter` 10 the same six read H 0.532 / 0.531 / 0.500 /
+0.540 / 0.407 / 0.423 and κ1 0.483 / 0.491 / 0.482 / 0.504 / 0.392 / 0.414.
+
+Read it carefully: the wall's median κ1 is **positive** and its median H, κ2 and
+K are **negative**, so "κ1 below 0.5" and "H, κ2, K above 0.5" are the *same*
+physical statement — adhesions are nearer flat. κ1 is the only one that became
+consistent across all six at 50/50 (0.428–0.480, below 0.5 everywhere); at 5/10
+it straddled. Five of six lean the same way; **V3b 04step_002, the image with
+the most adhesions, leans the other**.
+
+**This is not quotable as a result.** Effect sizes are 0.53–0.59, one image of
+six inverts, and the depth confound is live rather than ruled out: ρ(`curv_mean`,
+`centroid_z_um`) runs −0.12 / −0.17 / −0.17 / −0.37 / −0.25 / **−0.57** across
+the six, so "adhesions are on flat wall" and "adhesions are at the depth where
+the flat wall is" are the same sentence in this data. Separating them needs
+[DIRECTION §7.4](DIRECTION.md)'s U-shaped-in-z versus monotonic test, i.e.
+circumferential position from the shear profile, not this table.
+ρ(`curv_mean`, `ratio_clover_ruby`) is +0.29 to −0.35, sign-random across the
+six, exactly as [P02](#p02) predicts.
+
+### The idea
+
+Asked whether adhesion *orientation* aligns with the κ1 or κ2 direction. The
+obvious route — project the adhesion axis into the mesh's tangent plane — is
+[P58](#p58)(c) verbatim, already withdrawn: with median |e1_z| = 0.967 the
+projection removes nearly the whole vector and the residual points where the
+**wall tilts**. `lab_axis_control` returns R = 0.461 from a constant ẑ against
+the real axes' 0.170, at the same preferred angle.
+
+The escape is [P58](#p58)'s one surviving statistic: **anything measured in the
+fixed xy plane**, which a constant-ẑ control cannot even be run against. So
+restrict to wall whose tangent plane *is* the xy plane — `|n_z| > 0.9`, the flat
+top and bottom faces — and compare the adhesion's **xy** axis to the κ1
+direction, also in xy. On that patch the in-wall projection and the xy
+projection are the same operation, so it inherits the safe statistic instead of
+the contaminated one.
+
+Bonus, and the reason it is worth doing at all: on the flat top of a tube the κ1
+direction is essentially circumferential, so the test is close to a
+curvature-conditioned version of "axial or circumferential, in xy" — a question
+`adhesion_orient` can already ask with a validated null (`shuffled_axial_cos`),
+rather than a new quantity needing its own control invented.
+
+### Step 1 — feasibility, run 2026-09-04
+
+`|n_z| > 0.9` **and** κ1 − κ2 above a quantile of the whole wall's; adhesions
+gated to `dist_mesh_um < 2`. Curvature at 50/50.
+
+| image | verts | flat verts | flat % | median κ1−κ2 all | median κ1−κ2 flat |
+|---|---|---|---|---|---|
+| V3 04step_002 | 62809 | 35039 | 55.8 | 0.0180 | 0.0096 |
+| V3 04step_003 | 54945 | 34727 | 63.2 | 0.0141 | 0.0071 |
+| V3 09step_001 | 67384 | 37690 | 55.9 | 0.0167 | 0.0081 |
+| V3b 04step_001 | 54473 | 35726 | 65.6 | 0.0158 | 0.0082 |
+| V3b 04step_002 | 46375 | 22460 | 48.4 | 0.0194 | 0.0086 |
+| V3b 04step_003 | 35797 | 14735 | 41.2 | 0.0266 | 0.0131 |
+
+| image | on wall | + flat | + κ1−κ2 > q50 | > q75 | > q90 |
+|---|---|---|---|---|---|
+| V3 04step_002 | 1709 | 1386 | 335 | 18 | 0 |
+| V3 04step_003 | 1678 | 1433 | 383 | 21 | 0 |
+| V3 09step_001 | 2266 | 1698 | 330 | 15 | 4 |
+| V3b 04step_001 | 1817 | 1649 | 407 | 7 | 0 |
+| V3b 04step_002 | 1870 | 1182 | 248 | 64 | 0 |
+| V3b 04step_003 | 701 | 496 | 114 | 24 | 19 |
+
+**The two gates conflict exactly as predicted, but not fatally.** The flat wall
+is 41–66% of the surface and its curvature anisotropy is ~half the whole wall's
+— the umbilic problem, showing up where the principal direction is least
+defined. 250–400 adhesions per image survive at the median gate, which is enough
+to run an axial resultant against a shuffle null. Above q75 it collapses to
+7–64; above q90 it is essentially zero on four of six. **Viable permissive, dead
+strict.**
+
+### What step 1 does not settle
+
+- **A quantile is not a physical criterion.** "κ1 − κ2 above the wall median"
+  does not establish that the principal *direction* is stable there. The real
+  test is whether the direction agrees between neighbouring vertices, or between
+  two fit radii — and that needs the directions, which is step 2. So step 1
+  cannot rule out that the surviving 335 points still carry noise-driven
+  directions.
+- **It is on the 50/50 curvature**, smoothed over 50 µm, so the "principal
+  direction" describes vessel-scale shape and not the few-µm patch the adhesion
+  occupies. That may be the interesting comparison, but it is a choice and must
+  be stated. Step 1 would read differently at 5/10 — a noisier fit inflates
+  apparent anisotropy and would loosen the gate for the wrong reason.
+
+### If it is picked up: steps 2 and 3
+
+2. Compute the principal directions **in-process**, no schema change:
+   `mesh_curvature` keeps only `np.linalg.eigvals(S)`; the directions are that
+   fit's eigenvectors mapped back through `t1`/`t2` into 3D. Note `S` is the
+   shape operator in a non-orthonormal basis and is **not symmetric** — `eigh`
+   is wrong there. Then check neighbour-to-neighbour direction stability on the
+   surviving patch, and stop if it fails.
+3. Only then the alignment statistic, reported against `shuffled_axial_cos`
+   (the same axes paired with the wrong patches) and **never** against the
+   isotropic constant 2/π — that constant is the second arithmetic error
+   [P58](#p58) records. Repeat on all six before saying anything.
+
+Persisting the directions would be a fourth step and a coordinated schema
+change: `CURV_KEYS` is pinned to the four names across `saved_io`,
+`saved_check.curvature_notes`, `measure_core` and `saved_io_check`. Do not start
+there.
+
+### Context
+
+The flatness question surfaced while fixing the curvature layer's colour scale
+(`pipeline/gui/vessel_mesh.py::_show_curvature`, 2026-09-04): it stretched
+2nd–98th percentile on `turbo`, so on a mostly-flat wall with strongly negative
+sides **zero landed at the red end** and flat wall, dents and creases all drew
+the same colour. Now symmetric about 0 at ±p98 of |curvature| on a diverging
+map, which is what made "the sides read one way, the flat top another" legible
+in the first place.
+
+Related: [P58](#p58) (the defect that rules out the obvious route), [I12](#i12)
+(the only real fix for it), [P24](#p24) (curvature tracks the fit radius rather
+than settling), [P02](#p02) (why `ratio_clover_ruby` correlates with nothing).

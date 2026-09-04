@@ -80,7 +80,8 @@ PER_IMAGE_KEYS = (
     "clover_raw_native", "ruby_raw_native", "force_vol",
     "adhesion_proba", "clover_ruby_ratio", "vessel_graph",
     "vessel_lumen_field", "vessel_mesh_cache",
-    "measure_result", "dapi_mask_layer", "cadh_mask_layer",
+    "measure_result", "adhesion_orient",
+    "dapi_mask_layer", "cadh_mask_layer",
     "clover_mask_layer", "fibroblast_count",
 )
 

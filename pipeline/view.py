@@ -18,6 +18,7 @@ from qtpy.QtWidgets import (
     QScrollArea, QTabWidget, QWidget, QVBoxLayout)
 
 from .gui import (
+    adhesion_orient,
     adhesion_rf,
     cadherin,
     cadherin_rf,
@@ -138,6 +139,8 @@ def main() -> None:
     tabs.addTab(_wrap(list(vessel_mesh.build(state, viewer))), "Vessel mesh")
     tabs.addTab(_wrap([clover.build(state, viewer)]), "Clover")
     tabs.addTab(_wrap([adhesion_rf.build(state, viewer)]), "Adhesion RF")
+    tabs.addTab(_wrap(list(adhesion_orient.build(state, viewer))),
+                "Adhesion orient")
     tabs.addTab(_wrap([roi.build(state, viewer)]), "ROI")
     tabs.addTab(_wrap(list(measure.build(state, viewer))), "Measure")
 

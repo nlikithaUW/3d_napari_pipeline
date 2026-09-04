@@ -101,6 +101,7 @@ true of the code and data on that date and may not be true now.
 | [I06](#i06) | Oriented-point implicit reconstruction — the plan of record | idea | **in progress — `alpha 3D solid -> poisson` is the direction of record as of 2026-08-21**, visually confirmed; three refinements open (bumps, runtime, Open3D) |
 | [I07](#i07) | Local thresholding on the clover channel | idea | **closed 2026-08-25 — premise refuted.** The gate was never binding; it is [P43](#p43)-removed, and [P03](#p03) is unaffected |
 | [I08](#i08) | "Refine with cadherin" is a dead end and should be removed | idea | open — **superseded by [I06](#i06); sole consumer of [P34](#p34)'s centroids** |
+| [I11](#i11) | The `_saved` schema had no owner — filenames and member keys re-typed at every writer and reader | idea | **done** 2026-09-03 — `pipeline/saved_io.py`; `owner_check.py` makes a second writer impossible to add by accident |
 | [P32](#p32) | The fitted surface is placed below the far wall — one global iso-level cannot hold both walls | **S1** | open — **cause corrected 2026-09-02**; the wall is present and the surface misses it. One fix built and **measured not to work** (far-wall fill, off by default). Images 4/5 set aside; **image 6 is affected mildly and is not** |
 | [P33](#p33) | `sauvola_mask` cast to float32 on the host, doubling the PCIe transfer | S3 | **fixed** — now at parity with niblack, bit-identical |
 | [P34](#p34) | Cadherin tab computed per-component centroids eagerly for an off-path consumer | S3 | **fixed** — 34.45 s -> 0 at `floor_k` 3.0 |
@@ -127,6 +128,7 @@ true of the code and data on that date and may not be true now.
 | [P55](#p55) | Every headless-saved `cadherin_labels.npz` is unloadable — the lazy fields were pickled `None` | S3 | **fixed** 2026-09-02 — `np.asarray(None)` is a 0-d object array; the three fields had no reader and are no longer written, files already on disk load unchanged |
 | [P53](#p53) | 61% of the wall points carrying a shear number are not standing on measured wall, and the existing flags do not catch it | **S1** | open — **measured 2026-09-02 on image 6**; one 180 µm stretch is sound, one whole branch is not; the τ *range* survives the filter |
 | [P54](#p54) | "Suggest alpha" and the `alpha3d_um` guard contradict each other on every V3 image — the button's value always trips the warning | S3 | open — **measured 2026-09-02**; suggest gives 9.5–10.0 at `subsample_um` 5.0, the guard demands ≥ 15.0. Both meshes are good; it is the advice that is broken |
+| [P57](#p57) | `vessel_graph.npz` silently dropped six scalars on every save, and the two paths disagreed about the file | S3 | **fixed** 2026-09-03 — the array filter does not match a Python `int`; the GUI refilled them with 0 and the headless reader did not. A report, not a measurement |
 | [P56](#p56) | z upsampling modulates background noise 45% with a 5.2 µm period — visible as lines in xz/yz | S4 | **closed — immaterial** 2026-09-03 — all of it is sub-`min_size` speckle (2.65× raw → 1.10 at `min_size` 25); the wall never had it, and the z-elongated adhesions are the PSF (2.80 µm axial vs 1.30 µm lateral, in the raw TIFF) |
 | [H01](#h01) | Repository has no LICENSE | — | open |
 | [H02](#h02) | `adhesion_rf.joblib` is a pickle against an unpinned scikit-learn | — | open |
@@ -2085,6 +2087,25 @@ should not share a commit with behaviour changes. **Deliberately deferred.**
   *measurement* is still duplicated. Extracting it remains deferred, and the
   argument for doing it is now stronger than it was — each fix to this pipeline
   costs two edits and risks a third divergence.
+
+- 2026-09-03 — **the persistence half is done; the measurement half is not.**
+  Five more byte-identical copies were collapsed (`bs_per_z` ×3, `CSV_COLUMNS`
+  ×2, `export_meta` ×2, `RUN_STEPS` ×2, the session `state` dict ×3), and then
+  [I11](#i11) gave the `_saved` schema one owner in `pipeline/saved_io.py` —
+  which removed the last *pair of writers* in the project: `vessel_mesh`,
+  `vessel_curvature`, `vessel_graph` and `vessel_shear` each had two, and
+  `adhesion_instances` three. What makes this different from the 2026-08-22
+  entry above is that it is **no longer a matter of remembering**:
+  `docs/scratch/persist/owner_check.py` fails if a second writer appears at all.
+  [P57](#p57) is what the old arrangement had already cost, found while planning
+  this and fixed in its own commit afterwards.
+
+  **This entry still stands.** The ROI divergence is untouched and
+  `compute_measurements` is still duplicated against `gui/measure.py::_run`.
+  What has changed is that everything *around* the measurement — the checks
+  (2026-08-22), the columns and the export contract, and now the file format —
+  is shared, so the remaining duplication is smaller and more sharply defined
+  than it was.
 
 ---
 
@@ -7956,3 +7977,156 @@ the way [P46](#p46)'s wall change did, in exchange for nothing measured:
   `build_mesh` consumes and closed as immaterial the same day. The user's
   question — "does the banding matter though, if it only affects the noise level
   in background?" — is what forced the second measurement.
+
+## P57 — `vessel_graph.npz` silently dropped six scalars on every save, and the two paths disagreed about the file
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-09-03 |
+| **Severity** | S3 — a wrong *report*, not a wrong measurement; no CSV column changes |
+| **Opened** | 2026-09-03 (found while planning [I11](#i11)) |
+| **Last verified** | 2026-09-03 (all six `_saved` folders) |
+| **Resolved** | 2026-09-03 |
+| **Where** | `pipeline/saved_io.py::save_graph`; previously `gui/vessel_mesh.py::_save_path_curv` and `batch_mesh.py` (the `pp` write) |
+
+Both writers of the centerline graph filtered the dict to arrays:
+
+```python
+np.savez_compressed(path, **{k: v for k, v in g.items()
+                             if isinstance(v, np.ndarray)})
+```
+
+`lumen_graph` puts **six Python scalars** in that dict — `n_junctions`,
+`n_endpoints`, `n_crop_endpoints`, `n_terminus_endpoints`, `total_length_um`
+(`lumen_graph.py`, the block that also writes the "N edge(s), M junction(s)"
+note) and `lumen_volume_um3`. An `int` is not an `ndarray`, so **every one was
+discarded on every save, from both paths**, since the two were the same
+expression typed twice.
+
+**The cost was a GUI/headless disagreement about one file.** The tab refilled
+the missing keys with `0` on load; the headless reader left them absent. So the
+same `vessel_graph.npz` produced two different dicts depending on who opened it.
+`saved_check.graph_notes` had already written down what that is worth, in its
+own comment:
+
+> *"a `graph.get("n_junctions", 0)` default of 0 silently reported 'no junction'
+> on a branched vessel loaded from disk."*
+
+That comment is why `graph_notes` counts junctions from `node_kind` instead of
+reading the scalar — a correct workaround for a defect nobody had written down.
+
+**`save_shear` solved the identical problem correctly, one function away**, by
+promoting its scalar explicitly (`max_dist_um=np.float64(...)`). Two strategies
+for one problem, one of them already wrong, in adjacent code.
+
+**Fix.** `saved_io.GRAPH_SCALARS` names the six with a pinned dtype each
+(`np.int64` ×4, `np.float64` ×2) and `save_graph` promotes them. Pinned, not
+bare `int`/`float`: `np.savez` stores a Python int as the platform `int_`, so
+leaving them bare would make the stored dtype depend on which machine wrote the
+file. A scalar the caller does not supply is still **not written**, rather than
+written as a zero.
+
+`load_graph` fabricates no defaults, and the GUI's `setdefault(k, 0)` was
+removed in the same commit — that `0` is exactly the fabricated number
+`CLAUDE.md` forbids reporting. `graph_notes` **keeps** its array-recount
+fallback and it is not dead code: every folder on disk predates this fix and has
+none of the scalars, so recounting is what keeps those folders correct. The fix
+makes it the old-file path, not a redundant one.
+
+**Verified** on a real rebuild (`batch_mesh --steps mesh,graph --tag p57`, image
+`V3_..._04step_002`): the new file carries 6/6 with the intended dtypes, the
+recount from `node_kind` agrees with the stored `n_junctions` (1 == 1), the six
+pre-existing folders still read at 0/6 and still report correctly, and
+`describe_saved` over all six is unchanged.
+
+**History**
+- 2026-09-03 — opened and fixed. Found while planning [I11](#i11), not by a
+  failure: reading the two writers side by side to merge them is what made the
+  dropped scalars visible. Fixed in its own commit *after* the reorg, so that
+  "the reorg changed nothing" stayed a measurement rather than an argument.
+
+---
+
+## I11 — the `_saved` schema had no owner
+
+| | |
+|---|---|
+| **Status** | **done** 2026-09-03 |
+| **Opened** | 2026-09-03 |
+| **Where** | `pipeline/saved_io.py`; `docs/scratch/persist/{owner_check,saved_io_check,gui_paths_check}.py` |
+| **Relates to** | [P11](#p11), [P12](#p12), [P57](#p57) |
+
+Each artifact's filename and member keys were re-typed at every writer and every
+reader. `("mean","k1","k2","gaussian")` appeared in **nine** places across eight
+files — while `saved_check.py` defined `CURV_KEYS` for exactly this and was the
+only module using it. `vessel_mesh`, `vessel_curvature`, `vessel_graph` and
+`vessel_shear` each had **two writers** (the Vessel Mesh tab and
+`batch_mesh.run_one`) that were the same expression typed twice;
+`adhesion_instances` had three. Filename strings were duplicated 4–11 times each.
+
+Nothing enforced agreement. A key added to one writer and forgotten in the other
+yields a `_saved` folder that loads fine, measures fine, and exports a CSV with
+one column quietly blank — [P12](#p12)'s failure mode. The only safeguard was a
+comment asking a future editor to remember. [P57](#p57) is what that had already
+cost.
+
+**What landed.** `pipeline/saved_io.py`: names as a table, I/O hand-written per
+artifact. The names are data because two consumers need them as data —
+`batch_mesh` composes tagged siblings, and `describe_saved` matches filenames
+while never calling a loader. The I/O is *not* a table: a generic writer would
+need compressed-or-not, a dtype cast, a member filter, a scalar promotion, an
+optional member, `allow_pickle`, and two different fallbacks for one missing key
+— seven option axes for twelve artifacts, a table bigger than the functions and
+precisely the abstraction-for-hypothetical-cases that sank the previous
+pipeline.
+
+Three reader divergences were decided individually rather than unified by
+reflex: `vessel_mesh`'s `faces` fallback **kept both** behaviours (`None` is
+what raises [P09a](#p09)'s warning in `batch_measure`, while `batch_mesh` needs
+an array for curvature); `vessel_curvature` unified on the **guarded** read,
+removing a real divergence where a partial file made the GUI load nothing while
+headless loaded three of four; `fibroblast_count` unified on the **tolerant**
+loop, because `int(fc[k])` on an array member turned a slightly-different file
+into a hard failure of a whole image.
+
+**The deliverable is the enforcement, not the tidiness.**
+`docs/scratch/persist/owner_check.py` AST-scans `pipeline/` and `Scripts/` and
+fails on any `_saved` filename literal or numpy array-I/O call outside
+`saved_io.py` (docstrings excepted — one cannot be an f-string; two narrow
+header-only allowances in `saved_check`, which reads `.npy` headers without
+inflating payloads). Drift here is now structural rather than disciplinary.
+
+**Verification** (no unit tests exist; the convention is standalone PASS/FAIL
+scripts under `docs/scratch/`):
+
+- `saved_io_check.py` — 293 checks PASS. Schema pinned to literals **transcribed
+  by hand from the files on disk** (deriving them from the code would prove
+  nothing), round-trip with exact dtypes, and a read of all six real folders
+  plus their tagged siblings.
+- `owner_check.py` — PASS; 95 filename literals before, 0 after.
+- `gui_paths_check.py` — 10 tabs built offscreen, 13 path widgets, all resolve
+  inside `<stem>_saved`. This is what caught `cadherin_junction_proba.npy` being
+  written to the process CWD (that tab had *zero* registrations).
+- `describe_saved` over the six folders — **ZERO DIFF** at every commit.
+- `batch_measure` end-to-end — CSV **byte-identical** to the pre-reorg baseline,
+  which was itself first shown deterministic by running it twice at HEAD.
+- `batch_mesh --steps mesh,curvature,graph --shear` on two images — the fresh
+  archives match the canonical files **member for member, in the same archive
+  order**, by sha256.
+
+`writer_equivalence.py`, which pinned the two writers of each vessel artifact to
+each other, recorded a final PASS at the parent of the writer merge and was then
+deleted: once there is one writer, the thing worth enforcing is that a second
+cannot appear.
+
+Two things deliberately **not** tidied, both recorded so a later pass does not
+"fix" them: `np.savez` vs `savez_compressed` is per-artifact (unifying changes
+every file's bytes and costs real time on a huge mesh, and a contents-equality
+check cannot catch it), and scalar dtypes are pinned as literals rather than
+promoted to look consistent.
+
+**History**
+- 2026-09-03 — opened and done, in six commits (module, names, readers, writers,
+  [P57](#p57), the CWD registration). Readers before writers because a reader
+  change is verifiable immediately against six real folders while a writer
+  change is only verifiable by producing new files.

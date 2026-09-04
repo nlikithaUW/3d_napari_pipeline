@@ -326,6 +326,46 @@ where the fibroblasts are.
   GUI and the headless path call these, so a warning is one string, not two that
   drift apart. Also `describe_saved`, behind `batch_measure --check-only` and
   `batch_mesh --check-only`.
+- `saved_io.py` — **the single owner of what a `<stem>_saved` folder holds**:
+  filenames, member keys, dtypes. numpy + pathlib only, and deliberately
+  **voxel-unaware** — an I/O layer that knows about voxels is the first step
+  back toward the tangle. It **pairs with `saved_check.py`**: this module says
+  what is in a file, that one says whether what is in it is trustworthy, and
+  neither prints. Before it, every artifact's schema was re-typed at each writer
+  and each reader — `("mean","k1","k2","gaussian")` in nine places across eight
+  files, and the four vessel artifacts with **two writers each** (the Vessel
+  Mesh tab and `batch_mesh.run_one`) that were the same expression typed twice.
+  Nothing made them agree, which is [P12](docs/ISSUES.md#p12)'s failure mode
+  exactly: a key added to one and forgotten in the other gives a folder that
+  loads fine, measures fine, and exports a CSV with one column quietly blank.
+  **Names are a table; I/O is hand-written per artifact.** The names are data
+  because two consumers need them as data — `batch_mesh` composes tagged
+  siblings (`vessel_mesh__ds.npz`), and `describe_saved` matches filenames while
+  **never calling a loader**, reading `.npy` headers so a pre-flight does not
+  inflate hundreds of MB. The I/O is not a table: a generic writer would need
+  seven option axes for twelve artifacts, which is a table bigger than the
+  functions and the abstraction-for-hypothetical-cases this project was rewritten
+  to avoid. So the awkward cases keep their logic visibly —
+  `load_cadherin_labels` is the **only** loader setting `allow_pickle` (pre-P55
+  files stored three PCA fields as pickled `None`), `load_graph` and `load_shear`
+  pass `False` as a safety property, and `has_normals` is header-only because
+  `nuc_side` must not inflate a multi-million-vertex mesh to answer a yes/no.
+  Loaders return **materialised arrays, never an open `NpzFile`**.
+  Two things that look tidyable and are not: **`np.savez` vs `savez_compressed`
+  is per-artifact** (`vessel_mesh` and `fibroblast_count` are uncompressed;
+  unifying changes every file's bytes and costs real time on a huge mesh, and a
+  contents-equality check will not catch it), and **scalar dtypes are pinned**
+  because `np.savez` stores a bare Python int as the platform `int_`.
+  **The anti-drift guarantee is structural, not disciplinary:**
+  `docs/scratch/persist/owner_check.py` AST-scans `pipeline/` and `Scripts/` and
+  fails if any `_saved` filename literal or numpy array-I/O call appears outside
+  this module (docstrings excepted; two narrow header-only allowances in
+  `saved_check`). A second writer can no longer be added by accident.
+  Its companions are `saved_io_check.py` (schema pinned to literals transcribed
+  from the files on disk, plus round-trip and a read of all six real folders) and
+  `gui_paths_check.py` (every `save_path_widgets` field resolves inside
+  `<stem>_saved` — the only coverage that registration has, and the check that
+  catches an artifact being written to the CWD).
 - `batch.py`, `batch_measure.py`, `batch_mesh.py`, `batch_postprocess.py` —
   headless runners. **`batch.py --steps`** re-runs part of the pipeline —
   `all`, a comma-separated list, or a `first:last` range over

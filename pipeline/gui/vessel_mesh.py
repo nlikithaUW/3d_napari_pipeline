@@ -722,7 +722,22 @@ def build(state, viewer) -> list:
             return
         vals = np.asarray(curv[key], dtype=float)
         finite = vals[np.isfinite(vals)]
-        lo, hi = (np.percentile(finite, [2, 98]) if finite.size else (0.0, 1.0))
+        # Symmetric about zero, on a diverging colormap, because on curvature
+        # the *sign* is the reading: convex-outward is +, a dent is -, flat is
+        # 0. The old 2-98 percentile stretch put the top of the scale wherever
+        # this mesh's own distribution happened to end, so on a surface that is
+        # mostly flat with strongly negative sides, zero landed at the red end
+        # -- the flat top and the real creases came out the same colour. The
+        # half-range is the 98th percentile of |curvature| so a few wild
+        # vertices cannot flatten everything else to the midpoint.
+        lim = float(np.percentile(np.abs(finite), 98)) if finite.size else 1.0
+        if not np.isfinite(lim) or lim <= 0.0:
+            lim = 1.0
+        lo, hi = -lim, lim
+        print(f"  {curv_measure_w.value}: colour scale ±{lim:.4f} 1/µm "
+              f"(pale = 0, red = +/convex-outward, blue = -; note "
+              f"twilight_shifted is cyclic, so both extremes run to the same "
+              f"dark purple).", flush=True)
         # Interior/rank-deficient vertices are NaN and belong to no face, but
         # vispy still buffers every vertex value — replace NaN with the median.
         fill = float(np.median(finite)) if finite.size else 0.0
@@ -731,7 +746,7 @@ def build(state, viewer) -> list:
             viewer.layers.remove(CURV_LAYER)
         lyr = viewer.add_surface(
             finite_surface(verts, faces, vals), name=CURV_LAYER,
-            colormap="turbo", blending="translucent", opacity=0.9,
+            colormap="twilight_shifted", blending="translucent", opacity=0.9,
         )
         try:
             lyr.contrast_limits = (float(lo), float(hi))

@@ -191,6 +191,13 @@ def build(state, viewer) -> Container:
                                label="run_cadherin_rf_predict"))
     state["load_cadherin_proba"] = _load_proba
 
+    # This tab had NO save_path_widgets registration at all, so the junction
+    # proba was written to the process CWD instead of <stem>_saved -- which
+    # never errors, it just puts the file somewhere nobody looks. Every other
+    # tab registers its path fields here; this one was simply missed.
+    state.setdefault("save_path_widgets", []).append(
+        (proba_path_w, sio.filename(sio.CADHERIN_JUNCTION_PROBA)))
+
     return Container(widgets=[
         create_label_w, n_estimators_w, train_w, predict_w,
         model_path_w, save_model_w, load_model_w,

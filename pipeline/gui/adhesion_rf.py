@@ -318,7 +318,7 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            return np.load(path)
+            return sio.load_proba(path)
 
         def _done(proba):
             clover_raw = state.get("clover_raw")
@@ -516,7 +516,7 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            return np.load(path)["instances"].astype(np.int32)
+            return sio.load_instances(path).astype(np.int32)
 
         def _done(vol):
             if INST_LAYER in [l.name for l in viewer.layers]:
@@ -707,7 +707,7 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            return np.load(path)
+            return sio.load_ratio(path)
 
         def _done(vol):
             ml = levels > 1

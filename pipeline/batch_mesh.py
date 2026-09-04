@@ -743,9 +743,8 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                               f"image has not been through the Cadherin step; "
                               f"{_existing_mesh_note(mesh_out)}."]
         t = time.perf_counter()
-        with np.load(cadh) as d:
-            labels = d["labels"]
-            sizes = d["sizes"]
+        _cadh = sio.load_cadherin_labels(cadh)
+        labels, sizes = _cadh.labels, _cadh.sizes
         labels_meta = {"file": cadh.name, "mtime": _mtime(cadh),
                        "bytes": cadh.stat().st_size,
                        "shape": [int(n) for n in labels.shape],
@@ -964,14 +963,15 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
         if not src.exists():
             return "failed", [f"no {src.name} to compute {what} from — run "
                               f"--steps mesh first."]
-        with np.load(src) as d:
-            verts = d["verts"]
-            faces = d["faces"] if "faces" in d else np.zeros((0, 3), np.int64)
-            # An additive key, so a mesh written before this method existed
-            # still loads (the same pattern `z_um` uses in the path-curvature
-            # npz). Absent means "derive the normals", which is right for every
-            # closed-ish method.
-            normals = d["normals"] if "normals" in d.files else None
+        _m = sio.load_mesh(src)
+        verts = _m.verts
+        # An empty array, not the `None` `load_mesh` returns: curvature is
+        # about to be fitted and needs something to index. `batch_measure`
+        # keeps the `None`, because there it is what raises P09a's warning.
+        faces = _m.faces if _m.faces is not None else np.zeros((0, 3), np.int64)
+        # `normals` absent means "derive them", which is right for every
+        # closed-ish method; only the Poisson family stores its own.
+        normals = _m.normals
         recon["mesh_input"] = src.name
         _p(f"{what} source: {src.name} ({len(verts):,} verts, "
            f"{len(faces):,} faces)")

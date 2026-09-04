@@ -423,14 +423,12 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            # allow_pickle: files written before P55 stored the three
-            # unmaterialised PCA fields as pickled `None`, and there are such
-            # files on disk. They are this pipeline's own artifacts, and
-            # `_lazy_in` throws away anything that is not a plain array.
-            with np.load(path, allow_pickle=True) as d:
-                return (d["labels"].astype(np.int32), d["sizes"],
-                        _lazy_in(d, "centroids"), _lazy_in(d, "normals"),
-                        _lazy_in(d, "label_ids"))
+            # `load_cadherin_labels` is the one loader that sets
+            # allow_pickle, for the pre-P55 files that stored the three PCA
+            # fields as pickled `None`; it hands them back as None.
+            d = sio.load_cadherin_labels(path)
+            return (d.labels.astype(np.int32), d.sizes,
+                    d.centroids, d.normals, d.label_ids)
 
         def _done(result):
             labels, sizes, centroids, normals, lids = result

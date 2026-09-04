@@ -116,8 +116,8 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            d = np.load(path)
-            return d["labels"].astype(np.int32), d["sizes"]
+            d = sio.load_dapi_labels(path)
+            return d.labels.astype(np.int32), d.sizes
 
         def _done(result):
             labels, sizes = result
@@ -361,9 +361,8 @@ def build(state, viewer) -> Container:
 
         @thread_worker
         def _run():
-            d = np.load(path)
-            return (d["labels"], d["sizes"], d["ids"], d["is_fib"],
-                    int(d["min_size_vox"]) if "min_size_vox" in d.files else 0)
+            d = sio.load_nuclei_split(path)
+            return (d.labels, d.sizes, d.ids, d.is_fib, d.min_size_vox)
 
         def _done(result):
             labels, sizes, ids, is_fib, min_size_vox = result
@@ -428,12 +427,15 @@ def build(state, viewer) -> Container:
     def _load_fib(*_, after=None, visible=True):
         path = str(fib_path_w.value)
         try:
-            d = np.load(path)
-            fc = {"total": int(d["total"]), "fibroblast": int(d["fibroblast"]),
-                  "other": int(d["other"]), "threshold": float(d["threshold"])}
+            fc, skipped = sio.load_fibroblast_count(path)
             state["fibroblast_count"] = fc
-            print(f"Loaded fibroblast count <- {path}: {fc['fibroblast']} VnTs+ "
-                  f"of {fc['total']} nuclei.", flush=True)
+            for n in fibroblast_count_notes(skipped):
+                print(f"  {n}", flush=True)
+            # `.get(k, "?")`, never a 0 default: a fabricated count is a
+            # reported number that is not meaningful.
+            print(f"Loaded fibroblast count <- {path}: "
+                  f"{fc.get('fibroblast', '?')} VnTs+ "
+                  f"of {fc.get('total', '?')} nuclei.", flush=True)
         except Exception as exc:
             print(f"Load fibroblast count error: {exc}", flush=True)
         finally:

@@ -66,7 +66,7 @@ def main() -> None:
     for saved in targets:
         try:
             print(f"  {saved.name} ...", flush=True)
-            proba = np.load(sio.path(saved, sio.ADHESION_PROBA))
+            proba = sio.load_proba(sio.path(saved, sio.ADHESION_PROBA))
             binary = (proba >= T).astype(np.uint8)
             labels = instance_labels_3d(binary, args.min_size, True,
                                         args.split_min)

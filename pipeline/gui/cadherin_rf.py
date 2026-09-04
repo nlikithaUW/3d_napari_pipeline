@@ -164,7 +164,7 @@ def build(state, viewer) -> Container:
 
     def _load_proba(*_):
         try:
-            proba = np.load(str(proba_path_w.value))
+            proba = sio.load_junction_proba(str(proba_path_w.value))
         except Exception as exc:
             print(f"Load proba error: {exc}", flush=True)
             return

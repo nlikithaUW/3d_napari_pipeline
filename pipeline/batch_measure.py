@@ -48,7 +48,7 @@ from .measure_core import (
     compute_measurements, export_meta,
 )
 from .rf import instance_labels_3d
-from .saved_check import describe_saved
+from .saved_check import describe_saved, fibroblast_count_notes
 from . import saved_io as sio
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -126,12 +126,12 @@ def _standard_instances(saved: Path, rewrite: bool = False):
     if not proba_path.exists():
         _p(f"WARN: no {proba_path.name} — measuring the saved instances "
            f"as-is; they may be a stale, non-standard labeling.")
-        return np.load(sio.path(saved, sio.ADHESION_INSTANCES))["instances"]
+        return sio.load_instances(sio.path(saved, sio.ADHESION_INSTANCES))
     T = int(round(STD_POSTPROCESS["prob_threshold"] * 255))
     _p(f"recompute standard instances from proba (T={T}, min="
        f"{STD_POSTPROCESS['min_size_vox']}, split ON, "
        f"split_min={STD_POSTPROCESS['split_min_size_vox']})")
-    proba = np.load(proba_path)
+    proba = sio.load_proba(proba_path)
     binary = (proba >= T).astype(np.uint8)
     del proba
     labels = instance_labels_3d(binary, STD_POSTPROCESS["min_size_vox"], True,
@@ -148,7 +148,7 @@ def _standard_instances(saved: Path, rewrite: bool = False):
         n_old = None
         if inst_path.exists():
             try:
-                n_old = int(np.load(inst_path)["instances"].max())
+                n_old = int(sio.load_instances(inst_path).max())
             except Exception as exc:
                 _p(f"WARN: could not read {inst_path.name} to compare ({exc})")
         if n_old is not None and n_old != n_new:
@@ -174,15 +174,17 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     if use_saved:
         _p(f"using saved {sio.filename(sio.ADHESION_INSTANCES)} as-is "
            f"(--use-saved-instances)")
-        labels = np.load(sio.path(saved, sio.ADHESION_INSTANCES))["instances"]
+        labels = sio.load_instances(sio.path(saved, sio.ADHESION_INSTANCES))
     else:
         labels = _standard_instances(saved, rewrite=rewrite_instances)
-    with np.load(sio.path(saved, sio.VESSEL_MESH)) as _vm:
-        vessel_verts = _vm["verts"]
-        # Faces are what restrict dist_mesh_um to the mesh surface (P09a). A
-        # folder whose npz predates them still measures, to every vertex, and
-        # warns rather than silently reading short.
-        vessel_faces = _vm["faces"] if "faces" in _vm else None
+    # Faces are what restrict dist_mesh_um to the mesh surface (P09a). A
+    # folder whose npz predates them still measures, to every vertex, and
+    # warns rather than silently reading short — so the `None` is passed
+    # through rather than substituted, because `None` is what triggers that
+    # warning. `batch_mesh` substitutes an empty array instead; both are
+    # right for their caller, and unifying them would silence P09a here.
+    _mesh = sio.load_mesh(sio.path(saved, sio.VESSEL_MESH))
+    vessel_verts, vessel_faces = _mesh.verts, _mesh.faces
 
     # Nucleus map: the watershed-split nuclei when they exist, else the unsplit
     # DAPI components (P04). The fallback is the backward-compatible path for a
@@ -192,15 +194,16 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     nuc_ids = nuc_is_fib = None
     nuc_split = sio.path(saved, sio.NUCLEI_SPLIT)
     if nuc_split.exists():
-        ns = np.load(nuc_split)
-        dapi_labels = ns["labels"]
-        nuc_ids, nuc_is_fib = ns["ids"], ns["is_fib"]
+        ns = sio.load_nuclei_split(nuc_split)
+        dapi_labels = ns.labels
+        nuc_ids, nuc_is_fib = ns.ids, ns.is_fib
         nucleus_map = NUCLEUS_MAP_SPLIT
         _p(f"nuclei: {np.asarray(nuc_ids).size} split nuclei, "
            f"{int(np.asarray(nuc_is_fib).sum())} VnTs+ "
            f"({nucleus_map})")
     else:
-        dapi_labels = np.load(sio.path(saved, sio.DAPI_LABELS))["labels"]
+        dapi_labels = sio.load_dapi_labels(
+            sio.path(saved, sio.DAPI_LABELS)).labels
         nucleus_map = NUCLEUS_MAP_UNSPLIT
         _p(f"WARN: no {nuc_split.name} — falling back to the UNSPLIT DAPI "
            f"components ({int(dapi_labels.max())} of them) for nuc_id and "
@@ -211,34 +214,23 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
 
     curvature = None
     if sio.path(saved, sio.VESSEL_CURVATURE).exists():
-        cv = np.load(sio.path(saved, sio.VESSEL_CURVATURE))
-        curvature = {k: cv[k] for k in sio.CURV_KEYS if k in cv.files}
+        curvature = sio.load_curvature(sio.path(saved, sio.VESSEL_CURVATURE))
     graph = None
     if sio.path(saved, sio.VESSEL_GRAPH).exists():
-        pc = np.load(sio.path(saved, sio.VESSEL_GRAPH))
-        graph = {k: pc[k] for k in pc.files}
+        graph = sio.load_graph(sio.path(saved, sio.VESSEL_GRAPH))
     # The ragged wall-shear cloud — one row per wall point, not per centerline
     # point, which is why it is a separate file. Absent unless the graph was
     # built with shear on; `wall_columns` then leaves the tau_* columns blank
     # and says so, rather than the header changing between runs.
     wall = None
     if sio.path(saved, sio.VESSEL_SHEAR).exists():
-        wz = np.load(sio.path(saved, sio.VESSEL_SHEAR))
-        wall = {k: wz[k] for k in wz.files}
+        wall = sio.load_shear(sio.path(saved, sio.VESSEL_SHEAR))
     fib = {}
     if sio.path(saved, sio.FIBROBLAST_COUNT).exists():
-        fc = np.load(sio.path(saved, sio.FIBROBLAST_COUNT))
-        # `int(fc[k])` raises TypeError on any non-scalar member, which would
-        # turn a slightly-different file into a hard failure of the whole image.
-        # Take the 0-d members and report the rest rather than dying on them.
-        for k in fc.files:
-            v = fc[k]
-            if np.ndim(v) != 0:
-                _p(f"WARN: {sio.filename(sio.FIBROBLAST_COUNT)}['{k}'] "
-                   f"has shape "
-                   f"{np.shape(v)}, expected a scalar — ignored.")
-                continue
-            fib[k] = float(v) if k == "threshold" else int(v)
+        fib, skipped = sio.load_fibroblast_count(
+            sio.path(saved, sio.FIBROBLAST_COUNT))
+        for n in fibroblast_count_notes(skipped):
+            _p(n)
 
     _p("compute_measurements")
     result = compute_measurements(labels, force_vol, vessel_verts, dapi_labels,

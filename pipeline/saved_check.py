@@ -326,6 +326,20 @@ def recon_summary(doc: dict) -> list[str]:
     return out
 
 
+def fibroblast_count_notes(skipped) -> list[str]:
+    """Notes for members of the fibroblast-count npz that are not scalars.
+
+    `saved_io.load_fibroblast_count` takes the 0-d members and reports the rest
+    rather than dying on them: `int(d[k])` raises TypeError on any array member,
+    which would turn a slightly-different file into a hard failure of a whole
+    image. The wording lives here so the GUI message and the headless one are
+    the same string rather than two that drift apart (P12).
+    """
+    name = sio.filename(sio.FIBROBLAST_COUNT)
+    return [f"WARN: {name}['{k}'] has shape {tuple(shape)}, expected a "
+            f"scalar — ignored." for k, shape in skipped]
+
+
 def volume_shape_notes(name: str, shape, ref_name: str, ref_shape) -> list[str]:
     """Generic 'these two volumes should be the same image' check."""
     a, b = tuple(shape), tuple(ref_shape)

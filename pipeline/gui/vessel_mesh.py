@@ -643,10 +643,11 @@ def build(state, viewer) -> list:
     def _load_mesh(*_, after=None, visible=True):
         path = str(mesh_path_w.value)
         try:
-            d = np.load(path)
-            verts = d["verts"]
-            faces = d["faces"]
-            normals = d["normals"] if "normals" in d.files else None
+            d = sio.load_mesh(path)
+            verts, faces, normals = d.verts, d.faces, d.normals
+            if faces is None:
+                print("Loaded vessel mesh has no faces.", flush=True)
+                return
             if len(verts) == 0 or len(faces) == 0:
                 print("Loaded vessel mesh is empty.", flush=True)
                 return
@@ -716,7 +717,14 @@ def build(state, viewer) -> list:
         faces = cache.get("faces")
         if curv is None or verts is None or faces is None:
             return
-        vals = np.asarray(curv[CURV_CHOICES[curv_measure_w.value]], dtype=float)
+        key = CURV_CHOICES[curv_measure_w.value]
+        # The guarded load can return a partial file, so the chosen measure may
+        # not be there. Skip and say so rather than raising out of a redraw.
+        if key not in curv:
+            print(f"  no '{key}' in the loaded curvature — nothing to draw for "
+                  f"{curv_measure_w.value}.", flush=True)
+            return
+        vals = np.asarray(curv[key], dtype=float)
         finite = vals[np.isfinite(vals)]
         lo, hi = (np.percentile(finite, [2, 98]) if finite.size else (0.0, 1.0))
         # Interior/rank-deficient vertices are NaN and belong to no face, but
@@ -1741,9 +1749,7 @@ def build(state, viewer) -> list:
     def _load_shear(*_, after=None, visible=True):
         path = str(shear_path_w.value)
         try:
-            with np.load(path, allow_pickle=False) as d:
-                wall = {k: d[k] for k in d.files}
-            wall["max_dist_um"] = float(wall["max_dist_um"])
+            wall = sio.load_shear(path)
             state["vessel_shear"] = wall
             if visible:
                 _show_shear()
@@ -1797,8 +1803,12 @@ def build(state, viewer) -> list:
     def _load_curv(*_, after=None, visible=True):
         path = str(curv_path_w.value)
         try:
-            d = np.load(path)
-            curv = {k: d[k] for k in sio.CURV_KEYS}
+            # Guarded, the same read the headless path uses: a partial file
+            # yields the keys it has. This tab used to name all four unguarded,
+            # so a partial file loaded *nothing* here while headless loaded
+            # three of four -- a GUI/headless divergence over a file neither
+            # could fully use. `curvature_notes` already words what is short.
+            curv = sio.load_curvature(path)
             cache = state.get("vessel_mesh_cache") or {"verts": None,
                                                        "faces": None,
                                                        "normals": None}
@@ -1854,8 +1864,7 @@ def build(state, viewer) -> list:
     def _load_path_curv(*_, after=None, visible=True):
         path = str(path_curv_path_w.value)
         try:
-            d = np.load(path, allow_pickle=False)
-            g = {k: d[k] for k in d.files}
+            g = sio.load_graph(path)
             if "points_zyx_um" not in g:
                 print(f"Load centerline graph: {path} is an old in-plane "
                       f"`{sio.VESSEL_PATH_CURVATURE_RETIRED}`, which this "

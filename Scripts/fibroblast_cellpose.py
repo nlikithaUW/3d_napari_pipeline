@@ -120,7 +120,7 @@ def _total_nuclei(saved: Path) -> int | None:
     fc = saved_io.path(saved, saved_io.FIBROBLAST_COUNT)
     if fc.exists():
         try:
-            return int(np.load(fc)["total"])
+            return int(saved_io.load_fibroblast_count(fc)[0]["total"])
         except Exception:
             return None
     return None
@@ -169,10 +169,7 @@ def _saved_wall_mask(saved, shape, voxel_raw_zyx, ds):
     f = saved_io.path(saved, saved_io.CADHERIN_LABELS)
     if not f.exists():
         return None
-    with np.load(f, allow_pickle=True) as z:
-        if "labels" not in z.files:
-            return None
-        m = z["labels"] != 0
+    m = saved_io.load_cadherin_labels(f).labels != 0
     iso = min(voxel_raw_zyx)          # io.to_isotropic targets min(voxel_zyx_um)
     nz, ny, nx = shape
     step = (voxel_raw_zyx[0] / iso,

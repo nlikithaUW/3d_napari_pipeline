@@ -106,7 +106,7 @@ def per_adhesion_channels(csv: Path):
     if not {"clover", "ruby"} <= set(st.roles):
         print("    (--channels: stack has no clover/ruby roles)")
         return None
-    labels = np.load(inst)["instances"].astype(np.int32)
+    labels = saved_io.load_instances(inst).astype(np.int32)
     clover = st.data[:, st.channels.index(st.roles["clover"])]
     ruby = st.data[:, st.channels.index(st.roles["ruby"])]
 

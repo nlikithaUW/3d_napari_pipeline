@@ -25,6 +25,7 @@ from magicgui.widgets import Container, FileEdit, PushButton, SpinBox
 from napari.qt.threading import thread_worker
 
 from ..rf import AdhesionRF
+from .. import saved_io as sio
 from .widgets import call_all, with_after
 
 LABELS_LAYER = "VE-cad boundary labels"
@@ -41,7 +42,7 @@ def build(state, viewer) -> Container:
                             mode="w")
     save_model_w = PushButton(text="Save model")
     load_model_w = PushButton(text="Load model")
-    proba_path_w = FileEdit(value="cadherin_junction_proba.npy",
+    proba_path_w = FileEdit(value=sio.filename(sio.CADHERIN_JUNCTION_PROBA),
                             label="proba_path", mode="w")
     save_proba_w = PushButton(text="Save proba")
     load_proba_w = PushButton(text="Load proba")

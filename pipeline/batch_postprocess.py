@@ -28,6 +28,7 @@ from pathlib import Path
 import numpy as np
 
 from .rf import instance_labels_3d
+from . import saved_io as sio
 
 
 def main() -> None:
@@ -45,7 +46,7 @@ def main() -> None:
 
     targets = []
     for saved in sorted(Path(args.dir).glob("*_saved")):
-        has_proba = (saved / "adhesion_proba.npy").exists()
+        has_proba = sio.path(saved, sio.ADHESION_PROBA).exists()
         has_csv = bool(list(saved.glob("*adhesion_measures*.csv")))
         has_json = bool(list(saved.glob("*_settings.json")))
         if not has_proba or has_json:
@@ -65,14 +66,15 @@ def main() -> None:
     for saved in targets:
         try:
             print(f"  {saved.name} ...", flush=True)
-            proba = np.load(saved / "adhesion_proba.npy")
+            proba = np.load(sio.path(saved, sio.ADHESION_PROBA))
             binary = (proba >= T).astype(np.uint8)
             labels = instance_labels_3d(binary, args.min_size, True,
                                         args.split_min)
             n = int(labels.max())
-            np.savez_compressed(saved / "adhesion_instances.npz",
+            np.savez_compressed(sio.path(saved, sio.ADHESION_INSTANCES),
                                 instances=labels.astype(np.int32))
-            print(f"    -> {n} adhesions; adhesion_instances.npz updated.",
+            print(f"    -> {n} adhesions; "
+                  f"{sio.filename(sio.ADHESION_INSTANCES)} updated.",
                   flush=True)
             del proba, binary, labels
         except Exception as exc:

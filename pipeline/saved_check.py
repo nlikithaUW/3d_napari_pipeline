@@ -24,7 +24,13 @@ from pathlib import Path
 
 import numpy as np
 
-CURV_KEYS = ("mean", "k1", "k2", "gaussian")
+from .saved_io import BULK as _BULK
+from .saved_io import CURV_KEYS
+from . import saved_io as sio
+
+# `CURV_KEYS` and `_BULK` now live in `saved_io`, the one owner of what a
+# `_saved` folder holds; they are re-exported here because this module's own
+# callers already import them from it.
 
 
 # --------------------------------------------------------------------------- #
@@ -189,13 +195,14 @@ def nuclei_notes(nuc_ids, nuc_is_fib, nuc_labels_max: int) -> list[str]:
     if nuc_ids is None or nuc_is_fib is None:
         return ["WARN: no per-nucleus fibroblast classification available — "
                 "nuc_is_fibroblast will be blank. Re-run 'Count fibroblasts' "
-                "to write nuclei_split.npz for this image."]
+                f"to write {sio.filename(sio.NUCLEI_SPLIT)} for this image."]
     ids = np.asarray(nuc_ids)
     is_fib = np.asarray(nuc_is_fib)
     if ids.size != is_fib.size:
         return [f"WARN: nucleus ids ({ids.size}) and classes ({is_fib.size}) "
                 f"have different lengths — nuc_is_fibroblast will be blank. "
-                f"nuclei_split.npz is inconsistent; recompute it."]
+                f"{sio.filename(sio.NUCLEI_SPLIT)} is inconsistent; "
+                f"recompute it."]
     if ids.size and int(ids.max()) > int(nuc_labels_max):
         return [f"WARN: nucleus ids run to {int(ids.max())} but the nucleus "
                 f"label volume only reaches {int(nuc_labels_max)} — "
@@ -268,7 +275,8 @@ def provenance_notes(has_mesh: bool, has_recon: bool) -> list[str]:
     it cannot say what produced it, and that should not pass unnoticed.
     """
     if has_mesh and not has_recon:
-        return ["WARN: vessel_mesh.npz has no vessel_recon.json beside it — it "
+        return [f"WARN: {sio.filename(sio.VESSEL_MESH)} has no "
+                f"{sio.filename(sio.VESSEL_RECON)} beside it — it "
                 "was built by `pipeline.batch` at the widget defaults or by "
                 "hand, and its parameters are unknown (docs/ISSUES.md P26). "
                 "Rebuild it with `python -m pipeline.batch_mesh` to record "
@@ -330,12 +338,6 @@ def volume_shape_notes(name: str, shape, ref_name: str, ref_shape) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Pre-flight description of a <stem>_saved folder
 # --------------------------------------------------------------------------- #
-
-# Files described by presence + size only: reading them means decompressing
-# hundreds of MB, and nothing here needs their contents.
-_BULK = ("adhesion_proba.npy", "adhesion_instances.npz", "dapi_labels.npz",
-         "cadherin_labels.npz")
-
 
 def _size(p: Path) -> str:
     n = p.stat().st_size
@@ -403,25 +405,27 @@ def describe_saved(path) -> list[str]:
 
     # --- vessel mesh + curvature: the pair P12 is about ---------------------
     nverts = None
-    mp = present.get("vessel_mesh.npz")
+    mesh_name = sio.filename(sio.VESSEL_MESH)
+    mp = present.get(mesh_name)
     if mp is None:
-        lines.append(f"  {'vessel_mesh.npz':<26} —  MISSING")
+        lines.append(f"  {mesh_name:<26} —  MISSING")
     else:
         shapes = _member_shapes(mp)
         vs = shapes.get("verts")
         nverts = vs[0][0] if vs else None
         nfaces = shapes.get("faces")
-        lines.append(f"  {'vessel_mesh.npz':<26} {nverts} verts, "
+        lines.append(f"  {mesh_name:<26} {nverts} verts, "
                      f"{nfaces[0][0] if nfaces else '?'} faces")
 
-    cp = present.get("vessel_curvature.npz")
+    curv_name = sio.filename(sio.VESSEL_CURVATURE)
+    cp = present.get(curv_name)
     if cp is None:
-        lines.append(f"  {'vessel_curvature.npz':<26} —  MISSING")
+        lines.append(f"  {curv_name:<26} —  MISSING")
     else:
         shapes = _member_shapes(cp)
         k1 = shapes.get("k1")
         nk = k1[0][0] if k1 else None
-        lines.append(f"  {'vessel_curvature.npz':<26} {nk} values "
+        lines.append(f"  {curv_name:<26} {nk} values "
                      f"({', '.join(sorted(shapes))})")
         if nverts is not None and nk is not None:
             # Stand-ins: only the LENGTH of these matters to the per-key check,
@@ -438,13 +442,15 @@ def describe_saved(path) -> list[str]:
             for n in curvature_notes(curv, nverts):
                 lines.append(f"  {n}")
 
-    gp = present.get("vessel_graph.npz")
+    graph_name = sio.filename(sio.VESSEL_GRAPH)
+    gp = present.get(graph_name)
     if gp is None:
-        lines.append(f"  {'vessel_graph.npz':<26} —  MISSING")
+        lines.append(f"  {graph_name:<26} —  MISSING")
         lines.append("  " + graph_notes(None)[0])
-        if present.get("vessel_path_curvature.npz") is not None:
+        if present.get(sio.VESSEL_PATH_CURVATURE_RETIRED) is not None:
             lines.append(
-                "  NOTE: vessel_path_curvature.npz is present but is no longer "
+                f"  NOTE: {sio.VESSEL_PATH_CURVATURE_RETIRED} is present but "
+                "is no longer "
                 "read — the in-plane centerline was replaced by the 3D lumen "
                 "graph (docs/DIRECTION.md §8B). Re-run `batch_mesh --steps "
                 "mesh,graph` with a Poisson method.")
@@ -458,28 +464,25 @@ def describe_saved(path) -> list[str]:
         ek = np.asarray(d.get("node_endpoint_kind", []))
         ncrop = int((ek == "crop").sum()) if ek.size else 0
         total = float(np.sum(d.get("edge_len_um", [0])))
-        lines.append(f"  {'vessel_graph.npz':<26} {npts} points, "
+        lines.append(f"  {graph_name:<26} {npts} points, "
                      f"{len(d.get('edge_len_um', []))} edge(s), {njunc} "
                      f"junction(s), {ncrop} cropped end(s), {total:.0f} um")
         for n in graph_notes(d):
             lines.append(f"  {n}")
 
     # --- where the mesh came from (P26) --------------------------------------
-    tagged = sorted(n for n in present
-                    if n.startswith("vessel_mesh__") and n.endswith(".npz"))
+    tagged = sorted(n for n in present if sio.tag_of(n, sio.VESSEL_MESH))
     if tagged:
         bits = []
         for name in tagged:
             shapes = _member_shapes(present[name])
             vs = shapes.get("verts")
-            tag = name[len("vessel_mesh__"):-len(".npz")]
+            tag = sio.tag_of(name, sio.VESSEL_MESH)
             bits.append(f"{tag} ({vs[0][0]:,} verts)" if vs else tag)
         lines.append(f"  {'tagged mesh variants':<26} {', '.join(bits)}")
 
     for name in sorted(n for n in present
-                       if n == "vessel_recon.json"
-                       or (n.startswith("vessel_recon__")
-                           and n.endswith(".json"))):
+                       if sio.tag_of(n, sio.VESSEL_RECON) is not None):
         try:
             doc = json.loads(present[name].read_text())
         except Exception as exc:
@@ -488,14 +491,15 @@ def describe_saved(path) -> list[str]:
         summary = recon_summary(doc)
         lines.append(f"  {name:<26} {summary[0]}")
         lines.extend(f"  {'':<26} {extra}" for extra in summary[1:])
-    for n in provenance_notes("vessel_mesh.npz" in present,
-                              "vessel_recon.json" in present):
+    for n in provenance_notes(mesh_name in present,
+                              sio.filename(sio.VESSEL_RECON) in present):
         lines.append(f"  {n}")
 
     # --- nuclei: the P04 join -----------------------------------------------
-    np_ = present.get("nuclei_split.npz")
+    split_name = sio.filename(sio.NUCLEI_SPLIT)
+    np_ = present.get(split_name)
     if np_ is None:
-        lines.append("  WARN: no nuclei_split.npz — nuc_id falls back to the "
+        lines.append(f"  WARN: no {split_name} — nuc_id falls back to the "
                      "unsplit DAPI components and nuc_is_fibroblast will be "
                      "blank. Re-run 'Count fibroblasts' for this image.")
     else:
@@ -504,7 +508,7 @@ def describe_saved(path) -> list[str]:
         is_fib = np.asarray(d.get("is_fib", []))
         shapes = _member_shapes(np_)
         lab = shapes.get("labels")
-        lines.append(f"  {'nuclei_split.npz':<26} {ids.size} nuclei, "
+        lines.append(f"  {split_name:<26} {ids.size} nuclei, "
                      f"{int(is_fib.sum()) if is_fib.size else 0} VnTs+, "
                      f"labels {lab[0] if lab else '?'} "
                      f"{lab[1] if lab else ''}")
@@ -512,13 +516,14 @@ def describe_saved(path) -> list[str]:
         for n in nuclei_notes(ids, is_fib, lab_max):
             lines.append(f"  {n}")
 
-    fp = present.get("fibroblast_count.npz")
+    fib_name = sio.filename(sio.FIBROBLAST_COUNT)
+    fp = present.get(fib_name)
     if fp is None:
-        lines.append(f"  {'fibroblast_count.npz':<26} —  MISSING "
+        lines.append(f"  {fib_name:<26} —  MISSING "
                      f"(n_fibroblasts / n_nuclei_total will be blank)")
     else:
         d = _scalars(fp, ("fibroblast", "total"))
-        lines.append(f"  {'fibroblast_count.npz':<26} "
+        lines.append(f"  {fib_name:<26} "
                      f"{int(d.get('fibroblast', 0))} of "
                      f"{int(d.get('total', 0))} nuclei")
 
@@ -529,7 +534,8 @@ def describe_saved(path) -> list[str]:
                  f"settings JSON"
                  + (f"; latest {csvs[-1]}" if csvs else ""))
 
-    if "adhesion_instances.npz" not in present:
-        lines.append("  WARN: no adhesion_instances.npz — this folder cannot "
+    if sio.filename(sio.ADHESION_INSTANCES) not in present:
+        lines.append(f"  WARN: no {sio.filename(sio.ADHESION_INSTANCES)} — "
+                     f"this folder cannot "
                      "be measured at all; re-run the batch for this image.")
     return lines

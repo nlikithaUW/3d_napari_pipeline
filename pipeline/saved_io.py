@@ -63,6 +63,11 @@ VESSEL_GRAPH = "vessel_graph"
 VESSEL_SHEAR = "vessel_shear"
 VESSEL_RECON = "vessel_recon"
 
+#: Retired: the in-plane centerline, replaced by the 3D lumen graph
+#: (docs/DIRECTION.md §8B). Nothing reads it, but two messages have to name it
+#: so an operator holding an old folder is told what the file is.
+VESSEL_PATH_CURVATURE_RETIRED = "vessel_path_curvature.npz"
+
 #: Default extension per artifact, so a caller names the artifact and not the
 #: container. `filename(VESSEL_MESH)` is "vessel_mesh.npz" and cannot become
 #: ".npy" by a typo at one of eleven call sites.

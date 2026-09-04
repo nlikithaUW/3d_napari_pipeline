@@ -10,7 +10,7 @@ For each OME-TIFF in --dir it:
   1. reads the VE-Cadherin channel plane-by-plane (skips any corrupt Z-slice),
   2. segments endothelial cells with Cellpose (2D per-Z stitched into 3D by
      default, or true 3D with --do-3d),
-  3. counts cells, pulls total nuclei from <stem>_saved/fibroblast_count.npz,
+  3. counts cells, pulls total nuclei from the saved fibroblast count,
   4. writes a row to endothelial_counts.csv and a QC overlay PNG per image.
 
 Setup (in the image_analysis env):
@@ -52,6 +52,10 @@ from pathlib import Path
 
 import numpy as np
 import tifffile
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from pipeline import saved_io
 
 DEFAULT_DIR = (Path(__file__).resolve().parent.parent / "3d_images_folder" /
                "images" / "WT")
@@ -113,7 +117,7 @@ def _voxel_zyx(tif: Path) -> tuple[float, float, float]:
 
 
 def _total_nuclei(saved: Path) -> int | None:
-    fc = saved / "fibroblast_count.npz"
+    fc = saved_io.path(saved, saved_io.FIBROBLAST_COUNT)
     if fc.exists():
         try:
             return int(np.load(fc)["total"])
@@ -162,7 +166,7 @@ def _saved_wall_mask(saved, shape, voxel_raw_zyx, ds):
 
     Returns None if the image has no saved mask, so the caller can fall back.
     """
-    f = Path(saved) / "cadherin_labels.npz"
+    f = saved_io.path(saved, saved_io.CADHERIN_LABELS)
     if not f.exists():
         return None
     with np.load(f, allow_pickle=True) as z:
@@ -437,7 +441,7 @@ def main() -> None:
                     wall = _saved_wall_mask(saved, vol.shape,
                                             _voxel_zyx(tif), args.ds)
                     print(f"    tissue mask: "
-                          + (f"pipeline cadherin_labels.npz "
+                          + (f"pipeline cadherin labels "
                              f"({wall.mean() * 100:.1f}% of volume)"
                              if wall is not None else
                              "NO saved mask -- falling back to Otsu, which is "
@@ -484,7 +488,7 @@ def main() -> None:
             print(f"    endothelial cells = {n_endo}"
                   + (f"; total nuclei = {n_tot}; fibroblasts = {n_fib} "
                      f"({pct:.0f}%)" if n_fib is not None else
-                     "; (no fibroblast_count.npz -> total nuclei unknown)"),
+                     "; (no fibroblast count -> total nuclei unknown)"),
                   flush=True)
         except Exception as exc:
             import traceback

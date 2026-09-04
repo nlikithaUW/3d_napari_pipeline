@@ -50,6 +50,8 @@ import numpy as np
 from scipy import ndimage as ndi
 from scipy.spatial import cKDTree
 
+from . import saved_io
+
 # A nucleus whose voxels come within this of the VE-cadherin **junction
 # network** is taken as endothelial for calibration. VE-cadherin marks
 # endothelial cell-cell junctions, so contact with the network is a positive
@@ -350,11 +352,12 @@ def mesh_sign_is_luminal(mesh_path) -> tuple[bool, str]:
     the same array of numbers comes back either way, and only the provenance
     distinguishes a measurement from noise.
     """
-    import numpy as _np
-    with _np.load(mesh_path, allow_pickle=True) as m:
-        if "normals" not in m.files:
-            return False, (f"{mesh_path.name} carries no stored normals, so it "
-                           f"is not a Poisson reconstruction. On an alpha-3D "
-                           f"solid the outward direction is not abluminal "
-                           f"([P21]) and the sign would be meaningless.")
+    # `saved_io.has_normals` reads the archive directory only. It must stay
+    # that and not become `load_mesh`: inflating a multi-million-vertex mesh to
+    # answer a yes/no is the cost this function exists to avoid.
+    if not saved_io.has_normals(mesh_path):
+        return False, (f"{mesh_path.name} carries no stored normals, so it "
+                       f"is not a Poisson reconstruction. On an alpha-3D "
+                       f"solid the outward direction is not abluminal "
+                       f"([P21]) and the sign would be meaningless.")
     return True, ""

@@ -12,6 +12,7 @@ from magicgui.widgets import (
 from napari.qt.threading import thread_worker
 
 from ..denoise import auto_min_size_otsu, filter_by_size, label_and_sizes, otsu_mask
+from .. import saved_io as sio
 from .widgets import Histogram, call_all, debounce, pyramid_views, with_after
 
 
@@ -90,7 +91,8 @@ def build(state, viewer) -> Container:
     # Persists the full result of "Compute DAPI Otsu + components" so it can be
     # restored on reopen — the labels feed Measure and the DAPI gate, and the
     # sizes drive the min_size slider + histogram and the displayed mask.
-    labels_path_w = FileEdit(value="dapi_labels.npz", label="labels_path",
+    labels_path_w = FileEdit(value=sio.filename(sio.DAPI_LABELS),
+                             label="labels_path",
                              mode="w")
     save_lbl_w = PushButton(text="Save DAPI labels")
     load_lbl_w = PushButton(text="Load DAPI labels")
@@ -148,7 +150,7 @@ def build(state, viewer) -> Container:
     load_lbl_w.changed.connect(_load_labels)
     state["load_dapi_labels"] = _load_labels
     state.setdefault("save_path_widgets", []).append(
-        (labels_path_w, "dapi_labels.npz"))
+        (labels_path_w, sio.filename(sio.DAPI_LABELS)))
 
     # ---- Count fibroblasts: VnTs (mClover)-positive nuclei ----
     # Splits touching nuclei (watershed on the DAPI distance transform), then
@@ -311,13 +313,14 @@ def build(state, viewer) -> Container:
     # ---- Save / load the split nuclei + their fibroblast classification ----
     # The analysis unit, and the only artifact that can answer "was this
     # adhesion's nucleus classified as a fibroblast?" (P04). Deliberately a
-    # separate file from dapi_labels.npz, which holds the unsplit DAPI
+    # separate file from the DAPI labels npz, which holds the unsplit
     # components — two genuinely different objects, so they get two names.
     #
     # labels and is_fib are written to ONE file on purpose: that is what makes
     # them impossible to stale relative to each other, which is the exact class
     # of bug P12 is about.
-    nuc_path_w = FileEdit(value="nuclei_split.npz", label="nuclei_path",
+    nuc_path_w = FileEdit(value=sio.filename(sio.NUCLEI_SPLIT),
+                          label="nuclei_path",
                           mode="w")
     save_nuc_w = PushButton(text="Save split nuclei + classes")
     load_nuc_w = PushButton(text="Load split nuclei + classes")
@@ -398,11 +401,12 @@ def build(state, viewer) -> Container:
     load_nuc_w.changed.connect(_load_nuc)
     state["load_nuclei_split"] = _load_nuc
     state.setdefault("save_path_widgets", []).append(
-        (nuc_path_w, "nuclei_split.npz"))
+        (nuc_path_w, sio.filename(sio.NUCLEI_SPLIT)))
 
     # ---- Save / load the fibroblast count so the CSV's n_fibroblasts column can
     # be restored without re-running (the count itself is not otherwise saved).
-    fib_path_w = FileEdit(value="fibroblast_count.npz", label="fib_count_path",
+    fib_path_w = FileEdit(value=sio.filename(sio.FIBROBLAST_COUNT),
+                          label="fib_count_path",
                           mode="w")
     save_fib_w = PushButton(text="Save fibroblast count")
     load_fib_w = PushButton(text="Load fibroblast count")
@@ -450,7 +454,7 @@ def build(state, viewer) -> Container:
         after=lambda: call_all(_save_nuc, _save_fib, after,
                                label="run_fibroblasts"))
     state.setdefault("save_path_widgets", []).append(
-        (fib_path_w, "fibroblast_count.npz"))
+        (fib_path_w, sio.filename(sio.FIBROBLAST_COUNT)))
 
     state["dapi_size_controls"] = size_controls
     # Group the fibroblast-count parameters in a labelled sub-container so each

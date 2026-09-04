@@ -98,6 +98,7 @@ from .saved_check import (
     describe_saved,
     mesh_notes,
 )
+from . import saved_io as sio
 from . import shear
 from . import vessel_poisson
 from .vessel_mesh import (
@@ -680,14 +681,6 @@ def resolve_min_size(mode: str, sizes: np.ndarray) -> tuple[int, dict]:
 # Per-image run
 # --------------------------------------------------------------------------- #
 
-def _out(saved: Path, base: str, tag: str | None, ext: str) -> Path:
-    """Tagged siblings live **beside** the canonical files, not in a subfolder:
-    `describe_saved` iterates files and `batch_measure` builds literal
-    filenames, so anything one directory down is invisible to both.
-    """
-    return saved / (f"{base}__{tag}{ext}" if tag else f"{base}{ext}")
-
-
 def _existing_mesh_note(path: Path) -> str:
     """What is on disk right now, for the 'I re-ran it and nothing changed' case.
 
@@ -729,7 +722,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     combos = params["curv_combos"]
     single_tag = (tag_template.format(radius=combos[0][0], smooth=combos[0][1])
                   if tag_template else None)
-    mesh_out = _out(saved, "vessel_mesh", single_tag, ".npz")
+    mesh_out = sio.path(saved, sio.VESSEL_MESH, single_tag)
 
     # ---- scale + shape, from the OME header (~0.3 s, no pixels) -------------
     scale = None
@@ -744,9 +737,9 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     mask = None
     labels_meta = None
     if need_mask:
-        cadh = saved / "cadherin_labels.npz"
+        cadh = sio.path(saved, sio.CADHERIN_LABELS)
         if not cadh.exists():
-            return "failed", [f"no cadherin_labels.npz in {saved.name} — this "
+            return "failed", [f"no {cadh.name} in {saved.name} — this "
                               f"image has not been through the Cadherin step; "
                               f"{_existing_mesh_note(mesh_out)}."]
         t = time.perf_counter()
@@ -759,7 +752,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                        "expected_shape": [int(n) for n in expected]}
         if tuple(labels.shape) != tuple(expected):
             return "failed", [
-                f"cadherin_labels.npz is {tuple(labels.shape)} but "
+                f"{cadh.name} is {tuple(labels.shape)} but "
                 f"{tif.name}'s OME header implies {tuple(expected)} after "
                 f"to_isotropic — the mask is not from this image (or was saved "
                 f"at a different resampling). {_existing_mesh_note(mesh_out)}."]
@@ -965,7 +958,8 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
         # `--steps curvature --tag r{radius}` a sweep over the mesh that is
         # actually in place, and `--steps score --tag defaults` a score of the
         # variant on disk rather than of a fresh rebuild.
-        src = mesh_out if mesh_out.exists() else saved / "vessel_mesh.npz"
+        src = (mesh_out if mesh_out.exists()
+               else sio.path(saved, sio.VESSEL_MESH))
         what = "curvature" if "curvature" in steps else "score"
         if not src.exists():
             return "failed", [f"no {src.name} to compute {what} from — run "
@@ -1135,7 +1129,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
         recon["mesh_input"] = mesh_out.name
 
     for radius, smooth, curv, tg in curv_runs:
-        cp = _out(saved, "vessel_curvature", tg, ".npz")
+        cp = sio.path(saved, sio.VESSEL_CURVATURE, tg)
         np.savez_compressed(cp, **{k: np.asarray(curv[k])
                                    for k in ("mean", "k1", "k2", "gaussian")})
         k1 = np.asarray(curv["k1"])
@@ -1159,7 +1153,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     # paths.
     wall = graph_extras.get("wall")
     if wall is not None and len(wall["points_zyx_um"]):
-        sp = _out(saved, "vessel_shear", single_tag, ".npz")
+        sp = sio.path(saved, sio.VESSEL_SHEAR, single_tag)
         np.savez_compressed(sp, **{k: v for k, v in wall.items()
                                    if isinstance(v, np.ndarray)},
                             max_dist_um=np.float64(wall["max_dist_um"]))
@@ -1251,7 +1245,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
                                for k, v in rec["splits"][first].items()))
 
     if cl is not None:
-        pp = _out(saved, "vessel_graph", single_tag, ".npz")
+        pp = sio.path(saved, sio.VESSEL_GRAPH, single_tag)
         # Only the arrays; the notes and the nested info dicts go into
         # vessel_recon.json, which is where provenance already lives.
         np.savez_compressed(pp, **{k: v for k, v in cl.items()
@@ -1278,7 +1272,7 @@ def run_one(tif: Path, saved: Path, params: dict, steps: tuple,
     # and says nothing (P12), so delete it and say so loudly rather than let a
     # later run look successful.
     if "mesh" in steps and "curvature" not in steps:
-        stale = _out(saved, "vessel_curvature", single_tag, ".npz")
+        stale = sio.path(saved, sio.VESSEL_CURVATURE, single_tag)
         if stale.exists():
             stale.unlink()
             notes.append(f"WARN: deleted {stale.name} — it was computed on the "
@@ -1315,7 +1309,7 @@ def _write_recon(saved: Path, tag: str | None, tif: Path, params: dict,
     dropping it — a curvature-only sweep must not erase the mesh's provenance —
     and says which blocks it carried over.
     """
-    path = _out(saved, "vessel_recon", tag, ".json")
+    path = sio.path(saved, sio.VESSEL_RECON, tag)
     doc: dict = {}
     carried_from = None
     if path.exists():
@@ -1435,7 +1429,9 @@ def main() -> None:
                          f"the 'scores' block of vessel_recon.json — it is "
                          f"opt-in because it costs more than the rebuild.")
     ap.add_argument("--tag", default=None,
-                    help="write vessel_mesh__TAG.npz siblings instead of "
+                    help=f"write "
+                         f"{sio.filename(sio.VESSEL_MESH, 'TAG')} "
+                         f"siblings instead of "
                          "overwriting in place. '{radius}' and '{smooth}' are "
                          "substituted per curvature run.")
     ap.add_argument("--from-settings", default=None,
@@ -1699,7 +1695,8 @@ def main() -> None:
               flush=True)
     if "mesh" in steps and "curvature" not in steps and not args.dry_run:
         print("  NOTE: rebuilding the mesh without its curvature — any "
-              "existing vessel_curvature.npz for that mesh will be DELETED "
+              f"existing {sio.filename(sio.VESSEL_CURVATURE)} for that "
+              f"mesh will be DELETED "
               "(it would be the wrong length; docs/ISSUES.md P12).", flush=True)
 
     targets = _targets(directory, args.only)

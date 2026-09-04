@@ -48,6 +48,7 @@ from .gui.state import (
     BATCH_STEPS, STEP_NAMES, new_state, reset_image_state, resolve_steps,
 )
 from .rf import AdhesionRF
+from . import saved_io as sio
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PARAMS = ROOT / "3d_images_folder" / "params.json"
@@ -100,7 +101,7 @@ def main() -> None:
             saved = tif.parent / f"{tif.stem}_saved"
             # batch's final artifact is the instance labels (measure runs later
             # in the GUI); skip images that already have them.
-            if (saved / "adhesion_instances.npz").exists():
+            if sio.path(saved, sio.ADHESION_INSTANCES).exists():
                 print(f"  skip (already processed): {tif.name}", flush=True)
             else:
                 kept.append(tif)

@@ -20,6 +20,7 @@ import numpy as np
 from scipy.spatial import cKDTree as KDTree
 
 from .fret import background_subtract
+from . import saved_io as sio
 from .saved_check import (
     graph_notes, curvature_notes, force_notes, mesh_notes, native_notes,
     nuclei_notes, ratio_dropout_note, surface_verts_for_distance,
@@ -491,8 +492,8 @@ CSV_COLUMNS = [
 
 # The two strings `nucleus_map` may take. They are NOT comparable: the unsplit
 # map's ids index DAPI connected components, the split map's index nuclei (P04).
-NUCLEUS_MAP_SPLIT = "nuclei_split.npz"
-NUCLEUS_MAP_UNSPLIT = "dapi_labels.npz (unsplit fallback)"
+NUCLEUS_MAP_SPLIT = sio.filename(sio.NUCLEI_SPLIT)
+NUCLEUS_MAP_UNSPLIT = f"{sio.filename(sio.DAPI_LABELS)} (unsplit fallback)"
 
 
 def export_meta(*, image, exported, csv_name, n_adhesions, scale_um_zyx,

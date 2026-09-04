@@ -49,6 +49,7 @@ from .measure_core import (
 )
 from .rf import instance_labels_3d
 from .saved_check import describe_saved
+from . import saved_io as sio
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PARAMS = ROOT / "3d_images_folder" / "params.json"
@@ -121,11 +122,11 @@ def _standard_instances(saved: Path, rewrite: bool = False):
     `run_rf_postprocess` forces `split_merged=True` and the widget defaults are
     byte-identical to STD_POSTPROCESS, so the file already holds this labeling.
     """
-    proba_path = saved / "adhesion_proba.npy"
+    proba_path = sio.path(saved, sio.ADHESION_PROBA)
     if not proba_path.exists():
-        _p("WARN: no adhesion_proba.npy — measuring the saved instances as-is; "
-           "they may be a stale, non-standard labeling.")
-        return np.load(saved / "adhesion_instances.npz")["instances"]
+        _p(f"WARN: no {proba_path.name} — measuring the saved instances "
+           f"as-is; they may be a stale, non-standard labeling.")
+        return np.load(sio.path(saved, sio.ADHESION_INSTANCES))["instances"]
     T = int(round(STD_POSTPROCESS["prob_threshold"] * 255))
     _p(f"recompute standard instances from proba (T={T}, min="
        f"{STD_POSTPROCESS['min_size_vox']}, split ON, "
@@ -138,12 +139,12 @@ def _standard_instances(saved: Path, rewrite: bool = False):
     del binary
     n_new = int(labels.max())
     if rewrite:
-        np.savez_compressed(saved / "adhesion_instances.npz",
+        np.savez_compressed(sio.path(saved, sio.ADHESION_INSTANCES),
                             instances=labels.astype(np.int32))
         _p(f"standardized instances: {n_new} adhesions (npz rewritten, "
            f"--rewrite-instances)")
     else:
-        inst_path = saved / "adhesion_instances.npz"
+        inst_path = sio.path(saved, sio.ADHESION_INSTANCES)
         n_old = None
         if inst_path.exists():
             try:
@@ -151,7 +152,7 @@ def _standard_instances(saved: Path, rewrite: bool = False):
             except Exception as exc:
                 _p(f"WARN: could not read {inst_path.name} to compare ({exc})")
         if n_old is not None and n_old != n_new:
-            _p(f"WARN: the saved adhesion_instances.npz holds {n_old} "
+            _p(f"WARN: the saved {inst_path.name} holds {n_old} "
                f"adhesions but the standard post-process gives {n_new}. "
                f"Measuring the recomputed {n_new}; the file is left alone. "
                f"Pass --rewrite-instances to update it.")
@@ -171,11 +172,12 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     force_vol, clover_native, ruby_native, raw_voxel, scale = _load_raw(
         tif, params_path, lut_path)
     if use_saved:
-        _p("using saved adhesion_instances.npz as-is (--use-saved-instances)")
-        labels = np.load(saved / "adhesion_instances.npz")["instances"]
+        _p(f"using saved {sio.filename(sio.ADHESION_INSTANCES)} as-is "
+           f"(--use-saved-instances)")
+        labels = np.load(sio.path(saved, sio.ADHESION_INSTANCES))["instances"]
     else:
         labels = _standard_instances(saved, rewrite=rewrite_instances)
-    with np.load(saved / "vessel_mesh.npz") as _vm:
+    with np.load(sio.path(saved, sio.VESSEL_MESH)) as _vm:
         vessel_verts = _vm["verts"]
         # Faces are what restrict dist_mesh_um to the mesh surface (P09a). A
         # folder whose npz predates them still measures, to every vertex, and
@@ -188,7 +190,7 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     # that folder's previous numbers exactly and leaves nuc_is_fibroblast blank,
     # which is why it says so loudly rather than quietly doing the old thing.
     nuc_ids = nuc_is_fib = None
-    nuc_split = saved / "nuclei_split.npz"
+    nuc_split = sio.path(saved, sio.NUCLEI_SPLIT)
     if nuc_split.exists():
         ns = np.load(nuc_split)
         dapi_labels = ns["labels"]
@@ -198,9 +200,9 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
            f"{int(np.asarray(nuc_is_fib).sum())} VnTs+ "
            f"({nucleus_map})")
     else:
-        dapi_labels = np.load(saved / "dapi_labels.npz")["labels"]
+        dapi_labels = np.load(sio.path(saved, sio.DAPI_LABELS))["labels"]
         nucleus_map = NUCLEUS_MAP_UNSPLIT
-        _p(f"WARN: no nuclei_split.npz — falling back to the UNSPLIT DAPI "
+        _p(f"WARN: no {nuc_split.name} — falling back to the UNSPLIT DAPI "
            f"components ({int(dapi_labels.max())} of them) for nuc_id and "
            f"dist_nuc_um, and nuc_is_fibroblast will be blank. These are DAPI "
            f"connected components, not nuclei: most are sub-nuclear debris, "
@@ -208,32 +210,32 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
            f"'Count fibroblasts' for this image to fix it.")
 
     curvature = None
-    if (saved / "vessel_curvature.npz").exists():
-        cv = np.load(saved / "vessel_curvature.npz")
-        curvature = {k: cv[k] for k in ("mean", "k1", "k2", "gaussian")
-                     if k in cv.files}
+    if sio.path(saved, sio.VESSEL_CURVATURE).exists():
+        cv = np.load(sio.path(saved, sio.VESSEL_CURVATURE))
+        curvature = {k: cv[k] for k in sio.CURV_KEYS if k in cv.files}
     graph = None
-    if (saved / "vessel_graph.npz").exists():
-        pc = np.load(saved / "vessel_graph.npz")
+    if sio.path(saved, sio.VESSEL_GRAPH).exists():
+        pc = np.load(sio.path(saved, sio.VESSEL_GRAPH))
         graph = {k: pc[k] for k in pc.files}
     # The ragged wall-shear cloud — one row per wall point, not per centerline
     # point, which is why it is a separate file. Absent unless the graph was
     # built with shear on; `wall_columns` then leaves the tau_* columns blank
     # and says so, rather than the header changing between runs.
     wall = None
-    if (saved / "vessel_shear.npz").exists():
-        wz = np.load(saved / "vessel_shear.npz")
+    if sio.path(saved, sio.VESSEL_SHEAR).exists():
+        wz = np.load(sio.path(saved, sio.VESSEL_SHEAR))
         wall = {k: wz[k] for k in wz.files}
     fib = {}
-    if (saved / "fibroblast_count.npz").exists():
-        fc = np.load(saved / "fibroblast_count.npz")
+    if sio.path(saved, sio.FIBROBLAST_COUNT).exists():
+        fc = np.load(sio.path(saved, sio.FIBROBLAST_COUNT))
         # `int(fc[k])` raises TypeError on any non-scalar member, which would
         # turn a slightly-different file into a hard failure of the whole image.
         # Take the 0-d members and report the rest rather than dying on them.
         for k in fc.files:
             v = fc[k]
             if np.ndim(v) != 0:
-                _p(f"WARN: fibroblast_count.npz['{k}'] has shape "
+                _p(f"WARN: {sio.filename(sio.FIBROBLAST_COUNT)}['{k}'] "
+                   f"has shape "
                    f"{np.shape(v)}, expected a scalar — ignored.")
                 continue
             fib[k] = float(v) if k == "threshold" else int(v)
@@ -304,13 +306,13 @@ def main() -> None:
                     help="only process _saved folders whose name contains this "
                          "substring (use for a single-image smoke test)")
     ap.add_argument("--use-saved-instances", action="store_true",
-                    help="measure the on-disk adhesion_instances.npz as-is "
+                    help="measure the on-disk instances npz as-is "
                          "instead of recomputing standard instances from the "
                          "probability map. NOT recommended: a folder may hold a "
                          "stale, non-standard labeling.")
     ap.add_argument("--rewrite-instances", action="store_true",
                     help="write the recomputed standard instances back to "
-                         "adhesion_instances.npz. Off by default: measuring "
+                         "the instances npz. Off by default: measuring "
                          "should not modify a saved segmentation.")
     ap.add_argument("--check-only", action="store_true",
                     help="describe every *_saved folder and exit without "
@@ -343,8 +345,9 @@ def main() -> None:
     for saved in sorted(Path(args.dir).glob("*_saved")):
         if args.only and args.only not in saved.name:
             continue
-        if not (saved / "adhesion_instances.npz").exists():
-            print(f"  skip ({saved.name}): no adhesion_instances.npz — this "
+        if not sio.path(saved, sio.ADHESION_INSTANCES).exists():
+            print(f"  skip ({saved.name}): no "
+                  f"{sio.filename(sio.ADHESION_INSTANCES)} — this "
                   f"image has not been through pipeline.batch.", flush=True)
             continue
         if not args.redo_json and list(saved.glob("*_settings.json")):

@@ -27,6 +27,7 @@ from napari.qt.threading import thread_worker
 from ..denoise import build_mask
 from ..measure_core import bs_per_z
 from ..rf import AdhesionRF, instance_labels_3d
+from .. import saved_io as sio
 from .widgets import (
     after_on_error,
     call_all,
@@ -294,7 +295,8 @@ def build(state, viewer) -> Container:
     # in memory, so a viewer restart otherwise means recomputing it. Persist the
     # proba volume to a .npy and reload it to resume straight at post-processing.
 
-    proba_path_w = FileEdit(value="adhesion_proba.npy", label="proba_path",
+    proba_path_w = FileEdit(value=sio.filename(sio.ADHESION_PROBA),
+                            label="proba_path",
                             mode="w")
     save_proba_w = PushButton(text="Save proba")
     load_proba_w = PushButton(text="Load proba")
@@ -486,7 +488,8 @@ def build(state, viewer) -> Container:
     apply_w.changed.connect(_apply)
 
     # Save / load the "Adhesion instances" label layer (skip re-running Apply).
-    inst_path_w = FileEdit(value="adhesion_instances.npz", label="inst_path",
+    inst_path_w = FileEdit(value=sio.filename(sio.ADHESION_INSTANCES),
+                           label="inst_path",
                            mode="w")
     save_inst_w = PushButton(text="Save instances")
     load_inst_w = PushButton(text="Load instances")
@@ -674,7 +677,8 @@ def build(state, viewer) -> Container:
 
     # Save / load the spatial ratio layer so it can be reloaded without
     # re-running post-process + the ratio computation.
-    ratio_path_w = FileEdit(value="clover_ruby_ratio.npy", label="ratio_path",
+    ratio_path_w = FileEdit(value=sio.filename(sio.CLOVER_RUBY_RATIO),
+                            label="ratio_path",
                             mode="w")
     save_ratio_w = PushButton(text="Save ratio layer")
     load_ratio_w = PushButton(text="Load ratio layer")
@@ -807,9 +811,9 @@ def build(state, viewer) -> Container:
 
     imagej_btn.changed.connect(_imagej_ratio)
 
-    for _w, _fn in ((proba_path_w, "adhesion_proba.npy"),
-                    (ratio_path_w, "clover_ruby_ratio.npy"),
-                    (inst_path_w, "adhesion_instances.npz")):
+    for _w, _fn in ((proba_path_w, sio.filename(sio.ADHESION_PROBA)),
+                    (ratio_path_w, sio.filename(sio.CLOVER_RUBY_RATIO)),
+                    (inst_path_w, sio.filename(sio.ADHESION_INSTANCES))):
         state.setdefault("save_path_widgets", []).append((_w, _fn))
 
     # ------------------------------------------------------------------ #

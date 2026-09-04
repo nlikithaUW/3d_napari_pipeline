@@ -21,6 +21,7 @@ from magicgui.widgets import Container, FileEdit, PushButton
 from napari.qt.threading import thread_worker
 
 from ..cell_mesh import label_centroids_normals, signed_distance_to_mesh_vertices
+from .. import saved_io as sio
 from ..denoise import (
     auto_min_size_otsu,
     bernsen_mask,
@@ -52,7 +53,7 @@ METHODS = [METHOD_NIBLACK, METHOD_SAUVOLA, METHOD_BERNSEN]
 MIN_SIZE_FLOOR = 25
 
 
-# --- what `cadherin_labels.npz` holds --------------------------------------- #
+# --- what the cadherin labels npz holds --------------------------------------- #
 # Two keys: `labels` and `sizes`. That is the whole live half — `filter_by_size`
 # in `batch_mesh` is what consumes them, and `min_size` moves the auto alpha and
 # with it the topology (P51), so the labeling itself is load-bearing.
@@ -392,7 +393,8 @@ def build(state, viewer) -> Container:
     seed_floor_w.changed.connect(lambda *_: _seed_floor())
 
     # ---- Save / load the cadherin components (mask + labels for re-tuning) ----
-    cadh_path_w = FileEdit(value="cadherin_labels.npz", label="cadh_path",
+    cadh_path_w = FileEdit(value=sio.filename(sio.CADHERIN_LABELS),
+                           label="cadh_path",
                            mode="w")
     save_cadh_w = PushButton(text="Save VE-Cadherin mask")
     load_cadh_w = PushButton(text="Load VE-Cadherin mask")
@@ -482,7 +484,7 @@ def build(state, viewer) -> Container:
                                              label="run_cadherin"))
     state["run_cadherin"] = _run_cadherin_step
     state.setdefault("save_path_widgets", []).append(
-        (cadh_path_w, "cadherin_labels.npz"))
+        (cadh_path_w, sio.filename(sio.CADHERIN_LABELS)))
 
     return (Container(widgets=[threshold_controls, seed_floor_w,
                                filter_controls,

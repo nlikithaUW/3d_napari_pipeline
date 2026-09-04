@@ -44,6 +44,7 @@ from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
 from .. import lumen_graph
 from .. import shear
 from ..saved_check import curvature_notes
+from .. import saved_io as sio
 # The face names the cap widget offers — from the core, not a second list here,
 # so the GUI cannot offer a face `vessel_poisson` does not know.
 from ..vessel_poisson import FACE_NAMES
@@ -611,7 +612,7 @@ def build(state, viewer) -> list:
 
     # ---- Save / load the built vessel mesh (verts + faces) ----
     mesh_path_w = FileEdit(
-        tooltip="Where 'Save vessel mesh' writes and 'Load vessel mesh' reads. Relative names resolve beside the current image.",value="vessel_mesh.npz", label="mesh_path", mode="w")
+        tooltip="Where 'Save vessel mesh' writes and 'Load vessel mesh' reads. Relative names resolve beside the current image.",value=sio.filename(sio.VESSEL_MESH), label="mesh_path", mode="w")
     save_mesh_w = PushButton(
         text="Save vessel mesh",
         tooltip="Write the built mesh to the path above, beside this image.")
@@ -629,7 +630,7 @@ def build(state, viewer) -> list:
         path = str(mesh_path_w.value)
         arrays = {"verts": np.asarray(verts), "faces": np.asarray(faces)}
         # An extra key only, the same additive pattern `z_um` uses in
-        # `vessel_path_curvature.npz`: an older reader that names verts/faces is
+        # the retired path-curvature npz: an older reader that names verts/faces is
         # unaffected, and a Poisson mesh keeps the normals it cannot re-derive
         # (it is open at the volume edges, so `vertex_outward_normals` has no
         # enclosed volume to read the global sign from).
@@ -674,7 +675,7 @@ def build(state, viewer) -> list:
     load_mesh_w.changed.connect(_load_mesh)
     state["load_vessel_mesh"] = _load_mesh
     state.setdefault("save_path_widgets", []).append(
-        (mesh_path_w, "vessel_mesh.npz"))
+        (mesh_path_w, sio.filename(sio.VESSEL_MESH)))
 
     # A new mesh invalidates the wall-shear field: the shear was measured on
     # the lumen of the *previous* build, and `vertex_field` would happily map it
@@ -1715,7 +1716,7 @@ def build(state, viewer) -> list:
     shear_junction_ratio_w.changed.connect(lambda *_: _show_shear())
 
     shear_path_w = FileEdit(
-        tooltip="Where the wall-shear point cloud is written and read. Kept separate from the graph file because it has one row per wall point rather than per centerline point.",value="vessel_shear.npz", label="shear_path",
+        tooltip="Where the wall-shear point cloud is written and read. Kept separate from the graph file because it has one row per wall point rather than per centerline point.",value=sio.filename(sio.VESSEL_SHEAR), label="shear_path",
                             mode="w")
     save_shear_w = PushButton(
         text="Save wall shear",
@@ -1773,7 +1774,7 @@ def build(state, viewer) -> list:
     # centerline are separate). Surface curvature -> the 4 per-vertex arrays;
     # path curvature -> the centerline points, κ and branch nodes. ----
     curv_path_w = FileEdit(
-        tooltip="Where the per-vertex surface curvature is written and read.",value="vessel_curvature.npz", label="curv_path",
+        tooltip="Where the per-vertex surface curvature is written and read.",value=sio.filename(sio.VESSEL_CURVATURE), label="curv_path",
                            mode="w")
     save_curv_w = PushButton(
         text="Save curvature",
@@ -1790,14 +1791,14 @@ def build(state, viewer) -> list:
             return
         path = str(curv_path_w.value)
         np.savez_compressed(path, **{k: np.asarray(curv[k])
-                                     for k in ("mean", "k1", "k2", "gaussian")})
+                                     for k in sio.CURV_KEYS})
         print(f"Saved surface curvature -> {path}.", flush=True)
 
     def _load_curv(*_, after=None, visible=True):
         path = str(curv_path_w.value)
         try:
             d = np.load(path)
-            curv = {k: d[k] for k in ("mean", "k1", "k2", "gaussian")}
+            curv = {k: d[k] for k in sio.CURV_KEYS}
             cache = state.get("vessel_mesh_cache") or {"verts": None,
                                                        "faces": None,
                                                        "normals": None}
@@ -1826,7 +1827,7 @@ def build(state, viewer) -> list:
             call_all(after, label="Load curvature")
 
     path_curv_path_w = FileEdit(
-        tooltip="Where the centerline graph is written and read.",value="vessel_graph.npz",
+        tooltip="Where the centerline graph is written and read.",value=sio.filename(sio.VESSEL_GRAPH),
                                 label="graph_path", mode="w")
     save_path_curv_w = PushButton(
         text="Save centerline graph",
@@ -1857,7 +1858,8 @@ def build(state, viewer) -> list:
             g = {k: d[k] for k in d.files}
             if "points_zyx_um" not in g:
                 print(f"Load centerline graph: {path} is an old in-plane "
-                      f"`vessel_path_curvature.npz`, which this build no "
+                      f"`{sio.VESSEL_PATH_CURVATURE_RETIRED}`, which this "
+                      f"build no "
                       f"longer reads — the 2D centerline was replaced by the "
                       f"3D lumen graph (docs/DIRECTION.md §8B). Rebuild the "
                       f"mesh with a Poisson method and click 'Compute 3D "
@@ -1884,9 +1886,9 @@ def build(state, viewer) -> list:
     state["load_vessel_curvature"] = _load_curv
     state["load_vessel_path_curvature"] = _load_path_curv
     state.setdefault("save_path_widgets", []).extend([
-        (curv_path_w, "vessel_curvature.npz"),
-        (path_curv_path_w, "vessel_graph.npz"),
-        (shear_path_w, "vessel_shear.npz"),
+        (curv_path_w, sio.filename(sio.VESSEL_CURVATURE)),
+        (path_curv_path_w, sio.filename(sio.VESSEL_GRAPH)),
+        (shear_path_w, sio.filename(sio.VESSEL_SHEAR)),
     ])
 
     # Chainable "Run all" steps: compute then save, then call `after`.

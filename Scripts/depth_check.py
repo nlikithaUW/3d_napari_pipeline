@@ -90,13 +90,14 @@ def per_adhesion_channels(csv: Path):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from pipeline.io import load_params, load_stack
     from pipeline.measure_core import _bs_per_z
+    from pipeline import saved_io
 
     saved = csv.parent
     stem = saved.name[: -len("_saved")]
     tif = saved.parent / f"{stem}.tif"
-    inst = saved / "adhesion_instances.npz"
+    inst = saved_io.path(saved, saved_io.ADHESION_INSTANCES)
     if not (tif.exists() and inst.exists()):
-        print(f"    (--channels: need {tif.name} and adhesion_instances.npz)")
+        print(f"    (--channels: need {tif.name} and {inst.name})")
         return None
 
     params = load_params(Path(__file__).resolve().parent.parent

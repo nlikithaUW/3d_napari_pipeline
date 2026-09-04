@@ -36,9 +36,6 @@ from magicgui.widgets import (
     Slider,
 )
 from napari.qt.threading import thread_worker
-# superqt is a hard napari dependency (0.7.8 in both envs), so this adds
-# nothing to install by hand in the Windows env.
-from superqt import QCollapsible
 
 from ..cell_mesh import mesh_curvature, suggest_alpha_um, tet_circumradii
 from .. import lumen_graph
@@ -78,7 +75,8 @@ from ..vessel_mesh import (  # noqa: F401  (re-export)
     mask_to_points_um,
     voxel_subsample,
 )
-from .widgets import Histogram, call_all, finite_surface, with_after
+from .widgets import (Histogram, call_all, collapsible_group,
+                      finite_surface, skip_if_missing, with_after)
 
 LAYER_NAME = "Vessel mesh"
 
@@ -634,6 +632,12 @@ def build(state, viewer) -> list:
 
     def _load_mesh(*_, after=None, visible=True):
         path = str(mesh_path_w.value)
+        # Status first: the skip hands off to `after` and the next
+        # chain step must not start with a stale status line.
+        _refresh_status()
+        if skip_if_missing(path, after, "Load vessel mesh",
+                           "vessel mesh file"):
+            return
         try:
             d = sio.load_mesh(path)
             verts, faces, normals = d.verts, d.faces, d.normals
@@ -1737,6 +1741,12 @@ def build(state, viewer) -> list:
 
     def _load_shear(*_, after=None, visible=True):
         path = str(shear_path_w.value)
+        # Status first: the skip hands off to `after` and the next
+        # chain step must not start with a stale status line.
+        _refresh_status()
+        if skip_if_missing(path, after, "Load wall shear",
+                           "wall shear file"):
+            return
         try:
             wall = sio.load_shear(path)
             state["vessel_shear"] = wall
@@ -1790,6 +1800,12 @@ def build(state, viewer) -> list:
 
     def _load_curv(*_, after=None, visible=True):
         path = str(curv_path_w.value)
+        # Status first: the skip hands off to `after` and the next
+        # chain step must not start with a stale status line.
+        _refresh_status()
+        if skip_if_missing(path, after, "Load curvature",
+                           "surface curvature file"):
+            return
         try:
             # Guarded, the same read the headless path uses: a partial file
             # yields the keys it has. This tab used to name all four unguarded,
@@ -1848,6 +1864,12 @@ def build(state, viewer) -> list:
 
     def _load_path_curv(*_, after=None, visible=True):
         path = str(path_curv_path_w.value)
+        # Status first: the skip hands off to `after` and the next
+        # chain step must not start with a stale status line.
+        _refresh_status()
+        if skip_if_missing(path, after, "Load centerline graph",
+                           "centerline graph file"):
+            return
         try:
             g = sio.load_graph(path)
             if "points_zyx_um" not in g:
@@ -1904,30 +1926,9 @@ def build(state, viewer) -> list:
     _refresh_status()
 
     def _group(title, widgets, extra=None, expanded=False):
-        """One pipeline, one collapsible.
-
-        The rule inside a group is: inputs above the button, outputs and
-        display-only controls below it, save/load last. `setDuration(0)` because
-        the collapse animation resizes badly inside the QScrollArea [P52] put
-        around every tab.
-        """
-        coll = QCollapsible(title)
-        coll.setDuration(0)
-        inner = Container(widgets=widgets, labels=True)
-        coll.addWidget(inner.native)
-        # Hold the magicgui wrapper: `addWidget` reparents the native QWidget,
-        # but nothing keeps the Python Container alive, and when it is collected
-        # the QLabels underneath it are deleted out from under the status
-        # widgets this closure still writes to ("wrapped C/C++ object of type
-        # QLabel has been deleted").
-        coll._mg_container = inner
-        if extra is not None:
-            coll.addWidget(extra)
-        if expanded:
-            coll.expand(animate=False)
-        else:
-            coll.collapse(animate=False)
-        return coll
+        """One pipeline, one collapsible — see `widgets.collapsible_group`."""
+        return collapsible_group(title, widgets, extra=extra,
+                                 expanded=expanded)
 
     def _sep(text):
         return Label(value=text, label="")

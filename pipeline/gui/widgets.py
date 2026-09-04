@@ -1,17 +1,59 @@
 """Shared GUI helpers: histogram canvas, debounce decorator, strided pyramid,
-and the ``after``-hand-off wrapper that keeps the "Run all" chain alive."""
+the collapsible-group builder, the missing-file skip guard, and the
+``after``-hand-off wrapper that keeps the "Run all" chain alive."""
 
 from __future__ import annotations
 
 import traceback
 from functools import wraps
+from pathlib import Path
 
 import numpy as np
+from magicgui.widgets import Container
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from qtpy.QtCore import QTimer
+# superqt is a hard napari dependency (0.7.8 in both envs), so this adds
+# nothing to install by hand in the Windows env.
+from superqt import QCollapsible
 
 from .. import gpu
+
+
+def collapsible_group(title: str, widgets, *, extra=None,
+                      expanded: bool = False) -> QCollapsible:
+    """One pipeline step, one collapsible group.
+
+    The layout rule inside a group is the Vessel Mesh tab's and now every
+    tab's: inputs above the button, outputs and display-only controls below it,
+    save/load last.
+
+    Two things here are load-bearing and both were learned the hard way:
+
+    * ``setDuration(0)`` — the collapse animation resizes badly inside the
+      `QScrollArea` [P52] that `view.py::_wrap` puts around every tab.
+    * ``coll._mg_container = inner`` — `addWidget` reparents the *native*
+      QWidget, but nothing keeps the Python `Container` alive. When it is
+      collected, the widgets underneath are deleted out from under the closures
+      that still write to them, and the tab dies with "wrapped C/C++ object of
+      type QLabel has been deleted" at the first status update.
+
+    Lived as a nested function in `vessel_mesh.py` until a second tab needed
+    it. Extracted rather than copied — the reference-holding line above is
+    exactly the kind of non-obvious fix that a copy loses.
+    """
+    coll = QCollapsible(title)
+    coll.setDuration(0)
+    inner = Container(widgets=widgets, labels=True)
+    coll.addWidget(inner.native)
+    coll._mg_container = inner
+    if extra is not None:
+        coll.addWidget(extra)
+    if expanded:
+        coll.expand(animate=False)
+    else:
+        coll.collapse(animate=False)
+    return coll
 
 
 def call_all(*fns, label: str = "step") -> None:
@@ -29,6 +71,38 @@ def call_all(*fns, label: str = "step") -> None:
         except Exception:
             print(f"{label}: {getattr(fn, '__name__', 'callback')} failed —\n"
                   f"{traceback.format_exc()}", flush=True)
+
+
+def skip_if_missing(path, after=None, label: str = "step",
+                   what: str = "file", hint: str = "") -> bool:
+    """True if ``path`` is absent — print a skip, hand off, and let the caller
+    return without starting any work.
+
+    A feature that was never saved is not an error, and "Load all saved" says
+    so in its own docstring: a loader whose file is missing is meant to be
+    skipped. Two reasons this has to happen *before* the load rather than in
+    the failure handler:
+
+    * A loader that reads inside a ``thread_worker`` cannot report a missing
+      file quietly. ``create_worker`` connects its own ``reraise`` slot to
+      ``errored`` (superqt ``_qthreading``) whenever the worker is built
+      without a ``connect=`` dict — as every loader here is, since they connect
+      their handlers afterwards — so an ``Errno 2`` arrives as a full traceback
+      and a napari error popup even though the tab's own ``_err`` also runs and
+      the chain advances. The user reads that as a dead pipeline.
+    * Missing and broken must not print the same. Only a genuinely absent file
+      short-circuits here; a truncated, unreadable or mismatched one still goes
+      down the loader's error path untouched.
+
+    Lived inline in `nuclei.py::_load_nuc`, the one loader of twelve that had
+    it. Extracted rather than copied into the other eleven.
+    """
+    if Path(path).exists():
+        return False
+    msg = f"{label}: no {what} at {path} — skipped."
+    print(f"{msg} {hint}" if hint else msg, flush=True)
+    call_all(after, label=label)
+    return True
 
 
 def with_after(handler, after=None, label: str = "step"):
@@ -138,19 +212,40 @@ def finite_surface(verts, faces, values):
     return verts, faces, values
 
 
-def finite_vectors(vectors):
-    """Keep only (N, 2, 3) napari vectors with finite, non-zero-length
+def vector_mask(vectors, values=None):
+    """Which (N, 2, 3) napari vectors are safe to draw — as a boolean mask.
 
-    displacement. vispy builds each arrow's frame by normalizing the
-    displacement (`vectors[:, 1]`), so a zero-length or non-finite vector
-    divides by zero and crashes the GL draw.
+    vispy builds each arrow's frame by normalizing the displacement
+    (`vectors[:, 1]`), so a zero-length or non-finite vector divides by zero and
+    crashes the GL draw.
+
+    ``values`` is an optional per-vector colour feature, and passing it here is
+    not a convenience: napari casts the mapped colour to uint8, so a **NaN
+    feature value raises** ("cannot convert float NaN to integer") deep inside
+    the colour swatch. Filtering the vectors and the colours in two separate
+    steps is worse than not filtering at all — the survivors get each other's
+    colours, silently. One mask, both arrays.
+    """
+    vectors = np.asarray(vectors)
+    if len(vectors) == 0:
+        return np.zeros(0, bool)
+    ok = np.isfinite(vectors).all(axis=(1, 2))
+    ok &= np.linalg.norm(vectors[:, 1], axis=1) > 1e-6
+    if values is not None:
+        ok &= np.isfinite(np.asarray(values, float))
+    return ok
+
+
+def finite_vectors(vectors):
+    """Keep only the (N, 2, 3) napari vectors that are safe to draw.
+
+    Thin wrapper on `vector_mask` — use that directly when the vectors carry a
+    colour feature that has to be filtered with them.
     """
     vectors = np.asarray(vectors)
     if len(vectors) == 0:
         return vectors
-    finite = np.isfinite(vectors).all(axis=(1, 2))
-    length = np.linalg.norm(vectors[:, 1], axis=1)
-    return vectors[finite & (length > 1e-6)]
+    return vectors[vector_mask(vectors)]
 
 
 def percentile_limits(vol, lo_pct: float = 1.0, hi_pct: float = 99.9,

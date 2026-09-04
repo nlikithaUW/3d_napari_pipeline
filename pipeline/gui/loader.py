@@ -324,8 +324,12 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
         _next(0)
 
     # ---- "Load all saved": every tab's loader, so a session restores in one
-    # click. Each loader uses its own path field's current value and reports a
-    # missing file itself, so features that were never saved are just skipped.
+    # click. Each loader uses its own path field's current value and opens with
+    # `widgets.skip_if_missing`, so a feature that was never saved prints one
+    # skip line and hands off. That guard is shared rather than re-written per
+    # tab: it existed in exactly one loader of twelve, and the other eleven
+    # turned a missing optional artifact into a full traceback and a napari
+    # error popup -- the chain survived it, but it does not read that way.
     # (label, state key) in dependency-friendly order.
     _LOADERS = [
         ("DAPI labels", "load_dapi_labels"),

@@ -26,7 +26,7 @@ from napari.qt.threading import thread_worker
 
 from ..rf import AdhesionRF
 from .. import saved_io as sio
-from .widgets import call_all, with_after
+from .widgets import call_all, skip_if_missing, with_after
 
 LABELS_LAYER = "VE-cad boundary labels"
 PROBA_LAYER = "VE-cad junction proba"
@@ -163,6 +163,9 @@ def build(state, viewer) -> Container:
         print(f"Junction proba saved to {proba_path_w.value}", flush=True)
 
     def _load_proba(*_):
+        if skip_if_missing(str(proba_path_w.value), None,
+                           "Load junction proba", "junction proba file"):
+            return
         try:
             proba = sio.load_junction_proba(str(proba_path_w.value))
         except Exception as exc:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 from magicgui import magicgui
 from magicgui.widgets import (
@@ -12,8 +10,10 @@ from magicgui.widgets import (
 from napari.qt.threading import thread_worker
 
 from ..denoise import auto_min_size_otsu, filter_by_size, label_and_sizes, otsu_mask
+from ..saved_check import fibroblast_count_notes
 from .. import saved_io as sio
-from .widgets import Histogram, call_all, debounce, pyramid_views, with_after
+from .widgets import (Histogram, call_all, debounce, pyramid_views,
+                      skip_if_missing, with_after)
 
 
 def build(state, viewer) -> Container:
@@ -112,6 +112,9 @@ def build(state, viewer) -> Container:
 
     def _load_labels(*_, after=None, visible=True):
         path = str(labels_path_w.value)
+        if skip_if_missing(path, after, "Load DAPI labels",
+                           "DAPI components file"):
+            return
 
         @thread_worker
         def _run():
@@ -344,13 +347,13 @@ def build(state, viewer) -> Container:
 
     def _load_nuc(*_, after=None, visible=True):
         path = str(nuc_path_w.value)
-        # Check for the file up front so a folder that never had this step run
-        # (every pre-P04 _saved folder) prints a clean skip rather than an
-        # Errno 2 traceback out of the worker.
-        if not Path(path).exists():
-            print(f"No split nuclei file at {path} — skipped (run 'Count "
-                  f"fibroblasts' to create it).", flush=True)
-            call_all(after, label="Load split nuclei")
+        # The guard that used to live here, inline: a folder that never had
+        # this step run (every pre-P04 _saved folder) prints a clean skip
+        # rather than an Errno 2 traceback out of the worker. It is
+        # `skip_if_missing` now, and every other loader shares it.
+        if skip_if_missing(path, after, "Load split nuclei",
+                           "split nuclei file",
+                           "Run 'Count fibroblasts' to create it."):
             return
 
         @thread_worker
@@ -419,6 +422,9 @@ def build(state, viewer) -> Container:
 
     def _load_fib(*_, after=None, visible=True):
         path = str(fib_path_w.value)
+        if skip_if_missing(path, after, "Load fibroblast count",
+                           "fibroblast count file"):
+            return
         try:
             fc, skipped = sio.load_fibroblast_count(path)
             state["fibroblast_count"] = fc

@@ -31,7 +31,8 @@ from ..denoise import (
     sauvola_mask,
     suggest_floor_k,
 )
-from .widgets import Histogram, call_all, debounce, pyramid_views, with_after
+from .widgets import (Histogram, call_all, debounce, pyramid_views,
+                      skip_if_missing, with_after)
 
 METHOD_NIBLACK = "niblack"
 METHOD_SAUVOLA = "sauvola"
@@ -416,6 +417,9 @@ def build(state, viewer) -> Container:
 
     def _load_cadh(*_, after=None, visible=True):
         path = str(cadh_path_w.value)
+        if skip_if_missing(path, after, "Load cadherin",
+                           "VE-Cadherin components file"):
+            return
 
         @thread_worker
         def _run():

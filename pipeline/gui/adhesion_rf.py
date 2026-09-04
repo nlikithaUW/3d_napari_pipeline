@@ -32,6 +32,7 @@ from .widgets import (
     after_on_error,
     call_all,
     pyramid_views,
+    skip_if_missing,
     with_after,
 )
 
@@ -313,6 +314,9 @@ def build(state, viewer) -> Container:
 
     def _load_proba(*_, after=None, visible=True):
         path = str(proba_path_w.value)
+        if skip_if_missing(path, after, "Load proba",
+                           "adhesion probability map"):
+            return
         levels = state.get("levels", 1)
         scale = state.get("scale", (1.0, 1.0, 1.0))
 
@@ -511,6 +515,9 @@ def build(state, viewer) -> Container:
 
     def _load_inst(*_, after=None, visible=True):
         path = str(inst_path_w.value)
+        if skip_if_missing(path, after, "Load instances",
+                           "adhesion instances file"):
+            return
         levels = state.get("levels", 1)
         scale = state.get("scale", (1.0, 1.0, 1.0))
 
@@ -700,6 +707,11 @@ def build(state, viewer) -> Container:
 
     def _load_ratio(*_, after=None, visible=True):
         path = str(ratio_path_w.value)
+        if skip_if_missing(path, after, "Load ratio",
+                           "clover/ruby ratio layer",
+                           "Click 'Clover/Ruby ratio', then 'Save ratio "
+                           "layer', to create it."):
+            return
         levels = state.get("levels", 1)
         # Ratio layer is on the native-Z grid, so reload at the native voxel size.
         scale = tuple(state.get("raw_voxel_zyx_um",

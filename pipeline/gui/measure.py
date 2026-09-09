@@ -6,7 +6,7 @@ import os
 
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
-from magicgui.widgets import Container, FileEdit, PushButton
+from magicgui.widgets import Container, FileEdit, PushButton, SpinBox
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from napari.qt.threading import thread_worker
@@ -24,6 +24,11 @@ from ..saved_check import (
 from .widgets import call_all, with_after
 
 N_WORKERS = max(1, (os.cpu_count() or 8) - 4)
+
+# The 2x4 panel grid at the size it is meant to be read at. The on-screen
+# canvas is resized to the dock by Qt, so this is only honoured on export;
+# it is what keeps a saved figure from inheriting a squashed dock.
+FIG_SIZE_IN = (17.0, 7.0)
 
 
 def build(state, viewer):
@@ -449,7 +454,14 @@ def build(state, viewer):
         except Exception:
             pass
 
-    def _update_plots(r):
+    def _draw_panels(target_axes, r):
+        """Draw the eight panels into `target_axes` (a 2x4 array).
+
+        Shared by the on-screen canvas and the figure export so the file and
+        the dock cannot show different plots -- the same doctrine as
+        `saved_check.py`: never write the second copy.
+        """
+        axes = target_axes
         for ax in axes.flat:
             ax.clear()
 
@@ -503,6 +515,8 @@ def build(state, viewer):
         axes[1, 3].set_ylabel("Clover / Ruby ratio")
         axes[1, 3].set_title("Clover/Ruby vs curvature")
 
+    def _update_plots(r):
+        _draw_panels(axes, r)
         canvas.draw()
 
     # ---- Export per-adhesion measurements to CSV ----
@@ -589,6 +603,59 @@ def build(state, viewer):
                                         label="run_measure"))
     state["run_measure"] = _run_measure_step
 
-    controls = Container(widgets=[measure_btn, export_path_w, export_btn],
+    # ---- Export the plot panels as PNG + SVG ----
+    # Deliberately NOT `fig.savefig(...)`: Qt owns the on-screen figure's size,
+    # so the live canvas is whatever the dock happens to be and saving it bakes
+    # the squashed dock geometry into the file (overlapping ticks, clipped
+    # titles) -- and it would look different every time the window is resized.
+    # Instead redraw the same panels into a fresh off-screen figure at
+    # FIG_SIZE_IN, which also works when the dock is collapsed or tiny.
+    fig_path_w = FileEdit(value="adhesion_figures.png", label="figure_path",
+                          mode="w")
+    fig_dpi_w = SpinBox(value=300, min=50, max=1200, step=50, label="PNG dpi")
+    # The outer container hides labels, so a bare spinbox would be an unlabelled
+    # number; nest it in a labelled row of its own.
+    fig_dpi_row = Container(widgets=[fig_dpi_w], labels=True)
+    fig_btn = PushButton(text="Export figures (PNG+SVG)")
+
+    def _export_figures(*_):
+        result = state.get("measure_result")
+        if result is None:
+            print("No measurements to plot — click 'Measure adhesions' first.",
+                  flush=True)
+            return
+        from datetime import datetime
+        from pathlib import Path
+        import matplotlib
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+        _base = Path(str(fig_path_w.value))
+        _ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        png = _base.with_name(f"{_base.stem}_{_ts}.png")
+        svg = _base.with_name(f"{_base.stem}_{_ts}.svg")
+        try:
+            # constrained_layout, not tight_layout: it solves the panel spacing
+            # for this exact figure size, so nothing overlaps at 17x7.
+            out = Figure(figsize=FIG_SIZE_IN, constrained_layout=True)
+            FigureCanvasAgg(out)          # savefig needs a canvas attached
+            _draw_panels(out.subplots(2, 4), result)
+            title = state.get("image_name") or ""
+            if title:
+                out.suptitle(title, fontsize=11)
+            # svg.fonttype "none" keeps labels as real text rather than
+            # outlines, so the SVG stays editable in Illustrator/Inkscape.
+            with matplotlib.rc_context({"svg.fonttype": "none"}):
+                out.savefig(png, dpi=int(fig_dpi_w.value))
+                out.savefig(svg)
+            print(f"Figures -> {png}\n           {svg}", flush=True)
+        except Exception as exc:
+            print(f"Figure export error: {exc}", flush=True)
+
+    fig_btn.changed.connect(_export_figures)
+    state.setdefault("save_path_widgets", []).append(
+        (fig_path_w, "{stem}_adhesion_figures.png"))
+
+    controls = Container(widgets=[measure_btn, export_path_w, export_btn,
+                                  fig_path_w, fig_dpi_row, fig_btn],
                         labels=False)
     return controls, canvas

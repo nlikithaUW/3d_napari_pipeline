@@ -435,12 +435,21 @@ def build(state, viewer):
 
     measure_btn.changed.connect(_measure)
 
-    def _kde_overlay(ax, data, color):
+    def _kde_overlay(ax, data, color, ylabel):
         """Histogram with KDE overlay (density-normalised).
 
         Drops non-finite values first: force is all-NaN when FRET isn't
         configured, and hist/linspace on NaN would blow up the whole figure.
+
+        `density=True` (needed so the `gaussian_kde` PDF overlays on the same
+        scale), so the y-axis is a probability density and its unit is the
+        *reciprocal* of the x-axis unit -- 1/pN against force, and µm against
+        curvature, which is already 1/µm. `ylabel` is passed per panel rather
+        than derived because nothing here knows the x unit. The label is set
+        even when the panel is empty (< 2 finite points), so an all-NaN force
+        panel is still labelled rather than blank and ambiguous.
         """
+        ax.set_ylabel(ylabel)
         data = np.asarray(data)
         data = data[np.isfinite(data)]
         if data.size < 2:
@@ -470,19 +479,20 @@ def build(state, viewer):
         dn = r["dist_nuc_um"]
         cr = r["ratio_clover_ruby"]
 
-        _kde_overlay(axes[0, 0], fm, "crimson")
+        _kde_overlay(axes[0, 0], fm, "crimson", "Density (1/pN)")
         axes[0, 0].set_xlabel("Force (pN)")
         axes[0, 0].set_title("Force distribution")
 
-        _kde_overlay(axes[0, 1], dm, "steelblue")
+        _kde_overlay(axes[0, 1], dm, "steelblue", "Density (1/µm)")
         axes[0, 1].set_xlabel("Distance to vessel mesh (µm)")
         axes[0, 1].set_title("Mesh distance")
 
-        _kde_overlay(axes[0, 2], dn, "darkorange")
+        _kde_overlay(axes[0, 2], dn, "darkorange", "Density (1/µm)")
         axes[0, 2].set_xlabel("Distance to nearest nucleus (µm)")
         axes[0, 2].set_title("Nucleus distance")
 
-        _kde_overlay(axes[1, 0], cr[np.isfinite(cr)], "seagreen")
+        _kde_overlay(axes[1, 0], cr[np.isfinite(cr)], "seagreen",
+                     "Density (per unit ratio)")
         axes[1, 0].set_xlabel("Clover / Ruby ratio")
         axes[1, 0].set_title("Clover/Ruby ratio")
 
@@ -503,7 +513,9 @@ def build(state, viewer):
         axes[1, 2].set_title("Clover/Ruby vs mesh distance")
 
         cm = r["curv_mean"]
-        _kde_overlay(axes[0, 3], cm[np.isfinite(cm)], "purple")
+        # x is 1/µm, so the density is in µm.
+        _kde_overlay(axes[0, 3], cm[np.isfinite(cm)], "purple",
+                     "Density (µm)")
         axes[0, 3].set_xlabel("Mean curvature (1/µm)")
         axes[0, 3].set_title("Vessel curvature (mean)")
 

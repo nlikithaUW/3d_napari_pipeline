@@ -5,19 +5,28 @@ Reads each .nd2 in 3d_images_folder/images/WT/, drops the channels
 not listed as useful in params.json, and writes a sibling .tif (OME-TIFF,
 uint16, zstd compressed) carrying pixel size and channel names in metadata.
 ND2 files are never modified; existing .tif siblings are overwritten.
+
+The conversion itself lives in `pipeline/convert.py`, shared with the napari
+Convert tab. Before converting, every file is checked there: one that cannot be
+read, is multi-position, or whose ND2 channel names differ from the first
+convertible file's is skipped and reported instead of stopping the run or being
+written with the wrong channel names.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-import nd2
-import numpy as np
-import tifffile
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from pipeline.convert import (  # noqa: E402
+    channel_guard, convert_one, inspect_nd2, keep_channel_plan,
+)
+
 DATA_ROOT = ROOT / "3d_images_folder"
 PARAMS_PATH = DATA_ROOT / "params.json"
 
@@ -25,64 +34,6 @@ PARAMS_PATH = DATA_ROOT / "params.json"
 def load_params() -> dict:
     with PARAMS_PATH.open() as f:
         return json.load(f)
-
-
-def keep_channel_plan(params: dict, nd2_channel_names: list[str]) -> tuple[list[int], list[dict]]:
-    """
-    Decide which ND2 channel indices to keep and produce the post-convert
-    channel list (name + role, in OME order). Matches params.json entries to
-    ND2 channels by the explicit `index` field.
-    """
-    nd2_lower = [n.lower() for n in nd2_channel_names]
-    keep_idx: list[int] = []
-    out_channels: list[dict] = []
-    for entry in params["channels"]:
-        idx = entry["index"]
-        if idx >= len(nd2_channel_names):
-            raise ValueError(f"params channel index {idx} out of range for ND2 ({len(nd2_channel_names)} channels)")
-        if nd2_lower[idx] == "junk":
-            raise ValueError(f"params lists channel index {idx} but ND2 marks it junk")
-        keep_idx.append(idx)
-        out_channels.append({"name": entry["name"], "role": entry["role"]})
-    return keep_idx, out_channels
-
-
-def convert_one(nd2_path: Path, keep_idx: list[int], channel_names: list[str]) -> Path:
-    out_path = nd2_path.with_suffix(".tif")
-    with nd2.ND2File(str(nd2_path)) as nd:
-        sizes = nd.sizes
-        if set(sizes.keys()) - {"Z", "C", "Y", "X"}:
-            raise ValueError(f"Unexpected axes in {nd2_path.name}: {sizes}")
-        vox = nd.voxel_size()  # (x, y, z) microns
-        arr = nd.asarray()  # (Z, C, Y, X) uint16
-
-    if arr.ndim != 4:
-        raise ValueError(f"Expected 4D ZCYX, got shape {arr.shape} for {nd2_path.name}")
-    arr = arr[:, keep_idx, :, :]
-    assert arr.dtype == np.uint16, f"unexpected dtype {arr.dtype}"
-
-    ome_metadata = {
-        "axes": "ZCYX",
-        "PhysicalSizeX": float(vox.x),
-        "PhysicalSizeXUnit": "µm",
-        "PhysicalSizeY": float(vox.y),
-        "PhysicalSizeYUnit": "µm",
-        "PhysicalSizeZ": float(vox.z),
-        "PhysicalSizeZUnit": "µm",
-        "Channel": {"Name": channel_names},
-    }
-
-    tifffile.imwrite(
-        str(out_path),
-        arr,
-        photometric="minisblack",
-        compression="zstd",
-        compressionargs={"level": 5},
-        ome=True,
-        metadata=ome_metadata,
-        bigtiff=True,
-    )
-    return out_path
 
 
 def update_params(params: dict) -> dict:
@@ -109,15 +60,29 @@ def main() -> None:
         print("No ND2 files found.")
         return
 
-    # Resolve channel plan from the first ND2 (assume consistent acquisition).
-    with nd2.ND2File(str(nd2_files[0])) as nd:
-        nd2_channel_names = [c.channel.name for c in nd.metadata.channels]
+    # Header-check every file first; the channel plan comes from the first
+    # convertible one and every other file must carry the same ND2 channels.
+    infos = [inspect_nd2(f) for f in nd2_files]
+    usable = [i for i in infos if i["ok"]]
+    if not usable:
+        for i in infos:
+            print(f"SKIP {i['path'].relative_to(DATA_ROOT)}: {i['reason']}")
+        print("No convertible ND2 files found.")
+        sys.exit(1)
+    nd2_channel_names = usable[0]["channels"]
     keep_idx, out_channels = keep_channel_plan(params, nd2_channel_names)
     out_names = [c["name"] for c in out_channels]
     print(f"ND2 channels: {nd2_channel_names}")
     print(f"Keeping indices {keep_idx} -> {out_names}")
 
-    for f in nd2_files:
+    converted, skipped = 0, 0
+    for info in infos:
+        f = info["path"]
+        reason = info["reason"] or channel_guard(nd2_channel_names, info["channels"])
+        if reason:
+            print(f"SKIP {f.relative_to(DATA_ROOT)}: {reason}")
+            skipped += 1
+            continue
         out = f.with_suffix(".tif")
         if args.dry_run:
             print(f"DRY: {f} -> {out}")
@@ -125,12 +90,16 @@ def main() -> None:
         print(f"Converting {f.relative_to(DATA_ROOT)} ...", flush=True)
         convert_one(f, keep_idx, out_names)
         print(f"  wrote {out.relative_to(DATA_ROOT)} ({out.stat().st_size/1e6:.1f} MB)")
+        converted += 1
 
-    if not args.dry_run:
+    if not args.dry_run and converted:
         params = update_params(params)
         with PARAMS_PATH.open("w") as f:
             json.dump(params, f, indent=2)
         print(f"Updated {PARAMS_PATH.relative_to(ROOT)} (dropped per-channel index fields)")
+    if skipped:
+        print(f"{skipped} file(s) skipped - see SKIP lines above.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

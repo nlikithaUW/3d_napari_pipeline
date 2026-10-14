@@ -115,7 +115,7 @@ true of the code and data on that date and may not be true now.
 | [P42](#p42) | `nuc_id` is a nearest-neighbour join presented as ownership | **S1** | open — **a cross-tab was retracted on this**; qualifies [P04](#p04) |
 | [P43](#p43) | The clover gate cost bias and saved ~10%; removed | S3 | **fixed** 2026-08-25 — refutes [I07](#i07)'s premise |
 | [I09](#i09) | RF inference is dominated by `_eigh3x3` on the CPU (~52%) | idea | open — **~2× available, exact**; profiled, three proposals rejected on measurement |
-| [P44](#p44) | The RF's training annotations were never saved; the model cannot be retrained | **S2** | open — **blocks [P03](#p03)'s hypothesis and its fix**; escalates [H02](#h02) |
+| [P44](#p44) | The RF's training annotations were never saved; the model cannot be retrained | **S2** | open — **blocks [P03](#p03)'s hypothesis and its fix**; escalates [H02](#h02). 2026-10-13: new training now saves its annotations (`adhesion_annotations.npz`); the shipped model's remain lost |
 | [P45](#p45) | `batch_mesh` crashed on every invocation — two names used, never imported | S3 | **fixed** 2026-08-26 — every mesh artifact since `fa8d895` came from the GUI |
 | [P46](#p46) | A digitized wall is longer than the wall it stands for, so absolute τ reads ~5% low | S3 | **fixed** 2026-08-28 — sections cut from χ, not from the binary lumen; force balance 1.041 → **0.996** on real sections |
 | [P47](#p47) | Emptying the cell-mesh slice `Shapes` layer poisons its mesh with NaN and faults the GL draw | S3 | **fixed** 2026-08-26 — a second, unguarded `add_surface` fixed in the same change |
@@ -135,6 +135,9 @@ true of the code and data on that date and may not be true now.
 | [P60](#p60) | A short reconstruction stub is the lowest-resistance path and takes most of the flow | **S2** | open — **86.7% of the flow to a 17.2 µm stub** on image 6, rescaling every τ by ~7.5×; a property of R̂ = ∫ds/Q̂, not of one image. No guard |
 | [P61](#p61) | An untagged mesh rebuild silently invalidates analyses already computed against the previous one | S3 | open — cost a false diagnosis of correct code 2026-09-03; the GUI's `vessel_build_id` mechanism has no equivalent outside it |
 | [P62](#p62) | "Load all saved" tracebacked on a never-saved artifact; the fibroblast-count step had been dead | S3 | **fixed** 2026-09-04 — the guard existed in 1 loader of 12; `fibroblast_count_notes` was never imported |
+| [P64](#p64) | One global `params.json` applied one FRET calibration to every experiment in `images/` | **S2** | **fixed** 2026-10-13 — `io.resolve_params`: an experiment folder's own params.json, else the global one with its `fret` block dropped. One resolver for GUI, batch, batch_measure, batch_mesh |
+| [P65](#p65) | V04 FRET: donor-dark background voxels read efficiency 1.0; efficiency falls with donor brightness | S3 | open — 57% of included voxels sit at eff = 1, but **99.8% of those lie > 2 µm from any fibroblast** (0.9% saturate near one; median eff there 0.15). Adhesion-level force largely unaffected; the brightness trend (0.32 → 0.07) is unexplained |
+| [P63](#p63) | `nd2_to_ometiff.py` applied the first file's channel plan to every file unchecked, and one unreadable file stopped the run | S2 | **fixed** 2026-10-13 — per-file header check + channel-name guard in `pipeline/convert.py`, shared with the new Convert tab; 8 of 24 V04 files would have stopped or mislabelled a run |
 | [I12](#i12) | Moment deconvolution — subtract the PSF's second moment before taking the axis | idea | open — **the only route that fixes [P58](#p58)**; blocked on a PSF measurement this dataset does not have |
 | [I13](#i13) | The one orientation test [P58](#p58) leaves standing — adhesion **xy** axis against the κ1 direction on flat-facing wall | idea | open — **step 1 (feasibility) run 2026-09-04**: 250–400 adhesions/image survive at a permissive anisotropy gate, ~0 at a strict one. Carries the six-image "adhesions sit on slightly flatter wall" measurement (AUC 0.40–0.59, one image inverts, depth confound live) |
 | [H01](#h01) | Repository has no LICENSE | — | open |
@@ -7037,6 +7040,17 @@ verifying it still loads and still reproduces a known `proba >= 0.5` set.
 **History**
 - 2026-08-25 — opened after asking whether the RF could simply be retrained to
   sidestep a feature-set change. It cannot.
+- 2026-10-13 — **the forward half is fixed**: the Adhesion RF tab saves the
+  "Adhesion labels" layer to `<stem>_saved/adhesion_annotations.npz` every time
+  "Train RF" completes, and has **Save / Load annotations** buttons to persist
+  and resume painting (`saved_io.save_annotations`; dense uint8,
+  `savez_compressed` — compression makes the near-empty volume as small as a
+  sparse encoding without a second format). Load refuses to overwrite a layer
+  that already has painting, and refuses annotations whose shape is not the
+  loaded image's. Still open: the **shipped** `adhesion_rf.joblib`'s
+  annotations remain lost, and nothing writes annotations beside a saved
+  model — a model trained on one image is traceable to that image's `_saved`
+  folder only by the user knowing which image it was.
 
 ---
 
@@ -8497,6 +8511,172 @@ line, and `fibroblast_count.npz` now loads (27 VnTs+ of 276 nuclei).
   the more serious half and is the one that would never have been reported —
   a step that fails inside its own `except` and prints one line among eleven
   looks exactly like a step that had nothing to do.
+
+---
+
+<a id="p63"></a>
+## P63 — the ND2 converter trusted the first file's channels for every file, and stopped at the first unreadable one
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-10-13 |
+| **Severity** | S2 — (a) wrong channel names written into the OME-TIFF with no error, so every downstream role is silently the wrong stain; (b) a run that dies part-way |
+| **Opened** | 2026-10-13 (first conversion of a new imaging round, V04: 20x NSPARC, 24 `.nd2` in one folder) |
+| **Last verified** | 2026-10-13 |
+| **Resolved** | 2026-10-13 |
+| **Where** | `Scripts/nd2_to_ometiff.py::main`; now `pipeline/convert.py` (`inspect_nd2`, `channel_guard`) and the new Convert tab `pipeline/gui/convert.py` |
+
+**(a) One channel plan, checked against one file.** `main` read the ND2 channel
+names of `nd2_files[0]` only, built the index plan from them, and applied it to
+every other file. `keep_channel_plan` selects by **index**, so a file acquired
+with its channels in a different order would be written with the right pixels
+under the wrong names — and `io.load_stack` matches roles by those names, so
+the error propagates to every tab and column without a message.
+
+**(b) No per-file error handling.** `nd2.ND2File` raises on a damaged file and
+`convert_one` raises on a multi-position one; either stopped the loop. In the
+V04 folder that is 8 of 24 files: six position files re-exported from
+`Epi_008` (`Invalid ChunkMap signature`) and two near-empty ones — sorted
+first-to-last, the run would have died at the third file.
+
+**Fix.** `pipeline/convert.py` holds the conversion, with `keep_channel_plan`
+and `convert_one` moved verbatim from the script (pixels of a reconverted file
+are identical to the script's; the bytes differ only in the random OME
+`urn:uuid` tifffile writes every time). Two additions, used by both front ends:
+`inspect_nd2` header-checks a file without decoding pixels and returns why it
+cannot be converted (unreadable, empty, multi-position, non-uint16) instead of
+raising; `channel_guard` refuses any file whose full ND2 channel-name list
+differs from the one the plan was built from. The script now skips and reports
+such files, exits 1 if it skipped any, and only rewrites `params.json` if it
+converted something.
+
+The new **Convert** tab (first tab) does the same per experiment folder:
+Scan → per-file status → one dropdown per `params.json` channel listing the
+ND2's channels by index and name → Convert, writing `<stem>.tif` beside each
+`.nd2`. Its mapping is saved as `images/<experiment>/nd2_channels.json`
+(`index/name/role` plus the `nd2_channels` it was made from, which is what the
+guard checks), so unlike the script it **never rewrites `params.json`**.
+
+Verified on V04: the dry run skips exactly the 8 bad files with a reason each;
+the tab converts `Epi_009` with the right mapping pre-guessed, refreshes the
+Load list, and refuses the same file when the saved mapping has two channels
+swapped.
+
+**Not fixed.** Multi-position files are refused, not split; `Epi_007`
+(P = 7), `Epi_008` (P = 5) and `Epi_011` (P = 3) still need their positions
+exported individually.
+
+**History**
+- 2026-10-13 — opened and fixed while bringing up V04.
+
+---
+
+<a id="p64"></a>
+## P64 — one global `params.json` applied one FRET calibration to every experiment
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-10-13 |
+| **Severity** | S2 — force columns computed with another dataset's constants, with no error |
+| **Opened** | 2026-10-13 (V04 is the first round with its own calibration; the V3 six have none) |
+| **Resolved** | 2026-10-13 |
+| **Where** | `pipeline/io.py::resolve_params`; callers `gui/loader.py::_load_image` (GUI and `batch`), `batch_measure._load_raw`, `batch_mesh` (substrate field), `Scripts/depth_check.py` |
+
+Every path read `3d_images_folder/params.json`, and FRET ran whenever it held a
+`fret` block. With two imaging rounds in `images/` — V3 uncalibrated, V04 with
+its own G and bleedthroughs — adding V04's constants there would have applied
+them to V3 too: plausible force numbers for a dataset that has no calibration,
+which is [P18](#p18) again. Passing `--params` per run only moves the problem:
+one GUI session has one params file, so loading a V3 image in a V04 session
+does the same thing.
+
+**Fix.** `resolve_params(tif, default)` uses `images/<experiment>/params.json`
+when it exists — channels and `fret` block both — and otherwise the default
+file **with its `fret` block dropped** (the log says so if one was there).
+FRET constants are therefore only ever read from beside the data they were
+calibrated for. Every image load prints which file it used, and the settings
+JSON beside each export records `settings.params = {source, fret}`.
+
+The Convert tab still names channels from the global file, and warns at Scan if
+the experiment's params.json names them differently (Load would then fail to
+match them).
+
+Verified: one GUI session loading a V04 image then a V3 image computes force for
+the first and clears it for the second; `batch_measure._load_raw` makes the
+same choice per image; a global file with a `fret` block injected yields
+FRET off for V3.
+
+**History**
+- 2026-10-13 — opened and fixed when the V04 constants were supplied.
+- 2026-10-13 — added an **off** switch: the Load tab's "compute FRET" checkbox
+  (with a per-image status line) and `--no-fret` on `batch` / `batch_measure`,
+  both through `io.fret_configured(..., enabled)`. It can only disable FRET;
+  the settings JSON records `settings.params.fret_enabled`.
+
+---
+
+<a id="p65"></a>
+## P65 — V04 FRET: donor-dark background voxels read efficiency 1.0, and efficiency falls with donor brightness
+
+| | |
+|---|---|
+| **Status** | open |
+| **Severity** | S3 — downgraded from S2 the same day: the saturated voxels are background, not fibroblast (see the location check below), so adhesion-level `force_*_pN` is largely unaffected; what remains is the unexplained brightness trend and a noisy `Force (pN)` display layer |
+| **Opened** | 2026-10-13 |
+| **Last verified** | 2026-10-13 |
+| **Where** | `images/V04/params.json` (`venus_thres` = 5) feeding the frozen `fret.py::fret_correct` |
+
+V04 constants: G 1.1093391, dbt 0.1407918, abt 0.2661129, `venus_thres` 5,
+`leave_neg` false. On `20x_Step1_Chip1_Epi_009` (every 4th slice, the frozen
+per-slice math): 2.3% of the volume is included (eff > 0); median included
+acceptor is **7 counts** after background subtraction, so a threshold of 5 sits
+at the noise floor. Efficiency by donor (mClover) signal:
+
+| donor counts | share of included | median eff | at eff = 1 |
+|---|---|---|---|
+| 0–1 | **48%** | 1.000 | 100% |
+| 1–10 | 28% | 0.725 | 32% |
+| 10–25 | 9% | 0.324 | 0% |
+| 25–50 | 6% | 0.212 | 0% |
+| 50–100 | 5% | 0.146 | 0% |
+| 100–200 | 3% | 0.109 | 0% |
+| 200+ | 1% | 0.074 | 0% |
+
+Two separate things:
+
+1. **Donor-dark voxels saturate by construction.** With idd ≈ 0,
+   `eff = (fc/G) / (idd + fc/G)` → 1 for any positive corrected FRET. These are
+   not high-FRET voxels. By acceptor: 64% at eff = 1 for 5–10 counts, 1% for
+   25–50. `venus_thres` is the only gate the frozen math has; it gates the
+   acceptor, not the donor.
+2. **Efficiency falls monotonically with brightness** where the donor is real
+   (0.32 → 0.07). Corrected FRET efficiency should not depend on expression
+   level; a trend like this commonly comes from residual background or
+   bleedthrough error. Not diagnosed.
+
+**Where the saturated voxels are.** The sensor is sparse by design — signal is
+expected only in the scattered fibroblasts — and VnTs carries donor and acceptor
+on one molecule, so real sensor voxels have both. Using bg-subtracted mClover
+> 25 (opened 3×3, grown ~2 µm) as a fibroblast proxy, on the same slices:
+**99.8%** of the eff = 1 voxels lie outside it; inside it only **0.9%**
+saturate, against 56.9% over all included voxels; and efficiency there
+(saturated excluded) has percentiles 5/25/50/75/95 = 0.016 / 0.075 / **0.149** /
+0.262 / 0.511. So (1) is acceptor noise in the background, which adhesions —
+segmented from mClover — do not reach; it shows in the `Force (pN)` layer, not
+materially in the per-adhesion columns. (2) stands and is unexplained: it may be
+biology (brighter structures under different tension) or residual
+background/bleedthrough error.
+
+`venus_thres` was left at 5 by the experimenter, who confirmed the mClover
+signal looks correct by eye. Open work: check (2) against the calibration
+samples; if the display layer matters, a higher `venus_thres` or a donor gate
+(a change to frozen `fret.py` — needs explicit sign-off) would clean it.
+
+**History**
+- 2026-10-13 — opened on the first V04 FRET run as S2 (57% of included voxels
+  at eff = 1).
+- 2026-10-13 — downgraded to S3 after locating them: 99.8% are > 2 µm from
+  donor-positive signal. Brightness trend still open.
 
 ---
 

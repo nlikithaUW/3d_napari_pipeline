@@ -139,6 +139,15 @@ Image data is not shipped with this repository, so **you bring your own** —
 and `params.json` is how you describe it. It lives at
 `3d_images_folder/params.json` and has one required key.
 
+**Per-experiment override.** If an experiment folder holds its own
+`images/<experiment>/params.json`, every image in that folder is analysed with
+it instead — by the GUI, `pipeline.batch`, `pipeline.batch_measure` and
+`pipeline.batch_mesh` alike (`io.py::resolve_params`). This is where a `fret`
+block goes: **FRET runs only from an experiment folder's own params.json**, so
+one experiment's calibration can never be applied to another's images. Each
+image load logs which file it used, and every exported settings JSON records it
+under `settings.params` together with the FRET constants applied.
+
 ```json
 {
   "channels": [
@@ -184,8 +193,10 @@ disagree with the image.
 
 ### The optional `fret` block
 
-Add this block **only if you have calibrated these constants on your own
-instrument with your own sensor:**
+Add this block to an **experiment folder's** `params.json` (see above) — a
+`fret` block in the global `3d_images_folder/params.json` is ignored — and
+**only if you have calibrated these constants on your own instrument with your
+own sensor:**
 
 ```json
 "fret": {
@@ -208,8 +219,13 @@ instrument with your own sensor:**
 > look plausible and mean nothing. This has already happened once in this
 > project's history — see [P18](docs/ISSUES.md#p18).
 
-Behaviour is driven by presence, not by a flag: FRET runs only when the `fret`
-block exists **and** the `clover`, `ruby`, and `fret` roles are all mapped.
+Behaviour is driven by presence, not by a flag: FRET runs only when the image's
+experiment folder has a `params.json` with a `fret` block **and** the `clover`,
+`ruby`, and `fret` roles are all mapped. The one switch is an **off** switch:
+untick **compute FRET** on the Load tab (it shows, per image, whether a
+calibration is available and applies at the next Load), or pass `--no-fret` to
+`pipeline.batch` / `pipeline.batch_measure`. It cannot turn FRET on for an
+experiment without a calibration.
 Otherwise it is skipped, the efficiency/force layers are not added, and
 `force_*_pN` exports blank. Either way the loader logs which path it took
 (`io.py::fret_configured`). Skipping is also substantially faster and uses far
@@ -234,19 +250,50 @@ Fret_LUT/                    # efficiency -> force calibration table
 **`images/*/*.tif` is exactly one folder deep.** The loader globs that shape
 (`imgs_dir.glob("*/*.tif")`), so a stack sitting directly in `images/`, or nested
 two levels down, will not appear in the image picker. Keep the condition folder.
+Use one folder per experiment or condition: the Load tab's **experiment**
+dropdown restricts the image picker to one folder (`(all)` lists every one).
 
-Convert raw `.nd2` to the expected OME-TIFF with:
+Convert raw `.nd2` to the expected OME-TIFF either in the GUI or headless.
+
+**In the GUI — the Convert tab** (first tab of `python -m pipeline.view`):
+
+1. Copy the `.nd2` files into `3d_images_folder/images/<experiment>/`.
+2. Pick that folder and click **Scan .nd2 files**. Each file is header-checked
+   and listed as OK or with the reason it will be skipped — unreadable, empty,
+   multi-position (not supported; export positions individually), or ND2
+   channels that differ from the mapping's.
+3. Under **Channel mapping**, choose for each `params.json` channel which ND2
+   channel (shown as `index: name (emission)`) it comes from. A first guess is
+   pre-selected from the ND2 channel names; check it.
+4. Click **Convert selected**. Each `<stem>.tif` is written beside its `.nd2`
+   and the Load tab's image list refreshes.
+
+The mapping is saved as `images/<experiment>/nd2_channels.json`, so the next
+scan of that folder restores it. The tab **never modifies `params.json`**.
+
+**Headless:**
 
 ```bash
-python Scripts/nd2_to_ometiff.py
+python Scripts/nd2_to_ometiff.py [--subdir <experiment>] [--dry-run]
 ```
+
+The script reads the channel plan from `index` fields in `params.json`, which it
+**removes again after a successful conversion** — keep a copy of the indexed
+file. Files it cannot convert, or whose ND2 channels differ from the first
+convertible file's, are skipped and reported ([P63](docs/ISSUES.md#p63)). Both
+paths share `pipeline/convert.py`, so they write the same file.
 
 ### About `adhesion_rf.joblib`
 
 A trained random-forest adhesion classifier is included at the repository root.
 It was **trained on one specific dataset** (one microscope, one sensor, one set of
 acquisition settings) and is a starting point, not a general-purpose model.
-Expect to retrain it on your own data via the Adhesion RF tab.
+Expect to retrain it on your own data via the Adhesion RF tab. The painted
+training labels are saved to `<stem>_saved/adhesion_annotations.npz` each time
+you train, and **Save / Load annotations** lets you resume painting later — so,
+unlike the shipped model's ([P44](docs/ISSUES.md#p44)), a model you train can be
+retrained. Save it under a new `model_path` rather than over
+`adhesion_rf.joblib`.
 
 ## Running it
 
@@ -256,8 +303,9 @@ Expect to retrain it on your own data via the Adhesion RF tab.
 python -m pipeline.view
 ```
 
-Opens napari with a tab per stage — **Load, Display, Nuclei, Cadherin, Cell mesh,
-Vessel mesh, Clover, Adhesion RF, VE-cad RF, ROI, Measure**. Typical flow: load an
+Opens napari with a tab per stage — **Convert, Load, Display, Nuclei, Cadherin,
+Cell mesh, Vessel mesh, Clover, Adhesion RF, VE-cad RF, ROI, Measure**. Typical
+flow: convert new `.nd2` files (see [Data layout](#data-layout)) → load an
 image → segment nuclei → VE-cadherin mask → vessel mesh + curvature → load a
 trained RF model → Adhesion RF predict → post-process → Measure → export CSV.
 Progress prints appear in the terminal **and** in the in-app **Log** dock.
@@ -323,6 +371,7 @@ and saved labelling is reported and the file left alone
 | `--redo-json` | Also measure folders that already have a settings JSON |
 | `--only SUBSTR` | Restrict to `_saved` folders matching a substring |
 | `--strict` | Exit 2 if any CSV was written with a silently blank column |
+| `--no-fret` | Skip FRET even where the experiment is calibrated; `force_*_pN` export blank (also on `pipeline.batch`) |
 
 Exit codes: `0` all measured, `1` at least one image failed, `2` (with
 `--strict`) something was degraded. Every batch runner prints a per-image summary
@@ -493,6 +542,7 @@ untouched by that re-export.**
 | `dist_mesh_um`, `curv_*` | **Partly fixed 2026-08-12.** `dist_mesh_um` used to measure to *every* mesh vertex, including the many that sit strictly inside the alpha-shape solid and belong to no face — 73–85% of them on five of the six images, so 35–63% of adhesions were measuring their distance to a point buried in the wall. It now measures to the surface only, and the median rose 1.4–2.3× on those five. Still open: the vertices are a ~2 µm-spaced point cloud whose resolution is set by `subsample_um`, not by the image, and curvature is still assigned with no maximum distance | [P09](docs/ISSUES.md#p09), [P20](docs/ISSUES.md#p20) |
 | `dist_mesh_um`, `curv_*` | **Not comparable *between* images.** The headless batch builds every mesh at the widget defaults, while one image was built at hand-tuned values (`subsample_um = 5.0` against the default 1.0) — 7,282 surface vertices against 11k–41k. Vertex count also varies 5× between images at *identical* settings, tracking cadherin mask size. Rebuilding **one image** both ways, with its mask held fixed, moves the surface-vertex count 4.6× (7,282 → 33,537), `dist_mesh_um`'s median 2.30 → 1.63 µm and κ2's −0.070 → −0.163 1/µm — the parameters alone, nothing else changed. Note the hand-tuned image is **not** a known-good target — it was tuned lightly and the exercise mainly revealed how strongly these outputs depend on the parameters, which is the problem itself. Within-image rank only | [P26](docs/ISSUES.md#p26) |
 | `force_*_pN` | Blank by design without a FRET calibration. If you configure one, the numbers are only as good as your calibration | [P18](docs/ISSUES.md#p18) |
+| `force_*_pN` (V04) | Efficiency near the fibroblasts is plausible (median 0.15), and the voxels saturating at 1.0 are background between cells, not adhesions. But efficiency falls with donor brightness (0.32 → 0.07), unexplained — compare across expression levels with care | [P65](docs/ISSUES.md#p65) |
 
 ### Before drawing any conclusion from this CSV
 
@@ -522,7 +572,8 @@ python Scripts/depth_check.py --dir 3d_images_folder/images/WT --channels
 ## Helper scripts (`Scripts/`)
 
 - `nd2_to_ometiff.py` — convert raw `.nd2` to OME-TIFF, dropping junk channels and
-  writing pixel size + channel names into the OME metadata.
+  writing pixel size + channel names into the OME metadata. The headless twin of
+  the Convert tab; both call `pipeline/convert.py`.
 - `gputest.py` — quick check that the cupy/CUDA GPU path works.
 - `depth_check.py` — tests whether `ratio_clover_ruby` drifts with imaging depth.
   `--channels` splits the ratio into mClover and mRuby to show which channel

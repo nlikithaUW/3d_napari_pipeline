@@ -24,6 +24,7 @@ from .gui import (
     cadherin_rf,
     cell_mesh,
     clover,
+    convert,
     display,
     loader,
     logpanel,
@@ -129,6 +130,8 @@ def main() -> None:
     state = new_state()
 
     tabs = QTabWidget()
+    tabs.addTab(_wrap(convert.build(state, viewer, args.project_dir, args.params)),
+                "Convert")
     tabs.addTab(_wrap([loader.build(state, viewer, args.project_dir,
                                     args.params, args.lut)]), "Load")
     tabs.addTab(_wrap([display.build(state, viewer)]), "Display")

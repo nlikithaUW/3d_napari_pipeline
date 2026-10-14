@@ -94,7 +94,9 @@ Two cautions that matter more than the result:
   been removed from `params.json`, and FRET now runs only when that block is
   present *and* the clover/ruby/fret roles are mapped
   (`io.py::fret_configured`). Otherwise it's skipped and `force_*_pN` exports
-  blank.
+  blank. Since 2026-10-13 the block is read **only from an experiment folder's
+  own `params.json`** (`io.resolve_params`, [P64](docs/ISSUES.md#p64)); the V04
+  20x round has one, the V3 six do not.
 - **The uncalibrated `mClover/mRuby` ratio is the current tension proxy**
   (`ratio_clover_ruby`): Σclover ÷ Σruby over each adhesion, both
   background-subtracted per z-plane. Sum-then-divide, *not* a mean of per-voxel
@@ -157,7 +159,19 @@ where the fibroblasts are.
 
 **Core (`pipeline/`, no Qt):**
 - `io.py` — OME-TIFF loading, role-addressable channels (`Stack.by_role`),
-  isotropic resampling, `fret_configured` gate.
+  isotropic resampling, `fret_configured` gate, and `resolve_params` — **the one
+  place an image's params are chosen**: `images/<experiment>/params.json` if it
+  exists, else the global file **with any `fret` block dropped**, so FRET
+  constants are only ever read from beside the data they were calibrated for
+  ([P64](docs/ISSUES.md#p64)). Loader, batch, batch_measure, batch_mesh and
+  depth_check all go through it.
+- `convert.py` — ND2 → OME-TIFF, the one copy behind both `Scripts/nd2_to_ometiff.py`
+  and the Convert tab. `keep_channel_plan` / `convert_one` are the script's,
+  moved verbatim: channels are chosen **by ND2 index** and written under the
+  `params.json` names. Added: `inspect_nd2` (header-only; says why a file cannot
+  be converted instead of raising) and `channel_guard` (refuses a file whose ND2
+  channel names differ from the mapping's) — [P63](docs/ISSUES.md#p63).
+  Multi-position files are refused, not split.
 - `fret.py` — **FROZEN** FRET math (background subtract, bleedthrough, force LUT).
 - `gpu.py` — optional cupy shim for windowed ndimage ops. Falls back to CPU on
   genuine OOM only; any other CUDA error raises.
@@ -392,7 +406,9 @@ where the fibroblasts are.
   summary and set an exit code.
 - `view.py` — the napari app.
 
-**GUI (`pipeline/gui/`, one module per tab):** `loader`, `display`, `nuclei`,
+**GUI (`pipeline/gui/`, one module per tab):** `convert` (first tab; .nd2 →
+.tif inside `images/<experiment>/`, mapping saved there as `nd2_channels.json`,
+never touches `params.json`), `loader`, `display`, `nuclei`,
 `cadherin`, `cadherin_rf`, `cell_mesh`, `vessel_mesh`, `clover`, `adhesion_rf`,
 `roi`, `measure`, plus `widgets.py` (shared helpers), `logpanel.py`, and
 `state.py` — **the session dict and the pipeline step table, shared with
@@ -420,7 +436,8 @@ the graph's; it re-traces the graph to get it, because the sections are cut
 inside `lumen_graph`'s trace. `compute_shear` still defaults off in both paths
 and `batch_mesh --shear` still maps onto it — only the widget changed.
 
-**Scripts (`Scripts/`):** `nd2_to_ometiff.py`, `gputest.py`, `vecad_mip.py`,
+**Scripts (`Scripts/`):** `nd2_to_ometiff.py` (headless twin of the Convert tab,
+via `pipeline/convert.py`), `gputest.py`, `vecad_mip.py`,
 `fibroblast_cellpose.py` — the last counts endothelial cells from VE-cadherin to
 get fibroblasts by subtraction. **It does not work on this data and further
 parameter tuning will not fix it** (`docs/ISSUES.md` P41): with its two real

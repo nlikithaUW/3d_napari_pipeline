@@ -42,7 +42,7 @@ import numpy as np
 faulthandler.enable()
 
 from .fret import compute_fret_volume, load_force_lut, resample_fret_outputs
-from .io import fret_configured, load_params, load_stack, to_isotropic
+from .io import fret_configured, load_stack, resolve_params, to_isotropic
 from .measure_core import (
     CSV_COLUMNS, NUCLEUS_MAP_SPLIT, NUCLEUS_MAP_UNSPLIT,
     compute_measurements, export_meta,
@@ -67,19 +67,20 @@ def _p(msg: str) -> None:
     print(f"      . {msg}", flush=True)
 
 
-def _load_raw(tif: Path, params_path: Path, lut_path: Path):
+def _load_raw(tif: Path, params_path: Path, lut_path: Path,
+              fret_enabled: bool = True):
     """Recompute force_vol + native clover/ruby + scale exactly like the loader.
 
     ``force_vol`` is None when FRET isn't configured for this dataset — the
     same gate the GUI loader applies (see ``gui.loader.fret_configured``).
     """
-    _p("load_params")
-    params = load_params(params_path)
+    params, params_src, params_note = resolve_params(tif, params_path)
+    _p(params_note)
     _p(f"load_stack ({tif.name})")
     stack_raw = load_stack(tif, params)
     role_to_c = {role: stack_raw.channels.index(name)
                  for role, name in stack_raw.roles.items()}
-    fret_ok, why = fret_configured(params, stack_raw.roles)
+    fret_ok, why = fret_configured(params, stack_raw.roles, fret_enabled)
     if fret_ok:
         _p(f"load_force_lut ({why})")
         lut_eff, lut_force = load_force_lut(str(lut_path))
@@ -102,8 +103,11 @@ def _load_raw(tif: Path, params_path: Path, lut_path: Path):
         fret = resample_fret_outputs(fret, raw_voxel, stack.voxel_zyx_um[0])
     del stack_raw
     _p("raw load done")
+    params_used = {"source": str(params_src), "fret": params.get("fret"),
+                   "fret_enabled": bool(fret_enabled)}
     return (None if fret is None else fret["force_vol"],
-            clover_native, ruby_native, raw_voxel, tuple(stack.voxel_zyx_um))
+            clover_native, ruby_native, raw_voxel, tuple(stack.voxel_zyx_um),
+            params_used)
 
 
 def _standard_instances(saved: Path, rewrite: bool = False):
@@ -161,15 +165,16 @@ def _standard_instances(saved: Path, rewrite: bool = False):
 
 
 def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
-                 use_saved: bool = False, rewrite_instances: bool = False):
+                 use_saved: bool = False, rewrite_instances: bool = False,
+                 fret_enabled: bool = True):
     """Measure one image. Returns ``(status, notes)``.
 
     ``status`` is "ok", "degraded" (a CSV was written but some column is
     silently blank) or "empty" (no adhesions). Exceptions propagate to ``main``,
     which records them as FAILED.
     """
-    force_vol, clover_native, ruby_native, raw_voxel, scale = _load_raw(
-        tif, params_path, lut_path)
+    force_vol, clover_native, ruby_native, raw_voxel, scale, params_used = \
+        _load_raw(tif, params_path, lut_path, fret_enabled)
     if use_saved:
         _p(f"using saved {sio.filename(sio.ADHESION_INSTANCES)} as-is "
            f"(--use-saved-instances)")
@@ -275,7 +280,8 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
         image=tif.name, exported=ts, csv_name=csv_path.name, n_adhesions=n,
         scale_um_zyx=scale, roi_active=False, fibroblast_count=fib or None,
         nucleus_map=nucleus_map, notes=notes,
-        settings={"adhesion_postprocess": STD_POSTPROCESS}, headless=True)
+        settings={"adhesion_postprocess": STD_POSTPROCESS,
+                  "params": params_used}, headless=True)
     with open(saved / f"{tif.stem}_adhesion_measures_{ts}_settings.json", "w") as fh:
         json.dump(meta, fh, indent=2, default=str)
     print(f"    -> {n} adhesions; {csv_path.name} + settings JSON written.",
@@ -310,6 +316,10 @@ def main() -> None:
                          "measuring. The pre-flight for an unattended run: it "
                          "reports which columns would come out blank, before "
                          "the compute rather than after.")
+    ap.add_argument("--no-fret", action="store_true",
+                    help="skip FRET even where the experiment's params.json "
+                         "has a fret block; force_*_pN export blank (the Load "
+                         "tab's 'compute FRET' checkbox, unticked)")
     ap.add_argument("--strict", action="store_true",
                     help="exit 2 if any image is degraded (a CSV written with "
                          "a silently blank column), not just on failure.")
@@ -369,7 +379,8 @@ def main() -> None:
             status, notes = _measure_one(
                 tif, saved, args.params, args.lut,
                 use_saved=args.use_saved_instances,
-                rewrite_instances=args.rewrite_instances)
+                rewrite_instances=args.rewrite_instances,
+                fret_enabled=not args.no_fret)
             outcome[status].append(tif.name)
             if notes:
                 degraded_notes.append((tif.name, notes))

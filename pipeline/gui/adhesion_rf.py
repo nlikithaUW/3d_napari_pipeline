@@ -64,6 +64,62 @@ def build(state, viewer) -> Container:
 
     create_label_w.changed.connect(_create_label)
 
+    # ---- Save / load the painted annotations ([P44]: the shipped model's were
+    # never saved, so it can be neither retrained nor audited). Default path is
+    # the image's <stem>_saved/adhesion_annotations.npz via save_path_widgets.
+    ann_path_w = FileEdit(value=sio.filename(sio.ADHESION_ANNOTATIONS),
+                          label="annotations_path", mode="w")
+    save_ann_w = PushButton(text="Save annotations")
+    load_ann_w = PushButton(text="Load annotations")
+
+    def _ann_data(layer) -> np.ndarray:
+        return np.asarray(layer.data[0] if getattr(layer, "multiscale", False)
+                          else layer.data)
+
+    def _save_ann(*_):
+        name = "Adhesion labels"
+        if name not in [lay.name for lay in viewer.layers]:
+            print(f"No '{name}' layer to save.", flush=True)
+            return
+        ann = _ann_data(viewer.layers[name])
+        if not np.any(ann > 0):
+            print("Annotations are empty — nothing to save.", flush=True)
+            return
+        path = str(ann_path_w.value)
+        sio.save_annotations(path, ann)
+        print(f"Saved annotations -> {path} ({int((ann == 1).sum()):,} adhesion, "
+              f"{int((ann == 2).sum()):,} background voxels)", flush=True)
+
+    def _load_ann(*_):
+        path = str(ann_path_w.value)
+        if skip_if_missing(path, None, "Load annotations", "annotations file"):
+            return
+        clover_raw = state.get("clover_raw")
+        if clover_raw is None:
+            print("Load the matching image first.", flush=True)
+            return
+        name = "Adhesion labels"
+        if name in [lay.name for lay in viewer.layers] and \
+                np.any(_ann_data(viewer.layers[name]) > 0):
+            # Never overwrite painting that may not be on disk.
+            print(f"'{name}' already has painting. Save it, or delete the layer, "
+                  "then Load annotations.", flush=True)
+            return
+        ann = sio.load_annotations(path)
+        if ann.shape != clover_raw.shape:
+            print(f"Annotations shape {ann.shape} != current stack "
+                  f"{clover_raw.shape} — they belong to another image (or "
+                  "another voxel grid). Not loaded.", flush=True)
+            return
+        if name in [lay.name for lay in viewer.layers]:
+            viewer.layers.remove(name)
+        viewer.add_labels(ann, name=name, scale=state.get("scale", (1.0, 1.0, 1.0)))
+        print(f"Loaded annotations <- {path} ({int((ann == 1).sum()):,} adhesion, "
+              f"{int((ann == 2).sum()):,} background voxels)", flush=True)
+
+    save_ann_w.changed.connect(_save_ann)
+    load_ann_w.changed.connect(_load_ann)
+
     # ------------------------------------------------------------------ #
     # Section 2 — Train                                                    #
     # ------------------------------------------------------------------ #
@@ -104,6 +160,13 @@ def build(state, viewer) -> Container:
         def _done(rf):
             state["adhesion_rf"] = rf
             print("Training complete.", flush=True)
+            # [P44]: the labels a model was fitted on are saved every time one is
+            # fitted, so no trained model exists whose training set is lost.
+            try:
+                _save_ann()
+            except Exception as exc:
+                print(f"  WARNING: could not save the annotations ({exc}) — save "
+                      "them by hand before closing.", flush=True)
 
         def _err(exc):
             print(f"Training error: {exc}", flush=True)
@@ -823,7 +886,8 @@ def build(state, viewer) -> Container:
 
     imagej_btn.changed.connect(_imagej_ratio)
 
-    for _w, _fn in ((proba_path_w, sio.filename(sio.ADHESION_PROBA)),
+    for _w, _fn in ((ann_path_w, sio.filename(sio.ADHESION_ANNOTATIONS)),
+                    (proba_path_w, sio.filename(sio.ADHESION_PROBA)),
                     (ratio_path_w, sio.filename(sio.CLOVER_RUBY_RATIO)),
                     (inst_path_w, sio.filename(sio.ADHESION_INSTANCES))):
         state.setdefault("save_path_widgets", []).append((_w, _fn))
@@ -861,6 +925,7 @@ def build(state, viewer) -> Container:
     return Container(
         widgets=[
             hint_w, create_label_w,
+            ann_path_w, save_ann_w, load_ann_w,
             n_estimators_w, train_w,
             gate_by_clover_w, clover_dilation_um_w, predict_w,
             proba_path_w, save_proba_w, load_proba_w,

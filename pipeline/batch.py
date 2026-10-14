@@ -84,6 +84,10 @@ def main() -> None:
                          "the pipeline's own. NOTE: a step re-run alone still "
                          "reads the tab defaults, so it reproduces an earlier "
                          "run only if those have not changed (ISSUES.md P26).")
+    ap.add_argument("--no-fret", action="store_true",
+                    help="skip FRET even where the experiment's params.json "
+                         "has a fret block (the Load tab's 'compute FRET' "
+                         "checkbox, unticked)")
     ap.add_argument("--timeout", type=float, default=0.0,
                     help="per-image timeout in seconds; if an image takes longer "
                          "(hang), it is skipped and the batch continues. "
@@ -247,7 +251,8 @@ def main() -> None:
         try:
             loader._load_image(state, viewer, tif, args.params, args.lut,
                                int(args.levels),
-                               after=lambda: _after_load(i))
+                               after=lambda: _after_load(i),
+                               fret_enabled=not args.no_fret)
         except Exception as exc:
             _advance(i, f"load raised: {exc}; skipped")
 

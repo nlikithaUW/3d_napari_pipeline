@@ -51,6 +51,7 @@ import numpy as np
 
 ADHESION_PROBA = "adhesion_proba"
 ADHESION_INSTANCES = "adhesion_instances"
+ADHESION_ANNOTATIONS = "adhesion_annotations"
 CLOVER_RUBY_RATIO = "clover_ruby_ratio"
 DAPI_LABELS = "dapi_labels"
 NUCLEI_SPLIT = "nuclei_split"
@@ -74,6 +75,7 @@ VESSEL_PATH_CURVATURE_RETIRED = "vessel_path_curvature.npz"
 EXT = {
     ADHESION_PROBA: ".npy",
     ADHESION_INSTANCES: ".npz",
+    ADHESION_ANNOTATIONS: ".npz",
     CLOVER_RUBY_RATIO: ".npy",
     DAPI_LABELS: ".npz",
     NUCLEI_SPLIT: ".npz",
@@ -219,6 +221,21 @@ def save_instances(dest, instances) -> None:
 def load_instances(src) -> np.ndarray:
     with np.load(src) as d:
         return d["instances"]
+
+
+def save_annotations(dest, annotations) -> None:
+    """The hand-painted RF training labels (0 unlabeled, 1 adhesion, 2
+    background) on the image's isotropic grid. Compressed: almost every voxel is
+    0. Persisting them is the point of [P44](docs/ISSUES.md#p44) — the shipped
+    model's annotations were never saved, so it can be neither retrained nor
+    audited.
+    """
+    np.savez_compressed(dest, annotations=np.asarray(annotations).astype(np.uint8))
+
+
+def load_annotations(src) -> np.ndarray:
+    with np.load(src) as d:
+        return d["annotations"]
 
 
 def save_ratio(dest, ratio) -> None:

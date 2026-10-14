@@ -88,7 +88,7 @@ def per_adhesion_channels(csv: Path):
     """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from pipeline.io import load_params, load_stack
+    from pipeline.io import load_stack, resolve_params
     from pipeline.measure_core import _bs_per_z
     from pipeline import saved_io
 
@@ -100,8 +100,8 @@ def per_adhesion_channels(csv: Path):
         print(f"    (--channels: need {tif.name} and {inst.name})")
         return None
 
-    params = load_params(Path(__file__).resolve().parent.parent
-                         / "3d_images_folder" / "params.json")
+    params, _src, _note = resolve_params(
+        tif, Path(__file__).resolve().parent.parent / "3d_images_folder" / "params.json")
     st = load_stack(tif, params)
     if not {"clover", "ruby"} <= set(st.roles):
         print("    (--channels: stack has no clover/ruby roles)")

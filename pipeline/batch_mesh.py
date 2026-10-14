@@ -377,7 +377,8 @@ def _substrate_volume(tif: Path, expected, target_um: float) -> np.ndarray:
     Only `--cadherin-field score` calls this. Under the default the rebuild
     still decodes no image pixels.
     """
-    params = _io.load_params(ROOT / "3d_images_folder" / "params.json")
+    params, _src, _note = _io.resolve_params(
+        tif, ROOT / "3d_images_folder" / "params.json")
     stack = _io.load_stack(tif, params)
     ci = stack.channels.index(stack.roles["substrate"])
     vol = _io.resample_volume(stack.data[:, ci], stack.voxel_zyx_um,

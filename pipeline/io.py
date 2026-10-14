@@ -41,13 +41,56 @@ def load_params(params_path: str | Path) -> dict:
         return json.load(f)
 
 
+#: An experiment folder's own params file: ``images/<experiment>/params.json``.
+EXPERIMENT_PARAMS = "params.json"
+
+
+def resolve_params(tif_path: str | Path, default_params_path: str | Path
+                   ) -> tuple[dict, Path, str]:
+    """The params an image is analysed with. Returns ``(params, source, note)``.
+
+    If the image's experiment folder holds its own ``params.json``, that file is
+    used whole — channels and, if present, its ``fret`` block. Otherwise the
+    default (global) params file supplies the channels and **FRET is disabled**:
+    its ``fret`` block, if any, is dropped.
+
+    FRET constants are instrument-, sensor- and session-specific (P18), and a
+    single global file applies one calibration to every experiment in
+    ``images/``. Reading them only from beside the data makes it impossible for
+    one experiment's constants to reach another's images. `note` is a one-line
+    description of what was chosen, for the caller to print.
+
+    The one resolver for the GUI loader, `batch` (which calls the loader),
+    `batch_measure` and `batch_mesh`, so the headless and interactive paths
+    cannot pick different params for the same image.
+    """
+    local = Path(tif_path).parent / EXPERIMENT_PARAMS
+    if local.is_file():
+        params = load_params(local)
+        fret = "has fret block" if params.get("fret") else "no fret block, FRET off"
+        return params, local, f"params: {local} (experiment file; {fret})"
+    default = Path(default_params_path)
+    params = load_params(default)
+    note = (f"params: {default} (no {EXPERIMENT_PARAMS} in "
+            f"{Path(tif_path).parent.name}/; FRET off)")
+    if params.get("fret"):
+        params = {k: v for k, v in params.items() if k != "fret"}
+        note += (" — its fret block is ignored: FRET constants are read only "
+                 "from an experiment folder's own params.json")
+    return params, default, note
+
+
 # Roles the FRET math needs. Absent any of them — or absent a "fret" block in
 # params.json — FRET is skipped rather than computed from borrowed constants.
 FRET_REQUIRED = {"clover", "ruby", "fret"}
 
 
-def fret_configured(params: dict, roles) -> tuple[bool, str]:
+def fret_configured(params: dict, roles, enabled: bool = True) -> tuple[bool, str]:
     """Is FRET configured for this dataset? Returns ``(ok, reason)``.
+
+    ``enabled=False`` is the operator's off switch — the Load tab's "compute
+    FRET" checkbox and ``--no-fret`` on `batch` / `batch_measure`. It can only
+    turn FRET off: with no ``fret`` block there is nothing to turn on.
 
     Absence of the ``fret`` block in params.json is the signal to skip: there is
     no boolean flag to default wrongly, and the params file documents itself.
@@ -60,7 +103,10 @@ def fret_configured(params: dict, roles) -> tuple[bool, str]:
     interprets params.json — ``fret.py`` is frozen math.
     """
     if not params.get("fret"):
-        return False, 'no "fret" block in params.json (dataset not calibrated)'
+        return False, ('no "fret" block in the experiment folder\'s params.json '
+                       '(dataset not calibrated)')
+    if not enabled:
+        return False, "switched off (Load tab 'compute FRET' / --no-fret)"
     missing = FRET_REQUIRED - set(roles)
     if missing:
         return False, f"missing channel role(s) {sorted(missing)}"

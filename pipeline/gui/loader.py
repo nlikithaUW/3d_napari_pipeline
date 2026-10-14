@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from magicgui.widgets import ComboBox, Container, FileEdit, PushButton
+from magicgui.widgets import CheckBox, ComboBox, Container, FileEdit, Label, PushButton
 from napari.qt.threading import thread_worker
 
 from .. import gpu
 from ..fret import compute_fret_volume, load_force_lut, resample_fret_outputs
-from ..io import fret_configured, load_params, load_stack, to_isotropic
+from ..io import fret_configured, load_stack, resolve_params, to_isotropic
 from .state import RUN_STEPS
 from .widgets import percentile_limits, pyramid_views, with_after
 
@@ -31,16 +31,17 @@ DISPLAY = [
 
 
 def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
-                after=None):
+                after=None, fret_enabled: bool = True):
     print(f"Loading {tif_path.name} ...", flush=True)
 
     @thread_worker
     def _run():
-        params = load_params(params_path)
+        params, params_src, params_note = resolve_params(tif_path, params_path)
+        print(f"  {params_note}", flush=True)
         stack_raw = load_stack(tif_path, params)
         role_to_c = {role: stack_raw.channels.index(name)
                      for role, name in stack_raw.roles.items()}
-        fret_ok, why = fret_configured(params, stack_raw.roles)
+        fret_ok, why = fret_configured(params, stack_raw.roles, fret_enabled)
         if fret_ok:
             print(f"  FRET: computing ({why}).", flush=True)
             lut_eff, lut_force = load_force_lut(str(lut_path))
@@ -67,12 +68,17 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
                                          stack.voxel_zyx_um[0])
         # Drop the raw uint16 stack — closure would otherwise retain it.
         del stack_raw
+        params_used = {"source": str(params_src), "fret": params.get("fret"),
+                       "fret_enabled": bool(fret_enabled)}
         return (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
-                clover_native, ruby_native)
+                clover_native, ruby_native, params_used)
 
     def _done(result):
         (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
-         clover_native, ruby_native) = result
+         clover_native, ruby_native, params_used) = result
+        # Into the settings JSON beside every export: which params file this
+        # image was analysed with, and the FRET constants actually applied.
+        state.setdefault("run_settings", {})["params"] = params_used
 
         # Give the device its room back *before* the layer churn below, not
         # after. `with_after` drains at the end of every step, but this handler
@@ -270,19 +276,62 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
 
 def build(state, viewer, project_dir, params_path, lut_path) -> Container:
     project_dir_w = FileEdit(value=str(project_dir), mode="d", label="project_dir")
-    image_w = ComboBox(choices=[], label="image")
+    ALL = "(all)"
+
+    def _experiments(*_):
+        # A callable so every reset_choices() re-reads the disk (a folder the
+        # Convert tab just created appears without restarting).
+        imgs = Path(str(project_dir_w.value)) / "images"
+        dirs = sorted(p.name for p in imgs.iterdir() if p.is_dir()) if imgs.exists() else []
+        return [ALL] + dirs
+
+    experiment_w = ComboBox(choices=_experiments, value=ALL, label="experiment")
+    # Backed by a callable for the same reason: a list assigned to `.choices`
+    # is discarded by the next reset_choices(), emptying the picker silently.
+    image_choices: list = []
+    image_w = ComboBox(choices=lambda *_: image_choices, label="image")
     refresh_w = PushButton(text="Refresh images")
     pyramid_w = ComboBox(value=2, choices=[1, 2, 3], label="pyramid_levels")
+    # Off switch only: FRET still needs a fret block in the image's experiment
+    # params.json (io.resolve_params). Applies at the next Load. Headless: --no-fret.
+    fret_w = CheckBox(value=True, text="compute FRET")
+    fret_status_w = Label(value="")
     load_w = PushButton(text="Load")
+
+    def _fret_status(*_):
+        rel = image_w.value
+        if not rel:
+            fret_status_w.value = ""
+            return
+        tif = Path(str(project_dir_w.value)) / "images" / rel
+        try:
+            params, src, _ = resolve_params(tif, params_path)
+        except Exception as exc:  # noqa: BLE001
+            fret_status_w.value = f"params unreadable: {exc}"
+            return
+        if not params.get("fret"):
+            fret_status_w.value = (f"FRET unavailable — no calibration in "
+                                   f"{tif.parent.name}/params.json")
+        elif fret_w.value:
+            fret_status_w.value = f"FRET will be computed ({src.parent.name}/{src.name})"
+        else:
+            fret_status_w.value = "FRET available but switched off"
 
     def _scan(*_):
         pd = Path(str(project_dir_w.value))
         imgs_dir = pd / "images"
-        if not imgs_dir.exists():
-            image_w.choices = []
-            return
-        tifs = sorted(imgs_dir.glob("*/*.tif"))
-        image_w.choices = [str(p.relative_to(imgs_dir).as_posix()) for p in tifs]
+        experiment_w.reset_choices()
+        exp = experiment_w.value
+        tifs = (sorted(imgs_dir.glob("*/*.tif" if exp in (None, ALL) else f"{exp}/*.tif"))
+                if imgs_dir.exists() else [])
+        # The value stays "<experiment>/<file>.tif" (what `_do_load` joins onto
+        # images/); only the label drops the folder once one is picked.
+        image_choices[:] = [
+            (p.name if exp not in (None, ALL) else p.relative_to(imgs_dir).as_posix(),
+             p.relative_to(imgs_dir).as_posix())
+            for p in tifs]
+        image_w.reset_choices()
+        _fret_status()
 
     def _do_load(*_):
         pd = Path(str(project_dir_w.value))
@@ -292,7 +341,7 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
             return
         tif_path = pd / "images" / rel
         _load_image(state, viewer, tif_path, params_path, lut_path,
-                    int(pyramid_w.value))
+                    int(pyramid_w.value), fret_enabled=bool(fret_w.value))
 
     # "Load all saved" and "Run all" are the same machine: walk an ordered
     # (label, state key) list, calling each registered callable and letting its
@@ -364,12 +413,17 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
         "finished — full pipeline complete."))
 
     project_dir_w.changed.connect(_scan)
+    experiment_w.changed.connect(_scan)
+    image_w.changed.connect(_fret_status)
+    fret_w.changed.connect(_fret_status)
     refresh_w.changed.connect(_scan)
+    state["refresh_image_list"] = _scan   # the Convert tab calls this after writing
     load_w.changed.connect(_do_load)
     _scan()
 
     return Container(
-        widgets=[project_dir_w, image_w, refresh_w, pyramid_w, load_w,
+        widgets=[project_dir_w, experiment_w, image_w, refresh_w, pyramid_w,
+                 fret_w, fret_status_w, load_w,
                  load_all_w, run_all_w],
         labels=True,
     )

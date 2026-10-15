@@ -250,10 +250,80 @@ def graph_columns(graph, adhesion_um, order, first, counts):
     return out, notes
 
 
+def adhesion_fret(labels_n, clover_native, fret_native, ruby_native,
+                  fret_params, lut_eff, lut_force, ids, clover_bs=None,
+                  ruby_bs=None):
+    """Per-adhesion corrected FRET efficiency and force, **sum-then-correct**.
+
+    For each adhesion the background-subtracted donor (clover), sensitized
+    emission (FRET) and acceptor (ruby) are averaged over its voxels on the
+    native Z grid, and those three means go **once** through the frozen
+    `fret.fret_correct` with the experiment's G and bleedthroughs, then the
+    force LUT. Calling the frozen function — not a copy of its formula — keeps
+    the math the reviewed one. Efficiency is a ratio, so means and sums give
+    the same answer; means keep the frozen function's per-voxel checks (the
+    65535 saturation test, `venus_thres` on the acceptor) meaningful.
+
+    Why it exists beside ``force_mean_pN`` (the mean of per-voxel force): that
+    averages thousands of noisy single-voxel efficiencies through a steep LUT,
+    and counts every voxel the frozen math excluded as 0 pN (14% of a typical
+    V04 adhesion). Here the signal is pooled first, so an adhesion gets one
+    well-measured efficiency — the same "sum before dividing" reasoning as
+    ``ratio_clover_ruby``.
+
+    Voxels saturated (≥ 65535) in any of the three raw channels are left out of
+    the means. Returns ``(eff, force_pN, notes)`` aligned to `ids`. An adhesion
+    is NaN, not 0, when it has no usable voxels, its mean acceptor is below
+    ``venus_thres`` (no measurable sensor), or its efficiency is ≤ 0 — beyond
+    the sensor's range, where the LUT has no defined force.
+    """
+    from .fret import fret_correct
+
+    notes: list[str] = []
+    ids = np.asarray(ids)
+    nmax = int(labels_n.max()) if labels_n.size else 0
+    sat = ((clover_native >= 65535) | (fret_native >= 65535)
+           | (ruby_native >= 65535))
+    use = (labels_n > 0) & ~sat
+    lv = labels_n[use]
+    cbs = bs_per_z(clover_native) if clover_bs is None else clover_bs
+    rbs = bs_per_z(ruby_native) if ruby_bs is None else ruby_bs
+    fbs = bs_per_z(fret_native)
+    n = np.bincount(lv, minlength=nmax + 1).astype(np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        idd = np.bincount(lv, weights=cbs[use], minlength=nmax + 1) / n
+        dxam = np.bincount(lv, weights=fbs[use], minlength=nmax + 1) / n
+        iaa = np.bincount(lv, weights=rbs[use], minlength=nmax + 1) / n
+    idd, dxam, iaa = (np.nan_to_num(a[ids]) for a in (idd, dxam, iaa))
+    r = fret_correct(idd, dxam, iaa, lut_eff=lut_eff, lut_force=lut_force,
+                     **fret_params)
+    eff = np.asarray(r["eff"], dtype=np.float64)
+    force = np.asarray(r["force"], dtype=np.float64)
+    no_vox = n[ids] == 0
+    no_acc = iaa < float(fret_params["venus_thres"])
+    out_of_range = ~no_vox & ~no_acc & (eff <= 0)
+    bad = no_vox | no_acc | out_of_range
+    eff[no_vox | no_acc] = np.nan
+    force[bad] = np.nan
+    n_sat = int(((labels_n > 0) & sat).sum())
+    if n_sat:
+        notes.append(f"NOTE: {n_sat:,} saturated adhesion voxel(s) left out of "
+                     f"fret_eff_adh / force_adh_pN.")
+    if int(bad.sum()):
+        notes.append(
+            f"NOTE: fret_eff_adh / force_adh_pN blank for {int(bad.sum())}/"
+            f"{ids.size} adhesions — {int(no_acc.sum())} with mean acceptor "
+            f"below venus_thres, {int(out_of_range.sum())} with corrected "
+            f"efficiency <= 0 (beyond the sensor's range), {int(no_vox.sum())} "
+            f"with no unsaturated voxels.")
+    return eff, force, notes
+
+
 def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale,
                          clover_native, ruby_native, raw_voxel, curvature,
                          graph, nuc_ids=None, nuc_is_fib=None,
-                         vessel_faces=None, wall=None):
+                         vessel_faces=None, wall=None, fret_native=None,
+                         fret_params=None, fret_lut=None):
     """Return the per-adhesion measurement dict (or None if no adhesions).
 
     ``force_vol`` may be None when FRET is not configured; the force columns are
@@ -333,6 +403,19 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
                                     int(ratio_mean.size))
     else:
         ratio_mean = np.full(unique_ids.shape, np.nan, dtype=np.float32)
+
+    # Per-adhesion corrected FRET (sum-then-correct) — only when FRET is
+    # configured and on for this image (fret_params given) and the native
+    # channels line up with the labels.
+    eff_adh = np.full(unique_ids.shape, np.nan, dtype=np.float32)
+    force_adh = np.full(unique_ids.shape, np.nan, dtype=np.float32)
+    if (fret_params and fret_lut is not None and fret_native is not None
+            and not ratio_bad):
+        e, f, fn = adhesion_fret(labels_n, clover_native, fret_native,
+                                 ruby_native, fret_params, fret_lut[0],
+                                 fret_lut[1], unique_ids, clover_bs, ruby_bs)
+        eff_adh, force_adh = e.astype(np.float32), f.astype(np.float32)
+        notes += fn
 
     adhesion_vox = np.argwhere(labels > 0)
     adhesion_ids = labels[adhesion_vox[:, 0], adhesion_vox[:, 1],
@@ -437,6 +520,8 @@ def compute_measurements(labels, force_vol, vessel_verts, nuc_labels_full, scale
         "force_mean_pN": force_mean,
         "force_std_pN": force_std,
         "force_total_pN": force_mean * props["area"],
+        "fret_eff_adh": eff_adh,
+        "force_adh_pN": force_adh,
         "dist_mesh_um": mesh_min,
         "dist_nuc_um": nuc_min,
         "nuc_id": nuc_assignment,
@@ -486,6 +571,7 @@ CSV_COLUMNS = [
     "sec_force_balance", "sec_wall_ok_frac",
     "curv_mean", "curv_k1", "curv_k2", "curv_gaussian",
     "dist_nuc_um", "force_mean_pN", "force_std_pN", "force_total_pN",
+    "fret_eff_adh", "force_adh_pN",
     "volume_um3", "axis_major_um", "axis_minor_um", "eccentricity", "nuc_id",
     "nuc_is_fibroblast",
 ]

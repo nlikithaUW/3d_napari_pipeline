@@ -585,7 +585,22 @@ def path_curvature(pts_um: np.ndarray, window_um: float):
     # turns a NaN into a (correctly) near-zero curvature where they are not.
     s = np.maximum.accumulate(s) + np.arange(len(s)) * 1e-9
     ds = float(np.median(seg)) if len(seg) else 1.0
-    sigma = max(window_um / 4.0 / max(ds, 1e-9), 0.5)
+    # The same projection can make *most* segments zero — a branch running
+    # nearly straight down z — and then the median spacing is 0 and sigma
+    # (window / median spacing) explodes: a 20x V04 image asked
+    # `gaussian_filter1d` for an 8e10-tap kernel (596 GiB, MemoryError) and took
+    # the whole graph step down. If the projection is shorter than the
+    # smoothing scale it is essentially a point and has no measurable curvature
+    # (the formula's |r'|³ goes to 0 and returned ~3600 1/µm on a test path):
+    # report 0, as the comment above intends for degenerate stretches.
+    # Otherwise fall back to the mean spacing, and cap sigma as a backstop.
+    # None of this touches a path whose median segment is non-zero — every 3D
+    # path, and every in-plane one built before this.
+    if ds <= 1e-6:
+        if float(s[-1]) < window_um / 4.0:
+            return np.zeros(len(p)), s, np.zeros((len(p), 3))
+        ds = float(s[-1]) / max(len(seg), 1)
+    sigma = min(max(window_um / 4.0 / max(ds, 1e-9), 0.5), 1e5)
     sm = np.column_stack([ndi.gaussian_filter1d(p[:, k], sigma,
                                                 mode="nearest")
                           for k in range(3)])

@@ -295,6 +295,16 @@ unlike the shipped model's ([P44](docs/ISSUES.md#p44)), a model you train can be
 retrained. Save it under a new `model_path` rather than over
 `adhesion_rf.joblib`.
 
+**Seed labels from Clover mask** (Adhesion RF tab) pre-fills the label layer
+from the Clover tab's displayed mask: adhesion (1) sampled from the mask's
+core, background (2) sampled at least `seed_bg_margin_um` away — half from a
+ring just outside the cells — at most `seed_max_per_class` each, spread evenly
+over z, never overwriting voxels you have already painted
+(`rf.seed_annotations`). **The seeds copy the threshold's mistakes**: a model
+trained on them alone reproduces the threshold. Review and correct them —
+especially dim adhesions on the far wall, which a global threshold misses —
+before training.
+
 ## Running it
 
 ### Interactive (napari GUI)
@@ -309,10 +319,26 @@ flow: convert new `.nd2` files (see [Data layout](#data-layout)) → load an
 image → segment nuclei → VE-cadherin mask → vessel mesh + curvature → load a
 trained RF model → Adhesion RF predict → post-process → Measure → export CSV.
 Progress prints appear in the terminal **and** in the in-app **Log** dock.
+The Log dock's **■ Stop** button stops what is running: "Run all" / "Load all
+saved" do not start another step, and the long loops — RF predict and training,
+adhesion splitting, label seeding, ND2 conversion — stop at their next check
+(RF predict within about one z-chunk) without saving a partial result. Other
+steps finish first; a Python thread cannot be killed mid-operation.
 
 Every stage has Save/Load buttons (results land in the image's `_saved/` folder),
 plus **Load all saved features** and a one-click **Run all** that chains the whole
 pipeline through Measure and the CSV export.
+
+**Settings presets.** Run all uses whatever every tab is currently set to. On the
+Load tab, **Save current settings as preset** writes all tabs' controls (~100:
+thresholds, mesh parameters, post-process sizes, the RF `model_path`, compute
+FRET…) to `3d_images_folder/presets/<name>.json`; **Apply preset** sets every tab
+from one and loads its RF model, so Run all runs with exactly those values —
+e.g. one preset for 40x V3 data and one for 20x V04. **Apply settings from
+export** restores the parameters recorded in any earlier `*_settings.json`.
+Per-image file paths and the image choice are never part of a preset.
+Headless: `python -m pipeline.batch --preset <name> …` applies the same preset
+(the RF model still comes from `--model`).
 
 ### Headless batch (whole folder, no window)
 
@@ -359,7 +385,12 @@ out blank and why — a stale curvature file, a missing centerline, no
 `nuclei_split.npz`. It takes about a second per folder and measures nothing.
 
 `batch_measure` recomputes adhesion instances from the saved probability map at
-standard settings. It **no longer rewrites `adhesion_instances.npz`** unless you
+standard settings. The watershed split's seed spacing is set in µm
+(`split_min_distance_um`, default 1.6 µm — the original 5 voxels at
+0.325 µm/voxel) in both the Adhesion RF tab and `batch_measure`, so it scales
+with the image's voxel size; the two size cuts (`min_size_vox`,
+`split_min_size_vox`) are still in voxels and need lowering for coarser data
+(e.g. 5 and 54 at 20x / 0.86 µm). It **no longer rewrites `adhesion_instances.npz`** unless you
 pass `--rewrite-instances`; without the flag a difference between the recomputed
 and saved labelling is reported and the file left alone
 ([P12](docs/ISSUES.md#p12)).
@@ -486,6 +517,8 @@ One row per adhesion, in each `<stem>_saved/<stem>_adhesion_measures_<ts>.csv`.
 | `dist_nuc_um` | Distance to the nearest nucleus (µm) |
 | `force_mean_pN`, `force_std_pN` | Mean / SD of the FRET force over the adhesion. **Blank unless FRET is configured** |
 | `force_total_pN` | `force_mean_pN` × volume. Units are pN·µm³, not pN ([P10](docs/ISSUES.md#p10)) |
+| `fret_eff_adh` | **Per-adhesion corrected FRET efficiency**: the adhesion's background-subtracted donor, FRET and acceptor are averaged over its (unsaturated) voxels, then corrected **once** with the experiment's G and bleedthroughs (the frozen `fret.fret_correct`). Blank unless FRET is configured and on; blank for an adhesion whose mean acceptor is below `venus_thres` |
+| `force_adh_pN` | `fret_eff_adh` through the force LUT. Pooling before correcting avoids averaging noisy per-voxel efficiencies through a steep LUT and counting excluded voxels as 0 pN, both of which bias `force_mean_pN`. Blank where efficiency ≤ 0 (beyond the sensor's range). Shown in 3D as the Measure step's **Adhesion force (per adhesion)** layer and in the third row of the Measure plots |
 | `volume_um3` | Adhesion volume (µm³) |
 | `axis_major_um`, `axis_minor_um` | Fitted ellipsoid axis lengths (µm) |
 | `eccentricity` | `axis_major_um / axis_minor_um` |

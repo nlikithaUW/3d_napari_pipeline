@@ -24,9 +24,11 @@ from magicgui.widgets import (
 )
 from napari.qt.threading import thread_worker
 
+from .. import cancel
 from ..denoise import build_mask
 from ..measure_core import bs_per_z
-from ..rf import AdhesionRF, instance_labels_3d
+from ..rf import (AdhesionRF, SPLIT_MIN_DISTANCE_UM, instance_labels_3d,
+                  seed_annotations, split_distance_vox)
 from .. import saved_io as sio
 from .widgets import (
     after_on_error,
@@ -120,6 +122,81 @@ def build(state, viewer) -> Container:
     save_ann_w.changed.connect(_save_ann)
     load_ann_w.changed.connect(_load_ann)
 
+    # ---- Seed starter labels from the Clover tab's mask (rf.seed_annotations).
+    # The seeds inherit the threshold's errors; they are for correcting by hand,
+    # not for training as-is.
+    seed_core_w = FloatSlider(value=0.5, min=0.0, max=3.0, step=0.1,
+                              label="seed_core_erode_um")
+    seed_margin_w = FloatSlider(value=2.0, min=0.0, max=10.0, step=0.5,
+                                label="seed_bg_margin_um")
+    seed_n_w = SpinBox(value=20_000, min=1_000, max=500_000, step=1_000,
+                       label="seed_max_per_class")
+    seed_w = PushButton(text="Seed labels from Clover mask")
+
+    def _seed(*_):
+        clover_raw = state.get("clover_raw")
+        layer = state.get("clover_mask_layer")
+        if clover_raw is None or layer is None or \
+                state["clover_state"]["labels"] is None:
+            print("Seed: run the Clover tab first — the seeds come from its "
+                  "displayed mask.", flush=True)
+            return
+        # Exactly what the Clover layer shows: threshold + its size filter and
+        # mesh gate, at full resolution.
+        mask = np.asarray(layer.data[0] if getattr(layer, "multiscale", False)
+                          else layer.data)
+        if mask.shape != clover_raw.shape:
+            print(f"Seed: Clover mask {mask.shape} != stack {clover_raw.shape}; "
+                  "re-run the Clover tab for this image.", flush=True)
+            return
+        name = "Adhesion labels"
+        existing = (_ann_data(viewer.layers[name])
+                    if name in [lay.name for lay in viewer.layers] else None)
+        scale = state.get("scale", (1.0, 1.0, 1.0))
+        method = state["clover_state"].get("method") or "?"
+        kw = dict(core_erode_um=float(seed_core_w.value),
+                  bg_margin_um=float(seed_margin_w.value),
+                  max_per_class=int(seed_n_w.value))
+
+        @thread_worker
+        def _run():
+            try:
+                return seed_annotations(mask, scale, existing, **kw)
+            except cancel.Cancelled:
+                return cancel.STOPPED
+
+        def _done(result):
+            if result is cancel.STOPPED:
+                print("Seeding stopped by user — label layer unchanged.", flush=True)
+                return
+            ann, st = result
+            if name in [lay.name for lay in viewer.layers]:
+                viewer.layers[name].data = ann
+            else:
+                viewer.add_labels(ann, name=name, scale=scale)
+            state.setdefault("run_settings", {})["annotation_seed"] = {
+                "source": f"Clover filter ({method})", **st}
+            print(f"Seeded '{name}' from Clover filter ({method}): "
+                  f"{st['adhesion_seeded']:,} adhesion (of {st['core_voxels']:,} "
+                  f"core voxels, on {st['z_planes_with_adhesion_seeds']} z-planes), "
+                  f"{st['background_ring_seeded']:,} near-cell + "
+                  f"{st['background_far_seeded']:,} far background; "
+                  f"{st['kept_existing']:,} existing labels kept. These copy the "
+                  "threshold's mistakes — correct them before Train RF (paint 1 "
+                  "over missed adhesions, 2 over false ones).", flush=True)
+
+        def _err(exc):
+            print(f"Seed error: {exc}", flush=True)
+
+        cancel.clear()
+        print("Seeding labels from the Clover mask ...", flush=True)
+        w = _run()
+        w.returned.connect(_done)
+        w.errored.connect(_err)
+        w.start()
+
+    seed_w.changed.connect(_seed)
+
     # ------------------------------------------------------------------ #
     # Section 2 — Train                                                    #
     # ------------------------------------------------------------------ #
@@ -154,10 +231,17 @@ def build(state, viewer) -> Container:
         @thread_worker
         def _run():
             rf = AdhesionRF(n_estimators=n_est)
-            rf.train(vol_f32, ann_vol, voxel_um)
+            try:
+                rf.train(vol_f32, ann_vol, voxel_um)
+            except cancel.Cancelled:
+                return cancel.STOPPED
             return rf
 
         def _done(rf):
+            if rf is cancel.STOPPED:
+                print("Training stopped by user — the loaded model is unchanged.",
+                      flush=True)
+                return
             state["adhesion_rf"] = rf
             print("Training complete.", flush=True)
             # [P44]: the labels a model was fitted on are saved every time one is
@@ -171,6 +255,7 @@ def build(state, viewer) -> Container:
         def _err(exc):
             print(f"Training error: {exc}", flush=True)
 
+        cancel.clear()
         print(f"Training RF (n_estimators={n_est}) ...", flush=True)
         w = _run()
         w.returned.connect(_done)
@@ -281,10 +366,17 @@ def build(state, viewer) -> Container:
                         print("gate_by_clover: no clover mask found — "
                               "predicting full volume.", flush=True)
 
-                proba = rf.predict_proba(vol_f32, voxel_um, gate_indices=gate_indices)
+                try:
+                    proba = rf.predict_proba(vol_f32, voxel_um, gate_indices=gate_indices)
+                except cancel.Cancelled:
+                    return cancel.STOPPED
                 return proba
 
             def _done(proba):
+                if proba is cancel.STOPPED:
+                    print("RF predict stopped by user — no probability map "
+                          "computed.", flush=True)
+                    return
                 state["adhesion_proba"] = proba
                 name = "Adhesion proba"
                 lyr_data = pyramid_views(proba, levels)
@@ -304,6 +396,8 @@ def build(state, viewer) -> Container:
                 print(f"Predict error: {exc}", flush=True)
 
             mode = f"gated by clover (dilation={dilation_um} µm)" if gate_clover else "full volume"
+            if not state.get("_in_chain"):   # a chain clears once, at its start
+                cancel.clear()
             print(f"Running RF predict ({mode}) ...", flush=True)
             w = _run()
             w.returned.connect(with_after(_done, after, "RF predict"))
@@ -366,6 +460,11 @@ def build(state, viewer) -> Container:
     load_proba_w = PushButton(text="Load proba")
 
     def _save_proba(*_):
+        if cancel.requested():
+            # The chain's save hand-off runs even when predict was stopped; the
+            # map in state is then the previous one, not this run's.
+            print("RF predict was stopped — probability map not saved.", flush=True)
+            return
         proba = state.get("adhesion_proba")
         if proba is None:
             print("No probability map to save. Run RF predict first.", flush=True)
@@ -443,12 +542,18 @@ def build(state, viewer) -> Container:
     split_min_size_w = Slider(value=1000, min=0, max=10000,
                                label="split_min_size_vox")
     split_min_size_w.visible = True
+    # Watershed seed spacing in µm (rf.SPLIT_MIN_DISTANCE_UM). The default is
+    # the old fixed 5 voxels on the 0.325 µm grid, so 40x results are unchanged.
+    split_dist_um_w = FloatSlider(value=SPLIT_MIN_DISTANCE_UM, min=0.3, max=10.0,
+                                  step=0.1, label="split_min_distance_um")
 
     apply_w = PushButton(text="Apply post-process")
 
     def _on_gate_dapi(val):  d_dapi_um_w.visible = bool(val)
     def _on_gate_mesh(val):  d_mesh_um_w.visible = bool(val)
-    def _on_split(val):      split_min_size_w.visible = bool(val)
+    def _on_split(val):
+        split_min_size_w.visible = bool(val)
+        split_dist_um_w.visible = bool(val)
 
     gate_by_dapi_w.changed.connect(_on_gate_dapi)
     gate_by_mesh_w.changed.connect(_on_gate_mesh)
@@ -472,9 +577,13 @@ def build(state, viewer) -> Container:
         voxel_um = state.get("scale", (1.0, 1.0, 1.0))
         levels = state.get("levels", 1)
         scale = voxel_um
+        split_um = float(split_dist_um_w.value)
+        split_vox = split_distance_vox(split_um, voxel_um)
         state.setdefault("run_settings", {})["adhesion_postprocess"] = {
             "prob_threshold": thresh, "min_size_vox": min_sz,
             "split_merged": split, "split_min_size_vox": split_min,
+            "split_min_distance_um": split_um,
+            "split_min_distance_vox": split_vox,
             "gate_by_dapi": gate_dapi, "d_dapi_um": d_dapi,
             "gate_by_mesh": gate_mesh, "d_mesh_um": d_mesh}
 
@@ -522,7 +631,14 @@ def build(state, viewer) -> Container:
                           flush=True)
 
             binary = (masked >= thresh).astype(np.uint8)
-            labels = instance_labels_3d(binary, min_sz, split, split_min)
+            if split:
+                print(f"Split seed spacing: {split_um:g} µm = {split_vox} voxel(s)",
+                      flush=True)
+            try:
+                labels = instance_labels_3d(binary, min_sz, split, split_min,
+                                            split_vox)
+            except cancel.Cancelled:
+                return cancel.STOPPED
             n_inst = int(labels.max())
             if n_inst > 0:
                 szs = np.bincount(labels.ravel())[1:]
@@ -535,6 +651,10 @@ def build(state, viewer) -> Container:
             return labels
 
         def _done(labels):
+            if labels is cancel.STOPPED:
+                print("Post-process stopped by user — instances unchanged.",
+                      flush=True)
+                return
             name = "Adhesion instances"
             if name in [lay.name for lay in viewer.layers]:
                 viewer.layers.remove(name)
@@ -546,6 +666,8 @@ def build(state, viewer) -> Container:
         def _err(exc):
             print(f"Apply error: {exc}", flush=True)
 
+        if not state.get("_in_chain"):
+            cancel.clear()
         print("Applying post-process ...", flush=True)
         w = _run()
         w.returned.connect(with_after(_done, after, "Apply post-process"))
@@ -563,6 +685,9 @@ def build(state, viewer) -> Container:
     INST_LAYER = "Adhesion instances"
 
     def _save_inst(*_):
+        if cancel.requested():
+            print("Post-process was stopped — instances not saved.", flush=True)
+            return
         if INST_LAYER not in [l.name for l in viewer.layers]:
             print("No 'Adhesion instances' layer — run Apply post-process first.",
                   flush=True)
@@ -918,6 +1043,15 @@ def build(state, viewer) -> Container:
     save_w.changed.connect(_save)
     load_w.changed.connect(_load)
 
+    def _load_for_preset():
+        # Called after a settings preset is applied (loader.py): load the model
+        # the preset names, so "Run all" predicts with it.
+        path = str(model_path_w.value)
+        _load()
+        if state.get("adhesion_rf") is not None:
+            print(f"  RF model loaded from {path}", flush=True)
+    state["load_rf_model"] = _load_for_preset
+
     # ------------------------------------------------------------------ #
     # Assemble                                                             #
     # ------------------------------------------------------------------ #
@@ -925,6 +1059,7 @@ def build(state, viewer) -> Container:
     return Container(
         widgets=[
             hint_w, create_label_w,
+            seed_core_w, seed_margin_w, seed_n_w, seed_w,
             ann_path_w, save_ann_w, load_ann_w,
             n_estimators_w, train_w,
             gate_by_clover_w, clover_dilation_um_w, predict_w,
@@ -933,7 +1068,7 @@ def build(state, viewer) -> Container:
             gate_by_dapi_w, d_dapi_um_w,
             gate_by_mesh_w, d_mesh_um_w,
             min_size_vox_w,
-            split_merged_w, split_min_size_w,
+            split_merged_w, split_min_size_w, split_dist_um_w,
             apply_w,
             inst_path_w, save_inst_w, load_inst_w,
             ratio_btn,

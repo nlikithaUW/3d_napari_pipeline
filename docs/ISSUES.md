@@ -137,6 +137,7 @@ true of the code and data on that date and may not be true now.
 | [P62](#p62) | "Load all saved" tracebacked on a never-saved artifact; the fibroblast-count step had been dead | S3 | **fixed** 2026-09-04 — the guard existed in 1 loader of 12; `fibroblast_count_notes` was never imported |
 | [P64](#p64) | One global `params.json` applied one FRET calibration to every experiment in `images/` | **S2** | **fixed** 2026-10-13 — `io.resolve_params`: an experiment folder's own params.json, else the global one with its `fret` block dropped. One resolver for GUI, batch, batch_measure, batch_mesh |
 | [P65](#p65) | V04 FRET: donor-dark background voxels read efficiency 1.0; efficiency falls with donor brightness | S3 | open — 57% of included voxels sit at eff = 1, but **99.8% of those lie > 2 µm from any fibroblast** (0.9% saturate near one; median eff there 0.15). Adhesion-level force largely unaffected; the brightness trend (0.32 → 0.07) is unexplained |
+| [P66](#p66) | Centerline graph crashed (596 GiB `MemoryError`) on a branch running straight down z | **S2** | **fixed** 2026-10-14 — the in-plane curvature sized its smoothing by the *median* segment, which is 0 for such a branch's xy projection; first seen on 20x V04. V3 graph rebuilds identical |
 | [P63](#p63) | `nd2_to_ometiff.py` applied the first file's channel plan to every file unchecked, and one unreadable file stopped the run | S2 | **fixed** 2026-10-13 — per-file header check + channel-name guard in `pipeline/convert.py`, shared with the new Convert tab; 8 of 24 V04 files would have stopped or mislabelled a run |
 | [I12](#i12) | Moment deconvolution — subtract the PSF's second moment before taking the axis | idea | open — **the only route that fixes [P58](#p58)**; blocked on a PSF measurement this dataset does not have |
 | [I13](#i13) | The one orientation test [P58](#p58) leaves standing — adhesion **xy** axis against the κ1 direction on flat-facing wall | idea | open — **step 1 (feasibility) run 2026-09-04**: 250–400 adhesions/image survive at a permissive anisotropy gate, ~0 at a strict one. Carries the six-image "adhesions sit on slightly flatter wall" measurement (AUC 0.40–0.59, one image inverts, depth confound live) |
@@ -2247,8 +2248,22 @@ materially change results are hard-coded:
 
 - `is_fib &= cad_means < cbg * 1.3` — the VE-cadherin exclusion multiplier, on a
   channel that is dim in the perinuclear shell for **both** cell types.
-- `min_distance=5` in the adhesion watershed split (1.6 µm at 0.325 µm/voxel).
-  See also [P07](#p07)(b).
+- ~~`min_distance=5` in the adhesion watershed split (1.6 µm at 0.325 µm/voxel).
+  See also [P07](#p07)(b).~~ **Fixed 2026-10-14** — see History.
+
+**History**
+- 2026-10-14 — the watershed seed spacing is now `split_min_distance_um`
+  (`rf.SPLIT_MIN_DISTANCE_UM` = 1.6 µm), a slider in the Adhesion RF
+  post-process and the same µm value in `batch_measure`'s standard
+  post-process, converted per image by `rf.split_distance_vox`. On the 0.325 µm
+  grid it is exactly the old 5 voxels — the V3 reference image's instances are
+  **byte-identical** to the old code's (2,147). At 20x (0.86 µm) the fixed 5
+  voxels had been 4.3 µm, wider than the adhesions: on V04 `epi_011_xy1`,
+  objects > 500 vox held 65% of instance voxels, 53% of them with ≥ 3 intensity
+  peaks. At 1.6 µm (2 voxels) instances go 3,745 → 7,548 (median 41 → 38 vox)
+  and the > 500-vox share 65% → 32%. `batch_postprocess.py` has no voxel size
+  and keeps 5 voxels — correct only on the 0.325 µm grid. The `cad_means`
+  multiplier above is still hard-coded.
 
 ---
 
@@ -2471,6 +2486,18 @@ mesh rather than the size histogram is the better criterion).
   dim wall without also recovering the speckle, which is the same wall this
   entry's plateau measurement has been running into from the other side.
   Evidence: `docs/scratch/p28/rays.py`, `out/summary.json`.
+- 2026-10-14 — **tried and reverted: the floor as a volume.** Converting the 25
+  voxels to µm³ (25 × 0.325³ ≈ 0.86 µm³, per image) reproduced 40x exactly but
+  made the 20x V04 floor **1 voxel**, and that is the wrong model: the speckle
+  this floor removes is pixel-scale noise, so its size is set by the voxel
+  grid, not by microns. Measured on `20x_Step1_Chip1_Epi_009` (`window_xy` 38):
+  the GUI applied the Otsu cut of 2 and the alpha 3D solid triangulated
+  **273,581** points against **41,048** at the 25-voxel floor (mesh 663,526
+  verts); `batch_mesh` at the floor alone (1 voxel) refused with
+  `PointCloudTooDense` — the cloud filled **79%** of the 5 µm bins ([P35](#p35)).
+  Reverted to the voxel constant everywhere. Separately, whether 25 voxels is on
+  this entry's plateau at 20x is unmeasured; the 40x sweep above does not
+  transfer by itself.
 
 ---
 
@@ -4908,6 +4935,16 @@ per image too.
 > **The caveat is in the help text and matters:** a step re-run alone still
 > reads the tab defaults, so it reproduces an earlier run only if those have not
 > moved ([P26](#p26)) — which [P37](#p37) shows is not something to assume.
+
+- 2026-10-14 — **that caveat now has a remedy: settings presets**
+  (`gui/presets.py`). The Load tab saves every tab's controls (108 at the time
+  of writing, discovered by walking the magicgui trees, per-image paths
+  excluded) to `3d_images_folder/presets/<name>.json` and applies one before
+  "Run all"; `batch.py --preset <name>` applies the same file headless, and
+  every export records `settings.preset`. "Apply settings from export" maps an
+  earlier `*_settings.json` back onto the controls (all but derived values on
+  the V04 test export). A re-run is reproducible when it names its preset;
+  without one it is still "at whatever the tabs say".
 ---
 
 <a id="i05"></a>
@@ -7051,6 +7088,14 @@ verifying it still loads and still reproduces a known `proba >= 0.5` set.
   annotations remain lost, and nothing writes annotations beside a saved
   model — a model trained on one image is traceable to that image's `_saved`
   folder only by the user knowing which image it was.
+- 2026-10-13 — "Seed labels from Clover mask" (`rf.seed_annotations`) pre-fills
+  the label layer from the Clover tab's mask: core voxels as adhesion,
+  ≥ 2 µm-away voxels as background (half from a near-cell ring), capped per
+  class and spread evenly over z to avoid the shallow-plane bias [P03](#p03)
+  suspects. Its parameters go into `run_settings["annotation_seed"]`, and the
+  seeded + corrected labels are what the auto-save writes. **Caveat for P03:**
+  seeds from a global threshold carry that threshold's depth bias; they only
+  help P03 if the far-wall misses are painted in by hand before training.
 
 ---
 
@@ -8571,6 +8616,44 @@ exported individually.
 
 ---
 
+<a id="p66"></a>
+## P66 — the centerline graph crashed on a branch running straight down z
+
+| | |
+|---|---|
+| **Status** | **fixed** 2026-10-14 |
+| **Severity** | S2 — the whole graph step fails, so every centerline, caliber and section column exports blank, and a batch carries on without it |
+| **Opened** | 2026-10-14 (20x V04 `20x_Step1_Chip1_Epi_009`, `V04_20x` preset) |
+| **Resolved** | 2026-10-14 |
+| **Where** | `pipeline/lumen_graph.py::path_curvature` |
+
+`build_graph` computes each edge's curvature twice, in 3D and on its in-plane
+projection (z zeroed). The smoothing sigma, in samples, is `window / 4 /
+median(segment length)`. The 3D path is uniformly resampled, so its median is
+the resample step; but a branch running nearly straight down z projects to
+(almost) one xy point, **most** of its projected segments are zero, the median
+is 0 (floored to 1e-9), and sigma becomes ~1e10 — `gaussian_filter1d` asked for
+an 8e10-tap kernel (`MemoryError: 596 GiB`). The existing guard in the function
+handles zero segments in the *gradient*, not in sigma. The 40x V3 images never
+hit it; the 20x field (36 edges, 17 junctions on this image) did.
+
+**Fix.** If the median projected segment is ~0: a projection shorter than
+`window / 4` is a point with no measurable curvature and returns 0 (as the
+function's comment already intended — without this, the formula's `|r'|³ → 0`
+gave ~3,600 1/µm on a test path); otherwise sigma uses the mean spacing. Sigma
+is also capped at 1e5 as a backstop. Paths whose median segment is non-zero are
+untouched.
+
+Verified: the V3 reference graph (and mesh) rebuilt with `batch_mesh --tag`
+are array-identical to the saved ones; a semicircle still reads κ = 0.0201
+(r = 50 µm); a half-vertical/half-arc projection reads its arc's 0.032
+(r = 30 µm); `Epi_009` now builds 36 edges / 17 junctions / 3,386 µm.
+
+**History**
+- 2026-10-14 — opened and fixed.
+
+---
+
 <a id="p64"></a>
 ## P64 — one global `params.json` applied one FRET calibration to every experiment
 
@@ -8677,6 +8760,21 @@ samples; if the display layer matters, a higher `venus_thres` or a donor gate
   at eff = 1).
 - 2026-10-13 — downgraded to S3 after locating them: 99.8% are > 2 µm from
   donor-positive signal. Brightness trend still open.
+- 2026-10-14 — **a per-adhesion corrected readout now sits beside the
+  voxel-averaged one** (`measure_core.adhesion_fret`; columns `fret_eff_adh`,
+  `force_adh_pN`): donor/FRET/acceptor pooled over the adhesion's unsaturated
+  voxels, then one call to the frozen `fret_correct`. On `Epi_009` (4,206
+  adhesions): efficiency median 0.079 (IQR 0.056–0.109), force median
+  **10.1 pN** (IQR 8.6–11.9) against `force_mean_pN`'s 7.2 pN — the voxel mean
+  is pulled down by excluded voxels counted as 0 pN and by averaging noisy
+  efficiencies through the steep LUT. The two agree only weakly (Spearman 0.20),
+  so which one an analysis uses matters. 122 adhesions (2.9%) are blank — 106
+  beyond the sensor's range (efficiency ≤ 0), 16 below `venus_thres`. The
+  corrected force has a tail to the LUT's 64 pN from efficiencies of 0.01–0.03,
+  where the LUT is steepest: prefer medians. Against the corrected force, the
+  clover/ruby ratio's correlation is −0.04 (it was −0.24 against
+  `force_mean_pN`), so that sign contradiction was mostly the voxel average's.
+  GUI Measure and `batch_measure` give identical values.
 
 ---
 

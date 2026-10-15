@@ -47,7 +47,7 @@ from .measure_core import (
     CSV_COLUMNS, NUCLEUS_MAP_SPLIT, NUCLEUS_MAP_UNSPLIT,
     compute_measurements, export_meta,
 )
-from .rf import instance_labels_3d
+from .rf import SPLIT_MIN_DISTANCE_UM, instance_labels_3d, split_distance_vox
 from .saved_check import describe_saved, fibroblast_count_notes
 from . import saved_io as sio
 
@@ -60,6 +60,7 @@ DEFAULT_LUT = ROOT / "Fret_LUT" / "Clover_mRuby2_GGSGGS7_force_new.txt"
 # the settings JSON so a headless-measured export is still backtrackable).
 STD_POSTPROCESS = {"prob_threshold": 0.5, "min_size_vox": 100,
                    "split_merged": True, "split_min_size_vox": 1000,
+                   "split_min_distance_um": SPLIT_MIN_DISTANCE_UM,
                    "note": "applied by pipeline.batch / pipeline.batch_postprocess"}
 
 
@@ -95,6 +96,12 @@ def _load_raw(tif: Path, params_path: Path, lut_path: Path,
                      if "clover" in stack_raw.roles else None)
     ruby_native = (stack_raw.data[:, role_to_c["ruby"]].copy()
                    if "ruby" in stack_raw.roles else None)
+    # For the per-adhesion corrected FRET (measure_core.adhesion_fret), exactly
+    # as the GUI loader keeps it: only when FRET is on for this image.
+    fret_native = (stack_raw.data[:, role_to_c["fret"]].copy()
+                   if fret_ok else None)
+    fret_cfg = ((dict(params["fret"]), (lut_eff, lut_force))
+                if fret_ok else (None, None))
     raw_voxel = stack_raw.voxel_zyx_um
     _p("to_isotropic")
     stack = to_isotropic(stack_raw)
@@ -107,10 +114,10 @@ def _load_raw(tif: Path, params_path: Path, lut_path: Path,
                    "fret_enabled": bool(fret_enabled)}
     return (None if fret is None else fret["force_vol"],
             clover_native, ruby_native, raw_voxel, tuple(stack.voxel_zyx_um),
-            params_used)
+            params_used, fret_native, fret_cfg)
 
 
-def _standard_instances(saved: Path, rewrite: bool = False):
+def _standard_instances(saved: Path, voxel_um, rewrite: bool = False):
     """Recompute adhesion instances from the saved probability map at the
     standard post-process. The on-disk adhesion_instances.npz can be STALE: the
     GUI re-post-processes to standard in memory at measure time but never
@@ -132,14 +139,16 @@ def _standard_instances(saved: Path, rewrite: bool = False):
            f"as-is; they may be a stale, non-standard labeling.")
         return sio.load_instances(sio.path(saved, sio.ADHESION_INSTANCES))
     T = int(round(STD_POSTPROCESS["prob_threshold"] * 255))
+    split_vox = split_distance_vox(STD_POSTPROCESS["split_min_distance_um"], voxel_um)
     _p(f"recompute standard instances from proba (T={T}, min="
        f"{STD_POSTPROCESS['min_size_vox']}, split ON, "
-       f"split_min={STD_POSTPROCESS['split_min_size_vox']})")
+       f"split_min={STD_POSTPROCESS['split_min_size_vox']}, seed spacing "
+       f"{STD_POSTPROCESS['split_min_distance_um']:g} um = {split_vox} vox)")
     proba = sio.load_proba(proba_path)
     binary = (proba >= T).astype(np.uint8)
     del proba
     labels = instance_labels_3d(binary, STD_POSTPROCESS["min_size_vox"], True,
-                                STD_POSTPROCESS["split_min_size_vox"])
+                                STD_POSTPROCESS["split_min_size_vox"], split_vox)
     del binary
     n_new = int(labels.max())
     if rewrite:
@@ -173,14 +182,14 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
     silently blank) or "empty" (no adhesions). Exceptions propagate to ``main``,
     which records them as FAILED.
     """
-    force_vol, clover_native, ruby_native, raw_voxel, scale, params_used = \
-        _load_raw(tif, params_path, lut_path, fret_enabled)
+    (force_vol, clover_native, ruby_native, raw_voxel, scale, params_used,
+     fret_native, fret_cfg) = _load_raw(tif, params_path, lut_path, fret_enabled)
     if use_saved:
         _p(f"using saved {sio.filename(sio.ADHESION_INSTANCES)} as-is "
            f"(--use-saved-instances)")
         labels = sio.load_instances(sio.path(saved, sio.ADHESION_INSTANCES))
     else:
-        labels = _standard_instances(saved, rewrite=rewrite_instances)
+        labels = _standard_instances(saved, scale, rewrite=rewrite_instances)
     # Faces are what restrict dist_mesh_um to the mesh surface (P09a). A
     # folder whose npz predates them still measures, to every vertex, and
     # warns rather than silently reading short — so the `None` is passed
@@ -241,7 +250,9 @@ def _measure_one(tif: Path, saved: Path, params_path: Path, lut_path: Path,
                                   scale, clover_native, ruby_native, raw_voxel,
                                   curvature, graph, nuc_ids=nuc_ids,
                                   nuc_is_fib=nuc_is_fib,
-                                  vessel_faces=vessel_faces, wall=wall)
+                                  vessel_faces=vessel_faces, wall=wall,
+                                  fret_native=fret_native,
+                                  fret_params=fret_cfg[0], fret_lut=fret_cfg[1])
     if result is None:
         print("    no adhesions; nothing written.", flush=True)
         return "empty", []

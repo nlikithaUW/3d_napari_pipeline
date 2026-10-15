@@ -41,8 +41,8 @@ from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import QApplication
 
 from .gui import (
-    adhesion_rf, cadherin, cell_mesh, clover, display, loader, nuclei, roi,
-    vessel_mesh,
+    adhesion_rf, cadherin, cell_mesh, clover, display, loader, nuclei, presets,
+    roi, vessel_mesh,
 )
 from .gui.state import (
     BATCH_STEPS, STEP_NAMES, new_state, reset_image_state, resolve_steps,
@@ -84,6 +84,10 @@ def main() -> None:
                          "the pipeline's own. NOTE: a step re-run alone still "
                          "reads the tab defaults, so it reproduces an earlier "
                          "run only if those have not changed (ISSUES.md P26).")
+    ap.add_argument("--preset", default=None,
+                    help="settings preset saved from the GUI's Load tab "
+                         "(3d_images_folder/presets/<NAME>.json): every tab "
+                         "runs at its values instead of the widget defaults")
     ap.add_argument("--no-fret", action="store_true",
                     help="skip FRET even where the experiment's params.json "
                          "has a fret block (the Load tab's 'compute FRET' "
@@ -135,17 +139,38 @@ def main() -> None:
     # RuntimeError aborted the image-load handler before it set the per-image
     # save paths — sending every artifact to the CWD (2026-09-02). The list is
     # never read; holding the reference *is* the fix.
-    state["_tabs"] = [
-        loader.build(state, viewer, args.dir, args.params, args.lut),
-        display.build(state, viewer),
-        nuclei.build(state, viewer),
-        cadherin.build(state, viewer),
-        cell_mesh.build(state, viewer),
-        vessel_mesh.build(state, viewer),
-        clover.build(state, viewer),
-        adhesion_rf.build(state, viewer),
-        roi.build(state, viewer),
-    ]
+    # Keyed by the GUI's tab titles so a settings preset saved in the GUI
+    # (gui/presets.py) lands on the same controls here.
+    state["preset_tabs"] = {
+        "Load": [loader.build(state, viewer, args.dir, args.params, args.lut)],
+        "Display": [display.build(state, viewer)],
+        "Nuclei": list(nuclei.build(state, viewer)),
+        "Cadherin": list(cadherin.build(state, viewer)),
+        "Cell mesh": list(cell_mesh.build(state, viewer)),
+        "Vessel mesh": list(vessel_mesh.build(state, viewer)),
+        "Clover": [clover.build(state, viewer)],
+        "Adhesion RF": [adhesion_rf.build(state, viewer)],
+        "ROI": [roi.build(state, viewer)],
+    }
+    state["_tabs"] = list(state["preset_tabs"].values())
+    if args.preset:
+        try:
+            values = presets.load_preset(args.preset, DEFAULT_PARAMS.parent)
+        except FileNotFoundError:
+            print(f"No preset '{args.preset}' in "
+                  f"{presets.preset_dir(DEFAULT_PARAMS.parent)}", flush=True)
+            sys.exit(1)
+        built = set(state["preset_tabs"])
+        absent = {k for k in values if k.split("/", 1)[0] not in built}
+        n, problems = presets.apply({k: v for k, v in values.items()
+                                     if k not in absent}, state["preset_tabs"], state)
+        for p in problems:
+            print(f"  preset: {p}", flush=True)
+        tabs_absent = sorted({k.split("/", 1)[0] for k in absent})
+        print(f"Preset '{args.preset}': {n} control(s) set, {len(problems)} "
+              f"problem(s); {len(absent)} belong to tabs the batch does not "
+              f"build ({', '.join(tabs_absent) or 'none'}). The RF model is "
+              f"--model, not the preset's model_path.", flush=True)
     # NOTE: measure.build is intentionally NOT called — Measure isn't run in the
     # batch (it crashes headless), and skipping its build avoids creating the
     # matplotlib Qt canvas at all. Run Measure per image in the GUI afterward.
@@ -236,7 +261,8 @@ def main() -> None:
         cur["i"] = i
         tif = images[i]
         print(f"\n===== [{i + 1}/{len(images)}] {tif.name} =====", flush=True)
-        state["run_settings"] = {}          # clean settings log per image
+        state["run_settings"] = ({"preset": args.preset}  # clean settings log
+                                 if args.preset else {})  # per image
         state["roi_polygons_yx_um"] = None  # never gate the batch by an ROI
         state["roi_yx_um"] = None
         if args.timeout > 0:                # per-image hang guard

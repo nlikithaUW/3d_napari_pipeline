@@ -129,23 +129,30 @@ def main() -> None:
     viewer.window._qt_window.destroyed.connect(_free_gpu)
     state = new_state()
 
+    # Built into a dict first so the settings presets (gui/presets.py) can walk
+    # every processing tab's controls. Convert is not a processing step and is
+    # left out of presets.
+    convert_parts = convert.build(state, viewer, args.project_dir, args.params)
+    parts = {
+        "Load": [loader.build(state, viewer, args.project_dir, args.params, args.lut)],
+        "Display": [display.build(state, viewer)],
+        "Nuclei": list(nuclei.build(state, viewer)),
+        "Cadherin": list(cadherin.build(state, viewer)),
+        "VE-cad RF": [cadherin_rf.build(state, viewer)],
+        "Cell mesh": list(cell_mesh.build(state, viewer)),
+        "Vessel mesh": list(vessel_mesh.build(state, viewer)),
+        "Clover": [clover.build(state, viewer)],
+        "Adhesion RF": [adhesion_rf.build(state, viewer)],
+        "Adhesion orient": list(adhesion_orient.build(state, viewer)),
+        "ROI": [roi.build(state, viewer)],
+        "Measure": list(measure.build(state, viewer)),
+    }
+    state["preset_tabs"] = parts
+
     tabs = QTabWidget()
-    tabs.addTab(_wrap(convert.build(state, viewer, args.project_dir, args.params)),
-                "Convert")
-    tabs.addTab(_wrap([loader.build(state, viewer, args.project_dir,
-                                    args.params, args.lut)]), "Load")
-    tabs.addTab(_wrap([display.build(state, viewer)]), "Display")
-    tabs.addTab(_wrap(list(nuclei.build(state, viewer))), "Nuclei")
-    tabs.addTab(_wrap(list(cadherin.build(state, viewer))), "Cadherin")
-    tabs.addTab(_wrap([cadherin_rf.build(state, viewer)]), "VE-cad RF")
-    tabs.addTab(_wrap(list(cell_mesh.build(state, viewer))), "Cell mesh")
-    tabs.addTab(_wrap(list(vessel_mesh.build(state, viewer))), "Vessel mesh")
-    tabs.addTab(_wrap([clover.build(state, viewer)]), "Clover")
-    tabs.addTab(_wrap([adhesion_rf.build(state, viewer)]), "Adhesion RF")
-    tabs.addTab(_wrap(list(adhesion_orient.build(state, viewer))),
-                "Adhesion orient")
-    tabs.addTab(_wrap([roi.build(state, viewer)]), "ROI")
-    tabs.addTab(_wrap(list(measure.build(state, viewer))), "Measure")
+    tabs.addTab(_wrap(convert_parts), "Convert")
+    for title, p in parts.items():
+        tabs.addTab(_wrap(p), title)
 
     # Selecting the Vessel mesh tab fills its alpha3d_um from the circumradius
     # histogram of the current cadherin mask, so the slider shows the number the

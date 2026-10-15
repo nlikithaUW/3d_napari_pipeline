@@ -5,12 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from magicgui.widgets import CheckBox, ComboBox, Container, FileEdit, Label, PushButton
+from magicgui.widgets import (CheckBox, ComboBox, Container, FileEdit, Label,
+                              LineEdit, PushButton)
 from napari.qt.threading import thread_worker
 
-from .. import gpu
+from .. import cancel, gpu
 from ..fret import compute_fret_volume, load_force_lut, resample_fret_outputs
 from ..io import fret_configured, load_stack, resolve_params, to_isotropic
+from . import presets
 from .state import RUN_STEPS
 from .widgets import percentile_limits, pyramid_views, with_after
 
@@ -62,6 +64,13 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
                          if "clover" in stack_raw.roles else None)
         ruby_native = (stack_raw.data[:, role_to_c["ruby"]].copy()
                        if "ruby" in stack_raw.roles else None)
+        # The sensitized-emission channel and the calibration, for Measure's
+        # per-adhesion corrected FRET (measure_core.adhesion_fret) — only when
+        # FRET is on for this image, so the columns stay blank otherwise.
+        fret_native = (stack_raw.data[:, role_to_c["fret"]].copy()
+                       if fret_ok else None)
+        fret_cfg = ((dict(params["fret"]), (lut_eff, lut_force))
+                    if fret_ok else (None, None))
         stack = to_isotropic(stack_raw)
         if fret is not None:
             fret = resample_fret_outputs(fret, stack_raw.voxel_zyx_um,
@@ -71,11 +80,13 @@ def _load_image(state, viewer, tif_path, params_path, lut_path, levels,
         params_used = {"source": str(params_src), "fret": params.get("fret"),
                        "fret_enabled": bool(fret_enabled)}
         return (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
-                clover_native, ruby_native, params_used)
+                clover_native, ruby_native, params_used, fret_native, fret_cfg)
 
     def _done(result):
         (raw_shape, raw_nbytes, raw_voxel, stack, role_to_c, fret,
-         clover_native, ruby_native, params_used) = result
+         clover_native, ruby_native, params_used, fret_native, fret_cfg) = result
+        state["fret_raw_native"] = fret_native
+        state["fret_params"], state["fret_lut"] = fret_cfg
         # Into the settings JSON beside every export: which params file this
         # image was analysed with, and the FRET constants actually applied.
         state.setdefault("run_settings", {})["params"] = params_used
@@ -356,10 +367,22 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
         if not queue:
             print(f"{what}: {empty_msg}", flush=True)
             return
+        cancel.clear()
+        state["_in_chain"] = True
 
         def _next(i):
             if i >= len(queue):
+                state["_in_chain"] = False
                 print(f"{what}: {done_msg}", flush=True)
+                return
+            # The Log panel's Stop: checked between steps, so the step that was
+            # running finishes (or, if it is one of the interruptible loops,
+            # stops without writing) and nothing after it starts.
+            if cancel.requested():
+                state["_in_chain"] = False
+                cancel.clear()
+                print(f"{what}: stopped by user after {queue[i - 1][0] if i else 'start'} "
+                      f"— {len(queue) - i} step(s) not run.", flush=True)
                 return
             label, key = queue[i]
             fn = state.get(key)
@@ -406,6 +429,77 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
     # ---- "Run all": the whole analysis in order. The step table is
     # `gui/state.RUN_STEPS`, shared with the headless `pipeline.batch` runner so
     # a step cannot be added to one and forgotten in the other.
+    # ---- Settings presets (gui/presets.py): set every tab from a saved preset,
+    # or from an earlier export's settings JSON, before "Run all". The tabs are
+    # read from state["preset_tabs"] at click time (view.py / batch.py fill it
+    # after every tab is built).
+    preset_w = ComboBox(choices=lambda *_: presets.list_presets(project_dir_w.value),
+                        label="settings preset")
+    apply_preset_w = PushButton(text="Apply preset")
+    preset_name_w = LineEdit(value="", label="new preset name")
+    save_preset_w = PushButton(text="Save current settings as preset")
+    export_json_w = FileEdit(value="", label="export settings JSON", mode="r",
+                             filter="*_settings.json")
+    apply_export_w = PushButton(text="Apply settings from export")
+    preset_status_w = Label(value="Settings: current tab values")
+
+    def _tabs():
+        tabs = state.get("preset_tabs")
+        if not tabs:
+            print("Presets: tabs not registered yet.", flush=True)
+        return tabs
+
+    def _after_apply(label, n, problems):
+        for p in problems:
+            print(f"  preset: {p}", flush=True)
+        # A preset carries the Adhesion RF model path; load that model so the
+        # RF step of "Run all" uses it rather than whatever was loaded before.
+        load_model = state.get("load_rf_model")
+        if load_model is not None:
+            load_model()
+        preset_status_w.value = (f"Settings: {label} ({n} values"
+                                 + (f", {len(problems)} skipped)" if problems else ")"))
+        state.setdefault("run_settings", {})["preset"] = label
+        print(f"Applied {label}: {n} control(s) set, {len(problems)} skipped.",
+              flush=True)
+
+    def _apply_preset(*_):
+        tabs, name = _tabs(), preset_w.value
+        if not tabs or not name:
+            return
+        n, problems = presets.apply(presets.load_preset(name, project_dir_w.value),
+                                    tabs, state)
+        _after_apply(f"preset '{name}'", n, problems)
+
+    def _save_preset(*_):
+        tabs = _tabs()
+        if not tabs:
+            return
+        try:
+            path = presets.save_preset(preset_name_w.value, tabs, state,
+                                       project_dir_w.value)
+        except ValueError as exc:
+            print(f"Presets: {exc}", flush=True)
+            return
+        preset_w.reset_choices()
+        preset_w.value = path.stem
+        print(f"Saved preset '{path.stem}' -> {path} "
+              f"({len(presets.collect(tabs, state))} controls)", flush=True)
+
+    def _apply_export(*_):
+        tabs, src = _tabs(), Path(str(export_json_w.value))
+        if not tabs or not src.is_file():
+            print("Presets: choose an exported *_settings.json first.", flush=True)
+            return
+        values, unmapped = presets.settings_from_export(src, tabs, state)
+        n, problems = presets.apply(values, tabs, state)
+        _after_apply(f"settings from {src.name}", n,
+                     problems + [f"{k}: no unique matching control" for k in unmapped])
+
+    apply_preset_w.changed.connect(_apply_preset)
+    save_preset_w.changed.connect(_save_preset)
+    apply_export_w.changed.connect(_apply_export)
+
     run_all_w = PushButton(text="Run all (full pipeline)")
     run_all_w.changed.connect(lambda *_: _chain(
         "Run all", [(label, key) for _n, label, key in RUN_STEPS],
@@ -424,6 +518,8 @@ def build(state, viewer, project_dir, params_path, lut_path) -> Container:
     return Container(
         widgets=[project_dir_w, experiment_w, image_w, refresh_w, pyramid_w,
                  fret_w, fret_status_w, load_w,
+                 preset_w, apply_preset_w, preset_name_w, save_preset_w,
+                 export_json_w, apply_export_w, preset_status_w,
                  load_all_w, run_all_w],
         labels=True,
     )

@@ -29,6 +29,7 @@ from pathlib import Path
 from magicgui.widgets import CheckBox, ComboBox, Label, PushButton, Select
 from napari.qt.threading import thread_worker
 
+from .. import cancel
 from .. import convert as cv
 from ..io import EXPERIMENT_PARAMS, load_params
 from .widgets import collapsible_group
@@ -224,11 +225,16 @@ def build(state, viewer, project_dir, params_path) -> list:
         _save_mapping()
         print(f"Convert: {len(names)} file(s), ND2 indices {keep_idx} -> "
               f"{out_names}", flush=True)
+        cancel.clear()
 
         @thread_worker
         def _run():
             done, skipped = 0, 0
             for k, name in enumerate(names, 1):
+                if cancel.requested():
+                    print(f"Convert: stopped by user — {done} written; "
+                          f"{len(names) - k + 1} not started.", flush=True)
+                    break
                 src = folder / name
                 dst = src.with_suffix(".tif")
                 # Re-check at convert time: the folder may have changed since Scan.

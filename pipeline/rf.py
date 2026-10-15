@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 from scipy import ndimage as _sndi
 
+from . import cancel
 from . import gpu as _gpu
 
 if _gpu.HAS_GPU:
@@ -400,6 +401,7 @@ def compute_features_at_indices(
                   f"({mb:.0f} MB)", flush=True)
 
         for si, scale_um in enumerate(SCALES_UM):
+            cancel.check("RF feature extraction")
             t0 = _time_mod.perf_counter()
             sig = _sigma(scale_um, voxel_um)
             _extract_scale_gpu(a_d, iz_d, iy_d, ix_d, sig, scale_um,
@@ -415,6 +417,7 @@ def compute_features_at_indices(
         del iz_d, iy_d, ix_d
     else:
         for si, scale_um in enumerate(SCALES_UM):
+            cancel.check("RF feature extraction")
             t0 = _time_mod.perf_counter()
             sig = _sigma(scale_um, voxel_um)
             _extract_scale_cpu(vol_f32, iz, iy, ix, sig, scale_um,
@@ -551,6 +554,7 @@ class AdhesionRF:
         gate_iz = None if full_volume else gate_indices[:, 0]
 
         for z_start in range(0, z_total, chunk_z):
+            cancel.check("RF predict")
             z_end = min(z_start + chunk_z, z_total)
             t_chunk = _tm.perf_counter()
 
@@ -587,6 +591,7 @@ class AdhesionRF:
                 ix_d = cp.asarray(chunk_idx[:, 2])
 
                 for si, (scale_um, pad_s) in enumerate(zip(SCALES_UM, scale_pads)):
+                    cancel.check("RF predict")
                     t_s = _tm.perf_counter()
                     z_lo_s = max(0, z_start - pad_s)
                     z_hi_s = min(shape[0], z_end + pad_s)
@@ -603,6 +608,7 @@ class AdhesionRF:
                 del iz_base, iz_d, iy_d, ix_d
             else:
                 for si, (scale_um, pad_s) in enumerate(zip(SCALES_UM, scale_pads)):
+                    cancel.check("RF predict")
                     t_s = _tm.perf_counter()
                     z_lo_s = max(0, z_start - pad_s)
                     z_hi_s = min(shape[0], z_end + pad_s)
@@ -658,13 +664,138 @@ class AdhesionRF:
 # Instance labeling
 # ---------------------------------------------------------------------------
 
+def _sample_spread_z(sel: np.ndarray, n: int, rng) -> tuple:
+    """Up to `n` voxel indices of boolean `sel`, spread as evenly over z as the
+    planes allow (water-filling: equal shares, a plane with fewer candidates
+    passes its unused share on). Bright shallow planes would otherwise dominate
+    a uniform draw — the depth bias [P03] suspects in the shipped model.
+    """
+    Z = sel.shape[0]
+    counts = sel.reshape(Z, -1).sum(axis=1)
+    if counts.sum() == 0 or n <= 0:
+        return (np.empty(0, np.intp),) * 3
+    quota = np.zeros(Z, dtype=np.int64)
+    remaining = min(int(n), int(counts.sum()))
+    planes = list(np.flatnonzero(counts))
+    while remaining > 0 and planes:
+        share = max(1, remaining // len(planes))
+        still = []
+        for z in planes:
+            take = min(share, int(counts[z] - quota[z]), remaining)
+            quota[z] += take
+            remaining -= take
+            if counts[z] > quota[z]:
+                still.append(z)
+            if remaining == 0:
+                break
+        planes = still
+    zs, ys, xs = [], [], []
+    for z in np.flatnonzero(quota):
+        flat = np.flatnonzero(sel[z])
+        pick = rng.choice(flat, int(quota[z]), replace=False)
+        yy, xx = np.unravel_index(pick, sel.shape[1:])
+        zs.append(np.full(pick.size, z, dtype=np.intp))
+        ys.append(yy)
+        xs.append(xx)
+    return np.concatenate(zs), np.concatenate(ys), np.concatenate(xs)
+
+
+def seed_annotations(mask: np.ndarray, voxel_zyx_um, existing=None, *,
+                     core_erode_um: float = 0.5, bg_margin_um: float = 2.0,
+                     ring_um: float = 3.0, max_per_class: int = 20_000,
+                     seed: int = 42) -> tuple[np.ndarray, dict]:
+    """Starter RF annotations from a binary mask (e.g. the Clover threshold).
+
+    Returns ``(ann, stats)``; ``ann`` is uint8 (0 unlabeled, 1 adhesion, 2
+    background) on the mask's grid.
+
+    - **1** — sampled from the mask's *core*: voxels more than `core_erode_um`
+      inside it, so uncertain edges are not taught as adhesion. A shrink below
+      one voxel removes nothing (a boundary voxel is a full voxel from the
+      outside).
+    - **2** — sampled from voxels at least `bg_margin_um` from the mask: half
+      from the ring out to `bg_margin_um + ring_um` (near-cell, the harder
+      negatives), half from anywhere farther.
+    - At most `max_per_class` per class, spread evenly over z
+      (`_sample_spread_z`). Voxels already labelled in `existing` are never
+      changed — seeding fills only unlabeled voxels, so hand painting survives
+      and re-seeding is safe.
+
+    **These labels inherit every error of the mask** — a model trained on them
+    alone learns to reproduce the threshold. They are a starting point to
+    correct by hand before training, not a training set. Deterministic for a
+    given `seed`.
+    """
+    from scipy.ndimage import distance_transform_edt as _edt
+
+    m = np.asarray(mask) > 0
+    vox = (tuple(float(v) for v in voxel_zyx_um) if hasattr(voxel_zyx_um, "__len__")
+           else (float(voxel_zyx_um),) * 3)
+    ann = (np.zeros(m.shape, np.uint8) if existing is None
+           else np.asarray(existing, dtype=np.uint8).copy())
+    if ann.shape != m.shape:
+        raise ValueError(f"annotation shape {ann.shape} != mask shape {m.shape}")
+    free = ann == 0
+    rng = np.random.default_rng(seed)
+
+    cancel.check("seeding")
+    d_in = _edt(m, sampling=vox)            # inside: µm to the nearest non-mask voxel
+    core = m & (d_in > core_erode_um) & free
+    del d_in
+    cancel.check("seeding")
+    d_out = _edt(~m, sampling=vox)          # outside: µm to the nearest mask voxel
+    far_enough = (~m) & (d_out >= bg_margin_um) & free
+    ring = far_enough & (d_out < bg_margin_um + ring_um)
+    beyond = far_enough & ~ring
+    del d_out, far_enough
+    cancel.check("seeding")
+
+    fg = _sample_spread_z(core, max_per_class, rng)
+    n_ring = max_per_class // 2
+    rg = _sample_spread_z(ring, n_ring, rng)
+    bg = _sample_spread_z(beyond, max_per_class - len(rg[0]), rng)
+    ann[fg] = 1
+    ann[rg] = 2
+    ann[bg] = 2
+    stats = {
+        "mask_voxels": int(m.sum()), "core_voxels": int(core.sum()),
+        "adhesion_seeded": int(len(fg[0])), "background_ring_seeded": int(len(rg[0])),
+        "background_far_seeded": int(len(bg[0])),
+        "kept_existing": int((~free).sum()),
+        "z_planes_with_adhesion_seeds": int(np.unique(fg[0]).size),
+        "params": {"core_erode_um": core_erode_um, "bg_margin_um": bg_margin_um,
+                   "ring_um": ring_um, "max_per_class": max_per_class, "seed": seed},
+    }
+    return ann, stats
+
+
+#: Minimum spacing between watershed seeds when splitting merged adhesions, in
+#: µm. 1.6 µm is the 5 voxels that were hard-coded, on the 0.325 µm grid the
+#: pipeline was tuned on — so `split_distance_vox` returns exactly 5 there and
+#: every 40x result is unchanged. At 20x (0.86 µm) the fixed 5 voxels was
+#: 4.3 µm, wider than the adhesions, and touching ones never got two seeds.
+SPLIT_MIN_DISTANCE_UM = 1.6
+
+
+def split_distance_vox(distance_um: float, voxel_um) -> int:
+    """`distance_um` as a whole number of voxels (≥ 1) on the isotropic grid."""
+    v = min(voxel_um) if hasattr(voxel_um, "__len__") else voxel_um
+    return max(1, int(round(float(distance_um) / float(v))))
+
+
 def instance_labels_3d(
     binary: np.ndarray,
     min_size_vox: int = 100,
     split_merged: bool = False,
     split_min_size: int = 1000,
+    split_min_distance_vox: int = 5,
 ) -> np.ndarray:
     """Connected components → optional watershed splitting → (Z, Y, X) int32.
+
+    `split_min_distance_vox` is the watershed seeds' minimum spacing; callers
+    that know the voxel size pass `split_distance_vox(SPLIT_MIN_DISTANCE_UM,
+    voxel)` so the spacing is physical. The default 5 is the old hard-coded
+    value, for callers that have no voxel size.
 
     Prints progress through the splitting loop: it is the slow phase and it is
     otherwise completely silent, so a long run is indistinguishable from a hang.
@@ -708,6 +839,7 @@ def instance_labels_3d(
         n_split = 0
 
         for k, cid in enumerate(large, 1):
+            cancel.check("adhesion splitting")
             if k % every == 0 or k == n_large:
                 print(f"  {k}/{n_large} examined, {n_split} divided",
                       flush=True)
@@ -717,7 +849,9 @@ def instance_labels_3d(
                 continue
             # Pad wider than peak_local_max's min_distance so an object's own
             # crop edge is never within the exclusion radius of its peaks.
-            pad = 6
+            # (6 when the spacing was fixed at 5; kept at 6 for any spacing ≤ 5
+            # so those crops — and their results — are unchanged.)
+            pad = max(6, int(split_min_distance_vox) + 1)
             z0, z1 = max(0, sl[0].start - pad), min(lbl.shape[0], sl[0].stop + pad)
             y0, y1 = max(0, sl[1].start - pad), min(lbl.shape[1], sl[1].stop + pad)
             x0, x1 = max(0, sl[2].start - pad), min(lbl.shape[2], sl[2].stop + pad)
@@ -728,8 +862,8 @@ def instance_labels_3d(
             # volume bounds, so it cannot rescue objects touching the stack
             # edge. Without both, those objects keep at most one seed and never
             # split.
-            coords = peak_local_max(dist, min_distance=5, labels=crop_mask,
-                                    exclude_border=False)
+            coords = peak_local_max(dist, min_distance=int(split_min_distance_vox),
+                                    labels=crop_mask, exclude_border=False)
             if len(coords) <= 1:
                 continue
             n_split += 1

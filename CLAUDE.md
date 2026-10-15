@@ -172,6 +172,12 @@ where the fibroblasts are.
   be converted instead of raising) and `channel_guard` (refuses a file whose ND2
   channel names differ from the mapping's) — [P63](docs/ISSUES.md#p63).
   Multi-position files are refused, not split.
+- `cancel.py` — the cooperative Stop: one process-wide flag, set by the Log
+  dock's Stop button, read by `check()` in the long loops (`rf.predict_proba`,
+  RF feature extraction, `instance_labels_3d`'s split, `seed_annotations`, the
+  Convert worker) and between "Run all" steps. Each stoppable action clears it
+  at its start; the chain's save hand-offs skip when it is set, so a stopped
+  step writes nothing. No Qt.
 - `fret.py` — **FROZEN** FRET math (background subtract, bleedthrough, force LUT).
 - `gpu.py` — optional cupy shim for windowed ndimage ops. Falls back to CPU on
   genuine OOM only; any other CUDA error raises.
@@ -196,7 +202,9 @@ where the fibroblasts are.
   make every reconstruction worse** — it is kept so the experiment stays
   re-runnable, not because it is a better input. Do not reach for it as an
   improvement without reading P28's History first.
-- `rf.py` — random-forest voxel classifier + instance labeling.
+- `rf.py` — random-forest voxel classifier + instance labeling, and
+  `seed_annotations` (starter labels from a mask — e.g. the Clover threshold —
+  for hand correction before training; they inherit the mask's errors).
 - `cell_mesh.py` — per-cell surfaces, vertex normals, quadric surface curvature.
 - `vessel_mesh.py` — vessel surface from the cadherin mask (polar / 2D alpha /
   3D alpha / poisson / alpha-3D-solid→poisson — see `vessel_poisson.py`).
@@ -328,7 +336,10 @@ where the fibroblasts are.
 - `measure_core.py` — headless per-adhesion measurement. `graph_columns` is
   **shared with the GUI worker** rather than copied — P11 records that P04 and
   P12 each had to be written twice. It now also owns the **export contract**
-  both paths write against: `CSV_COLUMNS` (the column order), `export_meta`
+  both paths write against — plus `adhesion_fret` (per-adhesion corrected FRET:
+  pool donor/FRET/acceptor over the adhesion, then one call to the frozen
+  `fret_correct`; the `fret_eff_adh` / `force_adh_pN` columns, called by both
+  the GUI Measure tab and `batch_measure`): `CSV_COLUMNS` (the column order), `export_meta`
   (the companion settings JSON) and `bs_per_z` (the per-plane background
   subtraction under `ratio_clover_ruby`, which existed as three byte-identical
   copies). The two *writers* stay separate on purpose — the GUI goes through
@@ -410,7 +421,10 @@ where the fibroblasts are.
 .tif inside `images/<experiment>/`, mapping saved there as `nd2_channels.json`,
 never touches `params.json`), `loader`, `display`, `nuclei`,
 `cadherin`, `cadherin_rf`, `cell_mesh`, `vessel_mesh`, `clover`, `adhesion_rf`,
-`roi`, `measure`, plus `widgets.py` (shared helpers), `logpanel.py`, and
+`roi`, `measure`, plus `widgets.py` (shared helpers), `logpanel.py`,
+`presets.py` (settings presets: walks every tab's magicgui controls — no
+per-tab registration — to save/apply them by name; used by the Load tab and
+`batch --preset`; per-image `save_path_widgets` are excluded), and
 `state.py` — **the session dict and the pipeline step table, shared with
 `batch.py`**. Both used to carry their own copy: the initial `state` dict was
 written out three times and the run-step list twice, so a step added to the

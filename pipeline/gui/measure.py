@@ -14,7 +14,7 @@ from scipy.spatial import KDTree
 
 from ..measure_core import (
     CSV_COLUMNS, NUCLEUS_MAP_SPLIT, NUCLEUS_MAP_UNSPLIT,
-    bs_per_z, export_meta, graph_columns, wall_columns,
+    adhesion_fret, bs_per_z, export_meta, graph_columns, wall_columns,
 )
 from ..saved_check import (
     curvature_notes, force_notes, mesh_notes, native_notes,
@@ -25,15 +25,48 @@ from .widgets import call_all, with_after
 
 N_WORKERS = max(1, (os.cpu_count() or 8) - 4)
 
-# The 2x4 panel grid at the size it is meant to be read at. The on-screen
+# ---- "Adhesion force (per adhesion)" layer --------------------------------- #
+# Each adhesion's voxels carry its `force_adh_pN`, encoded into [0, 1] for a
+# stepped colormap: 0 = background (fully transparent), 0.004-0.01 = adhesion
+# with no valid force (grey, = blank in the CSV), 0.01-1 = force from the 2nd to
+# the 98th percentile (viridis). An image layer rather than a per-label colour
+# dict, so it needs no GL texture per adhesion and low forces stay visible
+# (an intensity colormap would fade them into the black background).
+FORCE_LAYER = "Adhesion force (per adhesion)"
+
+
+def _force_layer_data(labels, ids, force):
+    f = np.asarray(force, dtype=np.float64)
+    fin = np.isfinite(f)
+    if not fin.any():
+        return None
+    lo, hi = (float(x) for x in np.percentile(f[fin], [2, 98]))
+    hi = hi if hi > lo else lo + 1e-6
+    table = np.zeros(int(labels.max()) + 1, dtype=np.float32)
+    table[np.asarray(ids)] = np.where(
+        fin, 0.01 + 0.99 * np.clip((f - lo) / (hi - lo), 0.0, 1.0), 0.007)
+    return table[labels], lo, hi
+
+
+def _force_colormap():
+    from matplotlib import colormaps
+    from napari.utils.colormaps import Colormap
+    vir = colormaps["viridis"](np.linspace(0, 1, 254))
+    colors = np.vstack([[0, 0, 0, 0], [0.6, 0.6, 0.6, 1.0], vir])
+    controls = np.concatenate([[0.0, 0.004, 0.01],
+                               np.linspace(0.01, 1.0, 255)[1:]])
+    return Colormap(colors=colors, controls=controls, interpolation="zero",
+                    name="adhesion_force")
+
+# The 3x4 panel grid at the size it is meant to be read at. The on-screen
 # canvas is resized to the dock by Qt, so this is only honoured on export;
 # it is what keeps a saved figure from inheriting a squashed dock.
-FIG_SIZE_IN = (17.0, 7.0)
+FIG_SIZE_IN = (17.0, 10.5)
 
 
 def build(state, viewer):
-    fig = Figure(figsize=(17, 7), tight_layout=True)
-    axes = fig.subplots(2, 4)
+    fig = Figure(figsize=FIG_SIZE_IN, tight_layout=True)
+    axes = fig.subplots(3, 4)
     canvas = FigureCanvasQTAgg(fig)
 
     measure_btn = PushButton(text="Measure adhesions")
@@ -89,6 +122,10 @@ def build(state, viewer):
         scale = state.get("scale", (1.0, 1.0, 1.0))
         clover_native = state.get("clover_raw_native")
         ruby_native = state.get("ruby_raw_native")
+        # Set by the loader only when FRET is on for this image.
+        fret_native = state.get("fret_raw_native")
+        fret_params = state.get("fret_params")
+        fret_lut = state.get("fret_lut")
         raw_voxel = tuple(state.get("raw_voxel_zyx_um", scale))
         curvature = (state.get("vessel_mesh_cache") or {}).get("curvature")
         graph = state.get("vessel_graph")
@@ -206,6 +243,21 @@ def build(state, viewer):
                                             int(ratio_mean.size))
             else:
                 ratio_mean = np.full(unique_ids.shape, np.nan, dtype=np.float32)
+
+            # Step 3c — per-adhesion corrected FRET, sum-then-correct. The
+            # shared implementation (measure_core.adhesion_fret), as for the
+            # graph and wall columns below.
+            eff_adh = np.full(unique_ids.shape, np.nan, dtype=np.float32)
+            force_adh = np.full(unique_ids.shape, np.nan, dtype=np.float32)
+            if (fret_params and fret_lut is not None and fret_native is not None
+                    and not ratio_bad):
+                e, f, fn = adhesion_fret(labels_n, clover_native, fret_native,
+                                         ruby_native, fret_params, fret_lut[0],
+                                         fret_lut[1], unique_ids, clover_bs,
+                                         ruby_bs)
+                eff_adh, force_adh = e.astype(np.float32), f.astype(np.float32)
+                notes += fn
+            force_layer = _force_layer_data(labels, unique_ids, force_adh)
 
             # Step 4 — all adhesion voxel coordinates
             adhesion_vox = np.argwhere(labels > 0)
@@ -334,6 +386,8 @@ def build(state, viewer):
                 "force_mean_pN":  force_mean,
                 "force_std_pN":   force_std,
                 "force_total_pN": force_mean * props["area"],
+                "fret_eff_adh":   eff_adh,
+                "force_adh_pN":   force_adh,
                 "dist_mesh_um":   mesh_min,
                 "dist_nuc_um":    nuc_min,
                 "nuc_id":         nuc_assignment,
@@ -353,13 +407,21 @@ def build(state, viewer):
                 **wcols,
                 # Not a metric column — `_export` selects by name.
                 "notes":          notes,
+                # Display only; popped by `_done` (never kept in state).
+                "_force_layer":   force_layer,
             }
 
         def _done(result):
             if result is None:
                 print("Measure: no adhesion instances found.", flush=True)
                 return
+            force_layer = result.pop("_force_layer", None)
             state["measure_result"] = result
+            if not state.get("headless"):
+                try:
+                    _show_force_layer(force_layer)
+                except Exception as exc:
+                    print(f"Measure: force layer skipped ({exc})", flush=True)
 
             # Report the silent degradations first — a blank column is easy to
             # miss in a CSV and impossible to miss here.
@@ -380,6 +442,16 @@ def build(state, viewer):
             fm_line = (f"  Force:           {fm_f.mean():.2f} ± "
                        f"{fm_f.std():.2f} pN" if fm_f.size else
                        "  Force:           n/a (FRET not configured)")
+            fa = np.asarray(result["force_adh_pN"], dtype=float)
+            fa_f = fa[np.isfinite(fa)]
+            if fa_f.size:
+                ea = np.asarray(result["fret_eff_adh"], dtype=float)
+                fm_line += (f"\n  Force (per adhesion, corrected): median "
+                            f"{np.median(fa_f):.2f} pN "
+                            f"[IQR {np.percentile(fa_f, 25):.2f}-"
+                            f"{np.percentile(fa_f, 75):.2f}], efficiency median "
+                            f"{np.nanmedian(ea):.3f}  ({fa_f.size}/{fa.size} "
+                            f"adhesions)")
 
             print(
                 f"Measured {n_adh} adhesions across {n_nuc} nuclei\n"
@@ -435,6 +507,23 @@ def build(state, viewer):
 
     measure_btn.changed.connect(_measure)
 
+    def _show_force_layer(fl):
+        if FORCE_LAYER in viewer.layers:
+            viewer.layers.remove(FORCE_LAYER)
+        if fl is None:
+            print("Measure: no corrected per-adhesion force (FRET off or not "
+                  "calibrated for this image) — force layer not drawn.",
+                  flush=True)
+            return
+        vol, lo, hi = fl
+        viewer.add_image(vol, name=FORCE_LAYER, scale=state.get("scale"),
+                         colormap=_force_colormap(), contrast_limits=(0.0, 1.0),
+                         blending="additive", rendering="mip")
+        print(f"Layer '{FORCE_LAYER}': colour = force_adh_pN from {lo:.1f} pN "
+              f"(dark purple) to {hi:.1f} pN (yellow), the 2nd-98th "
+              f"percentile; grey = adhesion with no valid corrected force.",
+              flush=True)
+
     def _kde_overlay(ax, data, color, ylabel):
         """Histogram with KDE overlay (density-normalised).
 
@@ -464,7 +553,8 @@ def build(state, viewer):
             pass
 
     def _draw_panels(target_axes, r):
-        """Draw the eight panels into `target_axes` (a 2x4 array).
+        """Draw the twelve panels into `target_axes` (a 3x4 array; row 3 is
+        the per-adhesion corrected FRET force).
 
         Shared by the on-screen canvas and the figure export so the file and
         the dock cannot show different plots -- the same doctrine as
@@ -526,6 +616,54 @@ def build(state, viewer):
         axes[1, 3].set_xlabel("Mean curvature (1/µm)")
         axes[1, 3].set_ylabel("Clover / Ruby ratio")
         axes[1, 3].set_title("Clover/Ruby vs curvature")
+
+        # ---- Row 3: per-adhesion corrected FRET force (force_adh_pN) ----
+        fa = np.asarray(r.get("force_adh_pN", np.full(len(fm), np.nan)), float)
+        ok = np.isfinite(fa)
+        ax = axes[2, 0]
+        ax.set_xlabel("Corrected force per adhesion (pN)")
+        ax.set_ylabel("Adhesions")
+        ax.set_title("Corrected force (colours = 3D layer)")
+        if ok.sum() > 1:
+            # Bars coloured on the same 2nd-98th percentile viridis scale as
+            # the "Adhesion force (per adhesion)" layer, so this panel is that
+            # layer's colour key.
+            from matplotlib import colormaps
+            lo, hi = np.percentile(fa[ok], [2, 98])
+            hi = hi if hi > lo else lo + 1e-6
+            n, edges, patches = ax.hist(fa[ok], bins=40)
+            for p, c in zip(patches, 0.5 * (edges[:-1] + edges[1:])):
+                p.set_facecolor(colormaps["viridis"](
+                    float(np.clip((c - lo) / (hi - lo), 0, 1))))
+            ax.axvline(np.median(fa[ok]), color="0.35", lw=1, ls="--")
+        else:
+            ax.text(0.5, 0.5, "no corrected force\n(FRET off / not calibrated)",
+                    ha="center", va="center", transform=ax.transAxes,
+                    color="0.45")
+
+        both = ok & np.isfinite(fm)
+        ax = axes[2, 1]
+        if both.sum() > 1:
+            ax.hexbin(fm[both], fa[both], gridsize=30, cmap="Blues", mincnt=1)
+            lim = [min(fm[both].min(), fa[both].min()),
+                   max(fm[both].max(), fa[both].max())]
+            ax.plot(lim, lim, color="0.45", lw=1, ls="--")   # y = x
+        ax.set_xlabel("Voxel-averaged force_mean_pN (pN)")
+        ax.set_ylabel("Corrected force_adh_pN (pN)")
+        ax.set_title("Corrected vs voxel-averaged (dashed: y = x)")
+
+        for ax, xkey, xlab, title in (
+                (axes[2, 2], "dist_mesh_um", "Distance to vessel mesh (µm)",
+                 "Corrected force vs mesh distance"),
+                (axes[2, 3], "centroid_z_um", "Depth: centroid z (µm)",
+                 "Corrected force vs depth")):
+            x = np.asarray(r[xkey], float)
+            m = ok & np.isfinite(x)
+            if m.sum() > 1:
+                ax.hexbin(x[m], fa[m], gridsize=30, cmap="Blues", mincnt=1)
+            ax.set_xlabel(xlab)
+            ax.set_ylabel("Corrected force (pN)")
+            ax.set_title(title)
 
     def _update_plots(r):
         _draw_panels(axes, r)
@@ -650,7 +788,7 @@ def build(state, viewer):
             # for this exact figure size, so nothing overlaps at 17x7.
             out = Figure(figsize=FIG_SIZE_IN, constrained_layout=True)
             FigureCanvasAgg(out)          # savefig needs a canvas attached
-            _draw_panels(out.subplots(2, 4), result)
+            _draw_panels(out.subplots(3, 4), result)
             title = state.get("image_name") or ""
             if title:
                 out.suptitle(title, fontsize=11)

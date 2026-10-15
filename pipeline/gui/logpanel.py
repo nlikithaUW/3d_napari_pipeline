@@ -15,6 +15,8 @@ from __future__ import annotations
 import sys
 
 from qtpy.QtCore import QObject, Signal, Slot
+
+from .. import cancel
 from qtpy.QtGui import QTextCursor
 from qtpy.QtWidgets import (
     QHBoxLayout,
@@ -119,7 +121,16 @@ class LogConsole(QWidget):
 
         clear = QPushButton("Clear")
         clear.clicked.connect(self._text.clear)
+        # Stop lives here, not on a tab, so it is reachable whatever tab is
+        # showing. Cooperative (pipeline/cancel.py): "Run all" stops between
+        # steps, and the long loops (RF predict/train, splitting, seeding,
+        # Convert) stop at their next check without writing a result.
+        stop = QPushButton("■ Stop")
+        stop.setToolTip("Stop the running step at its next check point and "
+                        "don't start the next step of Run all / Load all.")
+        stop.clicked.connect(self._stop)
         top = QHBoxLayout()
+        top.addWidget(stop)
         top.addWidget(clear)
         top.addStretch(1)
 
@@ -127,6 +138,13 @@ class LogConsole(QWidget):
         lay.setContentsMargins(2, 2, 2, 2)
         lay.addLayout(top)
         lay.addWidget(self._text)
+
+    @Slot()
+    def _stop(self) -> None:
+        cancel.request()
+        print("■ Stop requested — the running step stops at its next check "
+              "point (RF predict: within ~one z-chunk); Run all will not start "
+              "another step.", flush=True)
 
     @Slot(str)
     def append(self, s: str) -> None:
